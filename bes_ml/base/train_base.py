@@ -61,7 +61,7 @@ class _Trainer(object):
         # input data file and output directory
         input_data_file = Path(input_data_file)
         output_dir = Path(output_dir)
-        output_dir.mkdir(exist_ok=True)
+        output_dir.mkdir(exist_ok=True, parents=True)
 
         self.input_data_file = input_data_file
         self.output_dir = output_dir
