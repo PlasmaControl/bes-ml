@@ -590,12 +590,12 @@ class Multi_Features_Model(nn.Module):
         time_interval: int = 1,  # time domain slice interval (i.e. time[::interval])
         subwindow_size: int = -1,  # power of 2, or -1 (default) for full signal window
         dense_num_kernels: int = 8,
-        cnn_layer1_num_kernels: int = 8,
+        cnn_layer1_num_kernels: int = 0,
         cnn_layer1_kernel_time_size: int = 7,
         cnn_layer1_kernel_spatial_size: int = 3,
         cnn_layer1_maxpool_time_size: int = 2,
         cnn_layer1_maxpool_spatial_size: int = 2,
-        cnn_layer2_num_kernels: int = 8,
+        cnn_layer2_num_kernels: int = 0,
         cnn_layer2_kernel_time_size: int = 7,
         cnn_layer2_kernel_spatial_size: int = 3,
         cnn_layer2_maxpool_time_size: int = 2,
