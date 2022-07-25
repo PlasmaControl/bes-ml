@@ -1,0 +1,17 @@
+torch
+seaborn
+numpy
+h5py
+scikit-learn
+matplotlib
+scipy
+pytest
+pywt  # `pywavelets`
+torchinfo  # conda-forge or https://github.com/tyleryep/torchinfo
+pytorch_wavelets  # https://github.com/fbcotter/pytorch_wavelets
+
+#tqdm~=4.64.0
+#scikit-image
+#pandas~=1.4.2
+#Pillow~=9.1.1
+#fastdtw~=0.3.4
