@@ -1,7 +1,10 @@
 import sys
 import shutil
+
 import pytest
-import bes_ml.elm_regression.train
+
+from bes_ml import elm_classification
+from bes_ml import elm_regression
 
 
 RUN_DIR = 'run_dir'
@@ -15,7 +18,7 @@ DEFAULT_INPUT_ARGS = {
 
 def test_elm_regression_dense_features():
     input_args = DEFAULT_INPUT_ARGS.copy()
-    model = bes_ml.elm_regression.train.ELM_Regression_Trainer(
+    model = elm_regression.train.ELM_Regression_Trainer(
         output_dir=RUN_DIR+'/dense',
         dense_num_kernels=8,
         **input_args,
@@ -24,7 +27,7 @@ def test_elm_regression_dense_features():
 
 def test_elm_regression_cnn_features():
     input_args = DEFAULT_INPUT_ARGS.copy()
-    model = bes_ml.elm_regression.train.ELM_Regression_Trainer(
+    model = elm_regression.train.ELM_Regression_Trainer(
         output_dir=RUN_DIR+'/cnn',
         dense_num_kernels = 0,
         cnn_layer1_num_kernels = 8,

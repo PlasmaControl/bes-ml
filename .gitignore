@@ -30,3 +30,6 @@ __pycache__/
 *.code-workspace
 .spyderproject
 .spyproject
+
+# coverage.py artifacts
+.coverage*
