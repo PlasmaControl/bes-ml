@@ -1,8 +1,10 @@
 # BES ML
 
-ML models for DIII-D BES data
+**ML models for DIII-D BES data**
 
-To use this repo, clone it and add the repo directory to `$PYTHONPATH`.  To contribute to this repo, branch off of `main`, push the feature branch to Github, and submit PRs.  Prior to submitting PRs, pull and merge any updates from `main` branch and run test scripts.
+[This repo is the active version of the archived repo [https://github.com/PlasmaControl/bes-edgeml-models](https://github.com/PlasmaControl/bes-edgeml-models).]
+
+To use this repo, clone it and add the repo directory to `$PYTHONPATH`.  To contribute to this repo, branch off of `main`, push the feature branch to Github, and submit PRs.  Prior to submitting PRs, pull and merge any updates from `main` and run pytest.
 
 `bes_ml/` contains modules and classes to create, train, and analyze BES ML models.  `bes_ml/base/` contains the base code, and other directories under `bes_ml/` contain specific applications that import `bes_ml/base/`.  Each application directory should contain `train.py` and `analyze.py` modules.  Example usage:
 
