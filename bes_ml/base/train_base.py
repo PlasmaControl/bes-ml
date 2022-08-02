@@ -573,7 +573,7 @@ class _Trainer(object):
                 loss = torch.div(loss, labels)
             # reduce losses
             loss = loss.mean()  # batch loss
-            losses = np.append(losses, loss.detach().numpy())  # track batch losses
+            losses = np.append(losses, loss.detach().cpu().numpy())  # track batch losses
             # backpropagate
             loss.backward()
             # update model with optimization step
@@ -606,7 +606,7 @@ class _Trainer(object):
             if self.inverse_weight_label:
                 loss = torch.div(loss, labels)
             loss = loss.mean()
-            losses = np.append(losses, loss.detach().numpy())
+            losses = np.append(losses, loss.detach().cpu().numpy())
             all_labels.append(labels.cpu().numpy())
             all_predictions.append(predictions.cpu().numpy())
             if (i_batch+1)%self.minibatch_interval==0:
