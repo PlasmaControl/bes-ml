@@ -6,19 +6,19 @@ class ELM_Dataset(torch.utils.data.Dataset):
 
     def __init__(
         self,
-        signals: np.ndarray, 
-        labels: np.ndarray, 
-        sample_indices: np.ndarray, 
-        window_start: np.ndarray,
-        signal_window_size: int,
-        label_look_ahead: int = 0,  # =0 for time-to-ELM regression; >=0 for classification prediction
+        signals: np.ndarray = None, 
+        labels: np.ndarray = None, 
+        sample_indices: np.ndarray = None, 
+        window_start: np.ndarray = None,
+        signal_window_size: int = None,
+        prediction_horizon: int = None,  # =0 for time-to-ELM regression; >=0 for classification prediction
     ) -> None:
         self.signals = signals
         self.labels = labels
         self.sample_indices = sample_indices
         self.window_start = window_start
         self.signal_window_size = signal_window_size
-        self.label_look_ahead = label_look_ahead
+        self.prediction_horizon = prediction_horizon if prediction_horizon is not None else 0
 
     def __len__(self):
         return self.sample_indices.size
@@ -35,7 +35,7 @@ class ELM_Dataset(torch.utils.data.Dataset):
         label = self.labels[
             time_idx
             + self.signal_window_size
-            + self.label_look_ahead
+            + self.prediction_horizon
             - 1
         ]
         label = torch.as_tensor(label)

@@ -31,5 +31,6 @@ __pycache__/
 .spyderproject
 .spyproject
 
-# coverage.py artifacts
+# testing, coverage, etc
+pytest.ini
 .coverage*

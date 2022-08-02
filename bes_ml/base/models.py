@@ -12,10 +12,8 @@ from pytorch_wavelets.dwt.transform1d import DWT1DForward
 
 try:
     from . import dct
-    from . import utilities
 except ImportError:
     from bes_ml.base import dct
-    from bes_ml.base import utilities
 
 class _Base_Features(nn.Module):
 
@@ -37,8 +35,6 @@ class _Base_Features(nn.Module):
             self.logger = logging.getLogger(__name__)
             self.logger.setLevel(logging.INFO)
             self.logger.addHandler(logging.StreamHandler())
-
-        utilities._print_inputs(cls=_Base_Features, locals_copy=locals().copy(), logger=self.logger)
 
         # spatial maxpool
         self.spatial_maxpool_size = spatial_maxpool_size
@@ -115,8 +111,6 @@ class Dense_Features(_Base_Features):
         """
         super().__init__(**kwargs)
 
-        utilities._print_inputs(cls=self.__class__, locals_copy=locals().copy(), logger=self.logger)
-
         # filters per subwindow
         self.num_kernels = dense_num_kernels
 
@@ -176,8 +170,6 @@ class CNN_Features(_Base_Features):
         **kwargs,
     ):
         super().__init__(**kwargs)
-
-        utilities._print_inputs(cls=self.__class__, locals_copy=locals().copy(), logger=self.logger)
 
         # CNN only valid with subwindow_size == time_points == signal_window_size
         assert self.subwindow_size == self.signal_window_size
@@ -319,8 +311,6 @@ class FFT_Features(_Base_Features):
         """
         super().__init__(**kwargs)
 
-        utilities._print_inputs(cls=self.__class__, locals_copy=locals().copy(), logger=self.logger)
-
         self.fft_nbins = fft_nbins
         assert np.log2(self.fft_nbins) % 1 == 0  # ensure power of 2
 
@@ -415,8 +405,6 @@ class DCT_Features(_Base_Features):
         """
         super().__init__(**kwargs)
 
-        utilities._print_inputs(cls=self.__class__, locals_copy=locals().copy(), logger=self.logger)
-
         self.dct_nbins = dct_nbins
         assert np.log2(self.dct_nbins) % 1 == 0  # ensure power of 2
 
@@ -485,8 +473,6 @@ class DWT_Features(_Base_Features):
         **kwargs,
     ):
         super().__init__(**kwargs)
-
-        utilities._print_inputs(cls=self.__class__, locals_copy=locals().copy(), logger=self.logger)
 
         self.dwt_wavelet = dwt_wavelet
         self.dwt_level = dwt_level
@@ -583,7 +569,7 @@ class Multi_Features_Model(nn.Module):
         negative_slope: float = 1e-3,  # relu negatuve slope
         dropout_rate: float = 0.1,
         logger: logging.Logger = None,
-        model_inputs_file: Union[str, Path] = 'model_inputs.yaml',
+        # model_inputs_file: Union[str, Path] = 'model_inputs.yaml',
         # inputs for `*Features` classes
         signal_window_size: int = 64,  # power of 2; ~16-512
         spatial_maxpool_size: int = 1,  # 1 (default, no spatial maxpool), 2, or 4
@@ -635,14 +621,6 @@ class Multi_Features_Model(nn.Module):
                 if p_name == 'kwargs': continue
                 assert p_name in class_parameters, f"{self.__class__.__name__} is missing parameter {p_name}"
                 feature_kwargs[p_name] = locals_copy[p_name]
-
-        # save and print inputs
-        utilities._print_inputs(cls=self.__class__, locals_copy=locals_copy, logger=logger)
-        utilities._save_inputs_to_yaml(
-            cls=self.__class__, 
-            locals_copy=locals_copy,
-            filename=Path(model_inputs_file),
-        )
 
         self.dense_features = Dense_Features(**feature_kwargs) if dense_num_kernels > 0 else None
         self.fft_features = FFT_Features(**feature_kwargs) if fft_num_kernels > 0 else None
