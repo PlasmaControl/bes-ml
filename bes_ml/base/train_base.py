@@ -1,12 +1,13 @@
 # python library imports
 from pathlib import Path
 import logging
-from typing import Union, Iterable, Tuple
+from typing import Union, Iterable, Tuple, Any
 import time
 import sys
 import io
 import pickle
 import inspect
+import contextlib
 
 # 3rd-party package imports
 import numpy as np
@@ -87,7 +88,7 @@ class _Trainer(object):
         self.batches_per_print = batches_per_print
         self.model_kwargs = model_kwargs
 
-        self.regression = None  # set in subclass
+        self.is_regression = None  # set in subclass
 
         # create logger (logs to file and terminal)
         self.logger = None
@@ -149,7 +150,7 @@ class _Trainer(object):
         self.threshold = None  # set with kwarg
         self.inverse_weight_label = None  # not applicable for classification
         self.log_time = None  # not applicable for classification
-        if self.regression:
+        if self.is_regression:
             # regression model (e.g. time to ELM onset)
             self.loss_function = torch.nn.MSELoss(reduction="none")
             self.score_function = metrics.r2_score
@@ -322,7 +323,7 @@ class _Trainer(object):
         packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype="int")
         packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
 
-        if not self.regression:
+        if not self.is_regression:
             packaged_valid_t0_indices = self._check_for_balanced_data(
                 packaged_labels=packaged_labels,
                 packaged_valid_t0_indices=packaged_valid_t0_indices,
@@ -448,7 +449,7 @@ class _Trainer(object):
         }
         checkpoint_file = self.output_dir / self.checkpoint_file
 
-        if not self.regression:
+        if not self.is_regression:
             self.results['roc_scores'] = np.empty(0)
 
         # send model to device
@@ -464,7 +465,7 @@ class _Trainer(object):
             self.logger.info(f"Ep {i_epoch+1:03d}: begin")
             
             train_loss = self._train_epoch()
-            if self.regression:
+            if self.is_regression:
                 train_loss = np.sqrt(train_loss)
 
             self.results['train_loss'] = np.append(
@@ -472,8 +473,9 @@ class _Trainer(object):
                 train_loss,
             )
 
-            valid_loss, predictions, true_labels = self._evaluate_validation_data()
-            if self.regression:
+            valid_loss, predictions, true_labels = self._validation_epoch()
+            if self.is_regression:
+                # regression loss is MSE, so take sqrt to get units of time
                 valid_loss = np.sqrt(valid_loss)
 
             self.results['valid_loss'] = np.append(
@@ -496,8 +498,8 @@ class _Trainer(object):
                 score,
             )
 
-            if not self.regression:
-                # ROC-AUC score
+            if not self.is_regression:
+                # ROC-AUC score for classification
                 roc_score = metrics.roc_auc_score(
                     true_labels,
                     predictions,
@@ -539,7 +541,7 @@ class _Trainer(object):
             tmp += f"train loss {train_loss:.3f}  "
             tmp += f"val loss {valid_loss:.3f}  "
             tmp += f"score {score:.3f}  "
-            if not self.regression:
+            if not self.is_regression:
                 tmp += f"roc {roc_score:.3f}  "
             tmp += f"ep time {time.time()-t_start_epoch:.1f} s "
             tmp += f"(total time {time.time()-t_start_training:.1f} s)"
@@ -548,72 +550,122 @@ class _Trainer(object):
         self.logger.info(f"End training loop")
         self.logger.info(f"Elapsed time {time.time()-t_start_training:.1f} s")
 
-    def _train_epoch(self) -> float:
-        # train mode
-        self.model.train()
-        # accumulate batch-wise losses
-        losses = np.array(0)
-        # loop over batches
-        for i_batch, (signal_windows, labels) in enumerate(self.train_data_loader):
-            if (i_batch+1)%self.minibatch_interval == 0:
-                t_start_minibatch = time.time()
-            # reset gradients
-            self.optimizer.zero_grad()
-            # send data to device
-            signal_windows = signal_windows.to(self.device)
-            labels = labels.to(self.device)
-            # calc predictions
-            predictions = self.model(signal_windows)
-            # calc loss
-            loss = self.loss_function(
-                predictions.squeeze(),
-                labels.type_as(predictions),
-            )
-            if self.inverse_weight_label:
-                loss = torch.div(loss, labels)
-            # reduce losses
-            loss = loss.mean()  # batch loss
-            losses = np.append(losses, loss.detach().cpu().numpy())  # track batch losses
-            # backpropagate
-            loss.backward()
-            # update model with optimization step
-            self.optimizer.step()
-            if (i_batch+1)%self.minibatch_interval == 0:
-                tmp =  f"  Train batch {i_batch+1:05d}/{len(self.train_data_loader)}  "
-                tmp += f"batch loss {loss:.3f} (avg loss {losses.mean():.3f})  "
-                tmp += f"minibatch time {time.time()-t_start_minibatch:.3f} s"
-                self.logger.info(tmp)
-        return losses.mean()  # return avg. batch loss
-
-    def _evaluate_validation_data(self) -> Tuple:
-        # evaluate mode
+    def _single_epoch_batch_loop(
+        self,
+        is_train: bool = True,  # True for train, false for evaluation
+        data_loader: torch.utils.data.DataLoader = None,  # train or validation data loader
+    ) -> Any:
         losses = np.array(0)
         all_predictions = []
         all_labels = []
-        for i_batch, (signal_windows, labels) in enumerate(self.validation_data_loader):
-            if (i_batch+1)%self.minibatch_interval == 0:
-                t_start_minibatch = time.time()
-            signal_windows = signal_windows.to(self.device)
-            labels = labels.to(self.device)
-            with torch.no_grad():
+        if is_train:
+            self.model.train()
+            context = contextlib.nullcontext()
+        else:
+            self.model.eval()
+            context = torch.no_grad()
+        with context:
+            for i_batch, (signal_windows, labels) in enumerate(data_loader):
+                if (i_batch+1)%self.minibatch_interval == 0:
+                    t_start_minibatch = time.time()
+                if is_train:
+                    # reset grads
+                    self.optimizer.zero_grad()
+                signal_windows = signal_windows.to(self.device)
+                labels = labels.to(self.device)
                 predictions = self.model(signal_windows)
-            if not self.regression:
-                predictions = predictions.sigmoid()
-            loss = self.loss_function(
-                predictions.squeeze(),
-                labels.type_as(predictions),
+                if not is_train and not self.is_regression:
+                    # if evaluation mode and classificaiton model,
+                    # apply sigmoid to get [0,1] probability
+                    predictions = predictions.sigmoid()
+                loss = self.loss_function(
+                    predictions.squeeze(),
+                    labels.type_as(predictions),
+                )
+                if self.is_regression and self.inverse_weight_label:
+                    loss = torch.div(loss, labels)
+                loss = loss.mean()  # batch loss
+                losses = np.append(losses, loss.detach().cpu().numpy())  # track batch losses
+                all_labels.append(labels.cpu().numpy())
+                all_predictions.append(predictions.cpu().numpy())
+                if is_train:
+                    # backpropagate and take optimizer step
+                    loss.backward()
+                    self.optimizer.step()
+                if (i_batch+1)%self.minibatch_interval == 0:
+                    tmp =  f"  Train batch {i_batch+1:05d}/{len(self.train_data_loader)}  "
+                    tmp += f"batch loss {loss:.3f} (avg loss {losses.mean():.3f})  "
+                    tmp += f"minibatch time {time.time()-t_start_minibatch:.3f} s"
+                    self.logger.info(tmp)
+        if is_train:
+            return_value = losses.mean()
+        else:
+            return_value = (
+                losses.mean(),
+                np.concatenate(all_labels),
+                np.concatenate(all_predictions),
             )
-            if self.inverse_weight_label:
-                loss = torch.div(loss, labels)
-            loss = loss.mean()
-            losses = np.append(losses, loss.detach().cpu().numpy())
-            all_labels.append(labels.cpu().numpy())
-            all_predictions.append(predictions.cpu().numpy())
-            if (i_batch+1)%self.minibatch_interval==0:
-                tmp =  f"  Valid batch {i_batch+1:05d}/{len(self.validation_data_loader)}  "
-                tmp += f"batch loss {loss:.3f} (avg loss {losses.mean():.3f})  "
-                tmp += f"minibatch time {time.time()-t_start_minibatch:.3f} s"
-                self.logger.info(tmp)
+        return return_value  # return avg. batch loss
+
+    def _train_epoch(self) -> float:
+        self.model.train()
+        losses = np.array(0)
+        with contextlib.nullcontext():
+            for i_batch, (signal_windows, labels) in enumerate(self.train_data_loader):
+                if (i_batch+1)%self.minibatch_interval == 0:
+                    t_start_minibatch = time.time()
+                self.optimizer.zero_grad()
+                signal_windows = signal_windows.to(self.device)
+                labels = labels.to(self.device)
+                predictions = self.model(signal_windows)
+                loss = self.loss_function(
+                    predictions.squeeze(),
+                    labels.type_as(predictions),
+                )
+                if self.inverse_weight_label:
+                    loss = torch.div(loss, labels)
+                loss = loss.mean()  # batch loss
+                losses = np.append(losses, loss.detach().cpu().numpy())  # track batch losses
+                # backpropagate and take optimizer step
+                loss.backward()
+                self.optimizer.step()
+                if (i_batch+1)%self.minibatch_interval == 0:
+                    tmp =  f"  Train batch {i_batch+1:05d}/{len(self.train_data_loader)}  "
+                    tmp += f"batch loss {loss:.3f} (avg loss {losses.mean():.3f})  "
+                    tmp += f"minibatch time {time.time()-t_start_minibatch:.3f} s"
+                    self.logger.info(tmp)
+        return losses.mean()  # return avg. batch loss
+
+    def _validation_epoch(self) -> Tuple:
+        # evaluate mode
+        self.model.eval()
+        losses = np.array(0)
+        all_predictions = []
+        all_labels = []
+        with torch.no_grad():
+            for i_batch, (signal_windows, labels) in enumerate(self.validation_data_loader):
+                if (i_batch+1)%self.minibatch_interval == 0:
+                    t_start_minibatch = time.time()
+                signal_windows = signal_windows.to(self.device)
+                labels = labels.to(self.device)
+                predictions = self.model(signal_windows)
+                if not self.is_regression:
+                    predictions = predictions.sigmoid()
+                loss = self.loss_function(
+                    predictions.squeeze(),
+                    labels.type_as(predictions),
+                )
+                if self.inverse_weight_label:
+                    loss = torch.div(loss, labels)
+                loss = loss.mean()
+                losses = np.append(losses, loss.detach().cpu().numpy())
+                all_labels.append(labels.cpu().numpy())
+                all_predictions.append(predictions.cpu().numpy())
+                if (i_batch+1)%self.minibatch_interval==0:
+                    tmp =  f"  Valid batch {i_batch+1:05d}/{len(self.validation_data_loader)}  "
+                    tmp += f"batch loss {loss:.3f} (avg loss {losses.mean():.3f})  "
+                    tmp += f"minibatch time {time.time()-t_start_minibatch:.3f} s"
+                    self.logger.info(tmp)
         all_labels = np.concatenate(all_labels)
         all_predictions = np.concatenate(all_predictions)
         return losses.mean(), all_predictions, all_labels

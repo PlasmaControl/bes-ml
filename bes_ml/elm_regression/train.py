@@ -95,7 +95,7 @@ class ELM_Regression_Trainer(_Trainer):
             filename=self.output_dir/self.inputs_file,
         )
 
-        self.regression = True
+        self.is_regression = True
         self._set_regression_or_classification_defaults()
 
         # subclass attributes
