@@ -1,10 +1,12 @@
 # BES ML
 
-ML models for DIII-D BES data
+**ML models for DIII-D BES data**
 
-To use this repo, clone it and add the repo directory to `$PYTHONPATH`.  To contribute to this repo, branch off of `main`, push the feature branch to Github, and submit PRs.  Prior to submitting PRs, pull and merge any updates from `main` branch and run test scripts.
+[This repo is the active version of the archived repo [https://github.com/PlasmaControl/bes-edgeml-models](https://github.com/PlasmaControl/bes-edgeml-models).]
 
-`bes_ml/` contains modules and classes to create, train, and analyze BES ML models.  `bes_ml/base/` contains the base code, and other directories under `bes_ml/` contain specific applications that import `bes_ml/base/`.  Each application directory should contain `train.py` and `analyze.py` modules.  Example usage:
+To use this repo, clone it and add the repo directory to `$PYTHONPATH`.  To contribute to this repo, branch off of `main`, push the feature branch to Github, and submit PRs.  Prior to submitting PRs, pull and merge any updates from `main` and run pytest.
+
+`bes_ml/` contains modules and classes to create, train, and analyze BES ML models.  `bes_ml.base` contains the base code, and other modules under `bes_ml` contain specific applications that import `bes_ml.base`.  Each application directory should contain `train.py` and `analyze.py` modules.  Example usage:
 
 ```python
 from bes_ml.elm_classification.train import ELM_Classification_Trainer
@@ -13,6 +15,12 @@ model = ELM_Classification_Trainer()
 model.train()
 ```
 
-Other exmaples are in `if __name__ ...` blocks in `train.py` modules.
+Other exmaples are in `if __name__ == ...` blocks in `train.py` modules.
+
+The primary code objects are:
+
+- Base class `_Trainer` in `bes_ml.base.train` and application-specific subclasses like `ELM_Classification_Trainer` in `bes.elm_classification.train`.
+- Model class `Multi_Features_Model` in `bes_ml.base.models`.  `Multi_Features_Model` is composed of different types of features such as CNN features, dense features, FFT features, etc.  All feature types are a subclass of `_Base_Features` in `bes_ml.base.models`.
 
 `bes_data/` contains small sample datasets (~10 MB HDF5 files) to assist with code development and tools to package BES data on the GA cluster.  `test/` contains pytest tests, and additional examples can be inferred from the test scripts.
+
