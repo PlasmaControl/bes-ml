@@ -6,12 +6,8 @@ import numpy as np
 from bes_data.sample_data import sample_elm_data_file
 try:
     from ..base.train_base import _Trainer
-    from ..base import utilities
-    from ..base.models import Multi_Features_Model
 except ImportError:
     from bes_ml.base.train_base import _Trainer
-    from bes_ml.base import utilities
-    from bes_ml.base.models import Multi_Features_Model
 
 
 class ELM_Regression_Trainer(_Trainer):
@@ -88,9 +84,11 @@ class ELM_Regression_Trainer(_Trainer):
         super().__init__(**kwargs_for_parent_class)
 
         # save and print inputs
-        utilities._print_inputs(cls=self.__class__, locals_copy=locals_copy, logger=self.logger)
-        utilities._save_inputs_to_yaml(
-            cls=self.__class__, 
+        self._print_inputs(
+            locals_copy=locals_copy, 
+            logger=self.logger,
+        )
+        self._save_inputs_to_yaml(
             locals_copy=locals_copy,
             filename=self.output_dir/self.inputs_file,
         )

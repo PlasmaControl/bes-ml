@@ -24,11 +24,9 @@ from bes_data.sample_data import sample_elm_data_file
 try:
     from .models import Multi_Features_Model
     from .data import ELM_Dataset
-    from . import utilities
 except ImportError:
     from bes_ml.base.models import Multi_Features_Model
     from bes_ml.base.data import ELM_Dataset
-    from bes_ml.base import utilities
 
 class _Trainer(object):
 
@@ -121,6 +119,47 @@ class _Trainer(object):
                     kwargs_for_parent_class[parameter_name] = locals_copy[parameter_name]
         return kwargs_for_parent_class
 
+    def _print_inputs(
+        self,
+        locals_copy: dict = None,
+        logger: logging.Logger = None,
+    ) -> None:
+        # print kwargs from __init__
+        logger.info(f"Class `{self.__class__.__name__}` parameters:")
+        class_parameters = inspect.signature(self.__class__).parameters
+        for p_name in class_parameters:
+            if p_name == 'logger': continue
+            local_value = locals_copy[p_name]
+            default_value = class_parameters[p_name].default
+            if isinstance(local_value, dict):
+                local_value = default_value = '<dict>'
+            if local_value == default_value:
+                logger.info(f"  {p_name:24s}:  {local_value}")
+            else:
+                logger.info(f"  {p_name:24s}:  {local_value}  (default {default_value})")
+
+    def _save_inputs_to_yaml(
+        self, 
+        locals_copy: dict = None,
+        filename: Union[str,Path] = None,
+    ) -> None:
+        """
+        Save locals from __init__() call to yaml.
+        """
+        filename = Path(filename)
+        parameters = inspect.signature(self.__class__).parameters
+        inputs = {}
+        for p_name in parameters:
+            if p_name == 'logger': continue
+            value = locals_copy[p_name]
+            inputs[p_name] = value if not isinstance(value, Path) else value.as_posix()
+        with filename.open('w') as parameters_file:
+            yaml.safe_dump(
+                inputs,
+                parameters_file,
+                default_flow_style=False,
+                sort_keys=False,
+            )
 
     def _create_logger(self) -> None:
         """
