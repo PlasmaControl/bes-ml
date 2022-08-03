@@ -1,5 +1,5 @@
 import numpy as np
-import torch
+import torch.utils.data
 
 
 class ELM_Dataset(torch.utils.data.Dataset):
@@ -41,3 +41,20 @@ class ELM_Dataset(torch.utils.data.Dataset):
         label = torch.as_tensor(label)
 
         return signal_window, label
+
+
+def elm_data_loader(
+    dataset: ELM_Dataset = None,
+    batch_size: int = 64,
+    shuffle: bool = False,
+    num_workers: int = 1,
+) -> torch.utils.data.DataLoader:
+    data_loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=True,
+    )
+    return data_loader

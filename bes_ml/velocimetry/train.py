@@ -1,10 +1,10 @@
 try:
-    from ..base.train_base import _Trainer
+    from ..base.train_base import _Trainer_Base
 except ImportError:
-    from bes_ml.base.train_base import _Model
+    from bes_ml.base.train_base import _Trainer_Base
 
 
-class Velocimetry_Model(_Trainer):
+class Velocimetry_Model(_Trainer_Base):
 
     def __init__(self) -> None:
         pass
