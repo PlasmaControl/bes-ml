@@ -23,12 +23,12 @@ import yaml
 from bes_data.sample_data import sample_elm_data_file
 try:
     from .models import Multi_Features_Model
-    from .data import ELM_Dataset
+    from .data import ELM_Dataset, elm_data_loader
 except ImportError:
     from bes_ml.base.models import Multi_Features_Model
-    from bes_ml.base.data import ELM_Dataset
+    from bes_ml.base.data import ELM_Dataset, elm_data_loader
 
-class _Trainer(object):
+class _Trainer_Base(object):
 
     def __init__(
         self,
@@ -98,21 +98,21 @@ class _Trainer(object):
         Ensure subclass call signature contains all parameters in
         parent class signature and model class signature
         """
-        assert self.__class__ is not _Trainer
+        assert self.__class__ is not _Trainer_Base
         subclass_parameters = inspect.signature(self.__class__).parameters
-        for cls in [_Trainer, Multi_Features_Model]:
+        for cls in [_Trainer_Base, Multi_Features_Model]:
             class_parameters = inspect.signature(cls).parameters
             for param_name in class_parameters:
-                if param_name in ['model_kwargs', 'logger']:
+                if param_name in ['model_kwargs', 'logger', 'kwargs']:
                     continue
                 assert param_name in subclass_parameters, \
                     [f"Subclass {self.__class__.__name__} "
                      f"missing parameter {param_name} from class {cls.__name__}."]
 
     def _create_parent_class_inputs(self, locals_copy: dict = None) -> dict:
-        assert self.__class__ is not _Trainer
+        assert self.__class__ is not _Trainer_Base
         kwargs_for_parent_class = {}
-        for cls in [_Trainer, Multi_Features_Model]:
+        for cls in [_Trainer_Base, Multi_Features_Model]:
             class_parameters = inspect.signature(cls).parameters
             for parameter_name in class_parameters:
                 if parameter_name in locals_copy:
@@ -208,7 +208,6 @@ class _Trainer(object):
         # make model
         self.model = Multi_Features_Model(
             logger=self.logger, 
-            # model_inputs_file=self.output_dir/self.model_inputs_file,
             signal_window_size=self.signal_window_size,
             **self.model_kwargs,
         )
@@ -217,7 +216,6 @@ class _Trainer(object):
 
         self.input_size = None
         self._print_model_summary()
-
 
     def _finish_subclass_initialization(self) -> None:
         """
@@ -240,13 +238,37 @@ class _Trainer(object):
         if self.test_data_file and self.fraction_test>0.0:
             self._save_test_data()
         
-        self.train_dataset = None
-        self.validation_dataset = None
-        self._make_datasets()
+        # make pytorch `dataset` for train and validation data
+        self.train_dataset = ELM_Dataset(
+            signals = self.train_data[0],
+            labels = self.train_data[1],
+            sample_indices = self.train_data[2],
+            window_start = self.train_data[3],
+            signal_window_size = self.signal_window_size,
+            prediction_horizon = self.prediction_horizon,
+        )
+        self.validation_dataset = ELM_Dataset(
+            signals = self.validation_data[0],
+            labels = self.validation_data[1],
+            sample_indices = self.validation_data[2],
+            window_start = self.validation_data[3],
+            signal_window_size = self.signal_window_size,
+            prediction_horizon = self.prediction_horizon,
+        )
 
-        self.train_data_loader = None
-        self.validation_data_loader = None
-        self._make_data_loaders()
+        # make pytorch `dataloader` for train and validation data
+        self.train_data_loader = elm_data_loader(
+            dataset = self.train_dataset,
+            batch_size = self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+        )
+        self.validation_data_loader = elm_data_loader(
+            dataset = self.validation_dataset,
+            batch_size = self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+        )
 
         self.results = None
 
@@ -309,7 +331,7 @@ class _Trainer(object):
         """
         test_data_file = self.output_dir / self.test_data_file
         self.logger.info(f"Test data file: {test_data_file}")
-        with test_data_file.open('wb') as f:
+        with test_data_file.open('wb') as file:
             pickle.dump(
                 {
                     "signals": self.test_data[0],
@@ -318,7 +340,7 @@ class _Trainer(object):
                     "window_start": self.test_data[3],
                     "elm_indices": self.test_data[4],
                 },
-                f,
+                file,
             )
         self.logger.info(f"  File size: {test_data_file.stat().st_size/1e6:.1f} MB")
 
@@ -398,39 +420,9 @@ class _Trainer(object):
         # must implement in subclass
         raise NotImplementedError
 
-    def _make_datasets(self) -> None:
-        self.train_dataset = ELM_Dataset(
-            *self.train_data[0:4], 
-            signal_window_size = self.signal_window_size,
-            prediction_horizon = self.prediction_horizon,
-        )
-        self.validation_dataset = ELM_Dataset(
-            *self.validation_data[0:4], 
-            signal_window_size = self.signal_window_size,
-            prediction_horizon = self.prediction_horizon,
-        )
-
     def _get_valid_indices(self) -> None:
         # must implement in subclass
         raise NotImplementedError
-
-    def _make_data_loaders(self) -> None:
-        self.train_data_loader = torch.utils.data.DataLoader(
-            self.train_dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers,
-            pin_memory=True,
-            drop_last=True,
-        )
-        self.validation_data_loader = torch.utils.data.DataLoader(
-            self.validation_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=True,
-            drop_last=True,
-        )
 
     def _print_model_summary(self) -> None:
         self.logger.info("MODEL SUMMARY")
@@ -662,4 +654,4 @@ class _Trainer(object):
 
 
 if __name__=='__main__':
-    m = _Trainer()
+    m = _Trainer_Base()

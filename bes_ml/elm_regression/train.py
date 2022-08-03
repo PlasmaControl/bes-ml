@@ -5,12 +5,12 @@ import numpy as np
 
 from bes_data.sample_data import sample_elm_data_file
 try:
-    from ..base.train_base import _Trainer
+    from ..base.train_base import _Trainer_Base
 except ImportError:
-    from bes_ml.base.train_base import _Trainer
+    from bes_ml.base.train_base import _Trainer_Base
 
 
-class ELM_Regression_Trainer(_Trainer):
+class ELM_Regression_Trainer(_Trainer_Base):
 
     # __init__ must have exact copy of all kwargs from parent class
     def __init__(

@@ -1,7 +1,5 @@
 import logging
 import inspect
-from typing import Union
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -593,6 +591,7 @@ class Multi_Features_Model(nn.Module):
         dwt_num_kernels: int = 0,
         dwt_wavelet: str = 'db4',
         dwt_level: int = -1,
+        **kwargs,
     ):
         super().__init__()
 
