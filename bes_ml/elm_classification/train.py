@@ -199,7 +199,7 @@ if __name__=='__main__':
     model = Trainer(
         batch_size=32, 
         n_epochs=4,
-        minibatch_interval=50, 
+        minibatch_interval=50,
         fraction_validation=0.1,
         fraction_test=0.4,
     )
