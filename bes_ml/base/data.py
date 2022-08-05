@@ -16,7 +16,7 @@ class ELM_Dataset(torch.utils.data.Dataset):
         self.signals = signals
         self.labels = labels
         self.sample_indices = sample_indices
-        self.window_start = window_start
+        # self.window_start = window_start
         self.signal_window_size = signal_window_size
         self.prediction_horizon = prediction_horizon if prediction_horizon is not None else 0
 
@@ -48,13 +48,15 @@ def elm_data_loader(
     batch_size: int = 64,
     shuffle: bool = False,
     num_workers: int = 1,
+    drop_last: bool = True,
+    pin_memory: bool = True,
 ) -> torch.utils.data.DataLoader:
     data_loader = torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        pin_memory=True,
-        drop_last=True,
+        pin_memory=pin_memory,
+        drop_last=drop_last,
     )
     return data_loader

@@ -132,9 +132,9 @@ if __name__=='__main__':
     model = ELM_Regression_Trainer(
         batch_size=32, 
         minibatch_interval=50, 
-        max_elms=5,
+        # max_elms=5,
         fraction_validation=0.2,
-        fraction_test=0.2,
+        fraction_test=0.4,
         log_time=True,
         inverse_weight_label=True,
     )
