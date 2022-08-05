@@ -26,6 +26,11 @@ class Analyzer(_Analyzer_Base):
             inputs_file=inputs_file,
             device=device,
         )
+        
+        self.is_regression = False
+        self._set_regression_or_classification_defaults()
+
+        self._restore_test_data()
 
         self.roc_scores = None
 
