@@ -262,12 +262,16 @@ class _Trainer_Base(object):
             batch_size = self.batch_size,
             shuffle=True,
             num_workers=self.num_workers,
+            pin_memory=True,
+            drop_last=True,
         )
         self.validation_data_loader = elm_data_loader(
             dataset = self.validation_dataset,
             batch_size = self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
+            pin_memory=True,
+            drop_last=True,
         )
 
         self.results = None
@@ -603,9 +607,11 @@ class _Trainer_Base(object):
         if is_train:
             self.model.train()
             context = contextlib.nullcontext()
+            mode = 'Train'
         else:
             self.model.eval()
             context = torch.no_grad()
+            mode = 'Valid'
         with context:
             for i_batch, (signal_windows, labels) in enumerate(data_loader):
                 if (i_batch+1)%self.minibatch_interval == 0:
@@ -636,7 +642,7 @@ class _Trainer_Base(object):
                     all_labels.append(labels.cpu().numpy())
                     all_predictions.append(predictions.cpu().numpy())
                 if (i_batch+1)%self.minibatch_interval == 0:
-                    tmp =  f"  Train batch {i_batch+1:05d}/{len(self.train_data_loader)}  "
+                    tmp =  f"  {mode} batch {i_batch+1:05d}/{len(self.train_data_loader)}  "
                     tmp += f"batch loss {loss:.3f} (avg loss {losses.mean():.3f})  "
                     tmp += f"minibatch time {time.time()-t_start_minibatch:.3f} s"
                     self.logger.info(tmp)
