@@ -15,13 +15,13 @@ class ELM_Classification_Analyzer(_Analyzer_Base):
 
     def __init__(
         self,
-        directory: Union[str,Path] = 'run_dir',
+        output_dir: Union[str,Path] = 'run_dir',
         inputs_file: Union[str,Path] = 'inputs.yaml',
         device: str = 'auto',  # auto (default), cpu, cuda, or cuda:X
     ) -> None:
         self._validate_subclass_inputs()
         super().__init__(
-            directory=directory,
+            output_dir=output_dir,
             inputs_file=inputs_file,
             device=device,
         )
@@ -33,7 +33,5 @@ class ELM_Classification_Analyzer(_Analyzer_Base):
 
 
 if __name__=='__main__':
-    analyzer = ELM_Classification_Analyzer(
-        directory='run_dir',
-    )
+    analyzer = ELM_Classification_Analyzer()
     analyzer.run_inference()

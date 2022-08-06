@@ -22,15 +22,15 @@ class _Analyzer_Base(object):
 
     def __init__(
         self,
-        directory: Union[str,Path] = 'run_dir',
+        output_dir: Union[str,Path] = 'run_dir',
         inputs_file: Union[str,Path] = 'inputs.yaml',
         device: str = 'auto',  # auto (default), cpu, cuda, or cuda:X
     ) -> None:
         # run directory and inputs file
-        self.directory = Path(directory)
-        assert self.directory.exists(), \
-            f"Directory {self.directory} does not exist."
-        self.inputs_file = self.directory / inputs_file
+        self.output_dir = Path(output_dir)
+        assert self.output_dir.exists(), \
+            f"Directory {self.output_dir} does not exist."
+        self.inputs_file = self.output_dir / inputs_file
         assert self.inputs_file.exists(), \
             f"{self.inputs_file} does not exist."
         # read inputs and print
@@ -56,7 +56,7 @@ class _Analyzer_Base(object):
 
     def _restore_test_data(self):
         # restore test data
-        test_data_file = self.directory / self.inputs['test_data_file']
+        test_data_file = self.output_dir / self.inputs['test_data_file']
         assert test_data_file.exists(), \
             f"{test_data_file} does not exist."
         with test_data_file.open('rb') as file:
@@ -77,7 +77,7 @@ class _Analyzer_Base(object):
     def _restore_model_parameters(
         self,
     ) -> None:
-        checkpoint_file = self.directory / self.inputs['checkpoint_file']
+        checkpoint_file = self.output_dir / self.inputs['checkpoint_file']
         assert checkpoint_file.exists(), f"{checkpoint_file} does not exist"
         model_state_dict = torch.load(
             checkpoint_file, 
