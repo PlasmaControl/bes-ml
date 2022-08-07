@@ -11,7 +11,7 @@ from sklearn import metrics
 import torch
 
 try:
-    from ..base.models import Multi_Features_Model
+    from .models import Multi_Features_Model
     from .data import ELM_Dataset, elm_data_loader
 except ImportError:
     from bes_ml.base.models import Multi_Features_Model

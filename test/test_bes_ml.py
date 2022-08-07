@@ -20,13 +20,13 @@ DEFAULT_INPUT_ARGS = {
 def test_elm_classification_dense_features():
     input_args = DEFAULT_INPUT_ARGS.copy()
     output_dir = RUN_DIR / 'elm_classification_dense'
-    model = elm_classification.train.ELM_Classification_Trainer(
+    model = elm_classification.Trainer(
         output_dir=output_dir,
         dense_num_kernels=8,
         **input_args,
     )
     model.train()
-    analyzer = elm_classification.analyze.ELM_Classification_Analyzer(
+    analyzer = elm_classification.Analyzer(
         output_dir=output_dir,
     )
     analyzer.run_inference()
@@ -34,7 +34,7 @@ def test_elm_classification_dense_features():
 def test_elm_classification_cnn_features():
     input_args = DEFAULT_INPUT_ARGS.copy()
     output_dir = RUN_DIR / 'elm_classification_cnn'
-    model = elm_classification.train.ELM_Classification_Trainer(
+    model = elm_classification.Trainer(
         output_dir=output_dir,
         dense_num_kernels = 0,
         cnn_layer1_num_kernels = 8,
@@ -42,7 +42,7 @@ def test_elm_classification_cnn_features():
         **input_args,
     )
     model.train()
-    analyzer = elm_classification.analyze.ELM_Classification_Analyzer(
+    analyzer = elm_classification.Analyzer(
         output_dir=output_dir,
     )
     analyzer.run_inference()
@@ -50,13 +50,13 @@ def test_elm_classification_cnn_features():
 def test_elm_regression_dense_features():
     input_args = DEFAULT_INPUT_ARGS.copy()
     output_dir = RUN_DIR / 'elm_regression_dense'
-    model = elm_regression.train.ELM_Regression_Trainer(
+    model = elm_regression.Trainer(
         output_dir=output_dir,
         dense_num_kernels=8,
         **input_args,
     )
     model.train()
-    analyzer = elm_regression.analyze.ELM_Regression_Analyzer(
+    analyzer = elm_regression.Analyzer(
         output_dir=output_dir,
     )
     analyzer.run_inference()
@@ -64,7 +64,7 @@ def test_elm_regression_dense_features():
 def test_elm_regression_cnn_features():
     input_args = DEFAULT_INPUT_ARGS.copy()
     output_dir = RUN_DIR / 'elm_regression_cnn'
-    model = elm_regression.train.ELM_Regression_Trainer(
+    model = elm_regression.Trainer(
         output_dir=output_dir,
         dense_num_kernels = 0,
         cnn_layer1_num_kernels = 8,
@@ -72,7 +72,7 @@ def test_elm_regression_cnn_features():
         **input_args,
     )
     model.train()
-    analyzer = elm_regression.analyze.ELM_Regression_Analyzer(
+    analyzer = elm_regression.Analyzer(
         output_dir=output_dir,
     )
     analyzer.run_inference()

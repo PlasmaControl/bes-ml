@@ -11,7 +11,7 @@ except ImportError:
     from bes_ml.base.analyze_base import _Analyzer_Base
 
 
-class ELM_Classification_Analyzer(_Analyzer_Base):
+class Analyzer(_Analyzer_Base):
 
     def __init__(
         self,
@@ -33,5 +33,5 @@ class ELM_Classification_Analyzer(_Analyzer_Base):
 
 
 if __name__=='__main__':
-    analyzer = ELM_Classification_Analyzer()
+    analyzer = Analyzer()
     analyzer.run_inference()

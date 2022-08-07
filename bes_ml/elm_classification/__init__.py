@@ -1,2 +1,2 @@
-from . import train
-from . import analyze
+from .train import Trainer
+from .analyze import Analyzer
