@@ -22,7 +22,7 @@ class Velocimetry_Trainer(_Trainer_Base):
         log_time: bool = False,  # if True, use log(time_to_elm_onset)
         inverse_weight_label: bool = False,  # must be False if log_time is False
         # parent class `_Trainer` parameters
-        input_data_dir: str = sample_data_dir / 'velocimetry_data', #location of stored data
+        data_location: str = sample_data_dir / 'velocimetry_data', #location of stored data
         output_dir: Union[Path,str] = 'run_dir',  # path to output dir.
         results_file: str = 'results.yaml',  # output training results
         log_file: str = 'log.txt',  # output log file

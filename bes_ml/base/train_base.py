@@ -32,7 +32,7 @@ class _Trainer_Base(object):
 
     def __init__(
         self,
-        data_file: Union[Path,str] = sample_elm_data_file,  # path to data file
+        data_location: Union[Path, str] = sample_elm_data_file,  # path to data
         output_dir: Union[Path,str] = 'run_dir',  # path to output dir.
         results_file: str = 'results.yaml',  # output training results
         log_file: str = 'log.txt',  # output log file
@@ -59,11 +59,11 @@ class _Trainer_Base(object):
     ) -> None:
 
         # input data file and output directory
-        data_file = Path(data_file)
+        data_location = Path(data_location)
         output_dir = Path(output_dir)
         output_dir.mkdir(exist_ok=True, parents=True)
 
-        self.data_file = data_file
+        self.data_location = data_location
         self.output_dir = output_dir
         self.results_file = results_file
         self.log_file = log_file
@@ -251,11 +251,11 @@ class _Trainer_Base(object):
 
     def _get_data(self) -> None:
 
-        self.data_file = self.data_file.resolve()
-        assert self.data_file.exists(), f"{self.data_file} does not exist"
-        self.logger.info(f"Data file: {self.data_file}")
+        self.data_location = self.data_location.resolve()
+        assert self.data_location.exists(), f"{self.data_location} does not exist"
+        self.logger.info(f"Data file: {self.data_location}")
 
-        with h5py.File(self.data_file, "r") as data_file:
+        with h5py.File(self.data_location, "r") as data_file:
             elm_indices = np.array(
                 [int(key) for key in data_file], 
                 dtype=np.int32,
@@ -330,7 +330,7 @@ class _Trainer_Base(object):
         packaged_window_start = None
         packaged_valid_t0 = []
         packaged_labels = []
-        with h5py.File(self.data_file, 'r') as h5_file:
+        with h5py.File(self.data_location, 'r') as h5_file:
             for elm_index in elm_indices:
                 elm_key = f"{elm_index:05d}"
                 elm_event = h5_file[elm_key]
@@ -425,7 +425,7 @@ class _Trainer_Base(object):
                 pin_memory=True,
                 drop_last=True,
             )
-            self.validation_data_loader = torch.utils.data.DataLoader(
+        self.validation_data_loader = torch.utils.data.DataLoader(
                 self.validation_dataset,
                 batch_size=self.batch_size,
                 shuffle=False,
