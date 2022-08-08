@@ -88,6 +88,7 @@ class _Trainer_Base(object):
         self.model_kwargs = model_kwargs
 
         self.is_regression = None  # set in subclass
+        self.task = None # set in velocimetry and turbulence subclasses
 
         # create logger (logs to file and terminal)
         self.logger = None
@@ -207,7 +208,7 @@ class _Trainer_Base(object):
 
         # make model
         self.model = Multi_Features_Model(
-            logger=self.logger, 
+            logger=self.logger,
             signal_window_size=self.signal_window_size,
             **self.model_kwargs,
         )
@@ -238,41 +239,13 @@ class _Trainer_Base(object):
         if self.test_data_file and self.fraction_test>0.0:
             self._save_test_data()
         
-        # make pytorch `dataset` for train and validation data
-        self.train_dataset = ELM_Dataset(
-            signals = self.train_data[0],
-            labels = self.train_data[1],
-            sample_indices = self.train_data[2],
-            window_start = self.train_data[3],
-            signal_window_size = self.signal_window_size,
-            prediction_horizon = self.prediction_horizon,
-        )
-        self.validation_dataset = ELM_Dataset(
-            signals = self.validation_data[0],
-            labels = self.validation_data[1],
-            sample_indices = self.validation_data[2],
-            window_start = self.validation_data[3],
-            signal_window_size = self.signal_window_size,
-            prediction_horizon = self.prediction_horizon,
-        )
+        self.train_dataset = None
+        self.validation_dataset = None
+        self._make_datasets()
 
-        # make pytorch `dataloader` for train and validation data
-        self.train_data_loader = elm_data_loader(
-            dataset = self.train_dataset,
-            batch_size = self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers,
-            pin_memory=True,
-            drop_last=True,
-        )
-        self.validation_data_loader = elm_data_loader(
-            dataset = self.validation_dataset,
-            batch_size = self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=True,
-            drop_last=True,
-        )
+        self.train_data_loader = None
+        self.validation_data_loader = None
+        self._make_data_loaders()
 
         self.results = {}
 
@@ -303,7 +276,6 @@ class _Trainer_Base(object):
             elm_indices,
             [n_test_elms, n_test_elms+n_validation_elms]
         )
-
         self.logger.info(f"Training ELM events: {training_elms.size}")
         self.train_data = self._preprocess_data(
             training_elms,
@@ -428,9 +400,39 @@ class _Trainer_Base(object):
         # must implement in subclass
         raise NotImplementedError
 
+    def _make_datasets(self) -> None:
+        self.train_dataset = ELM_Dataset(
+            *self.train_data[0:4], 
+            signal_window_size = self.signal_window_size,
+            prediction_horizon = self.prediction_horizon,
+        )
+        self.validation_dataset = ELM_Dataset(
+            *self.validation_data[0:4], 
+            signal_window_size = self.signal_window_size,
+            prediction_horizon = self.prediction_horizon,
+        )
+
     def _get_valid_indices(self) -> None:
         # must implement in subclass
         raise NotImplementedError
+
+    def _make_data_loaders(self) -> None:
+        self.train_data_loader = torch.utils.data.DataLoader(
+                self.train_dataset,
+                batch_size=self.batch_size,
+                shuffle=True,
+                num_workers=self.num_workers,
+                pin_memory=True,
+                drop_last=True,
+            )
+            self.validation_data_loader = torch.utils.data.DataLoader(
+                self.validation_dataset,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=self.num_workers,
+                pin_memory=True,
+                drop_last=True,
+            )
 
     def _print_model_summary(self) -> None:
         self.logger.info("MODEL SUMMARY")
@@ -606,7 +608,7 @@ class _Trainer_Base(object):
             mode = 'Valid'
         with context:
             for i_batch, (signal_windows, labels) in enumerate(data_loader):
-                if (i_batch+1)%self.minibatch_interval == 0:
+                if (i_batch+1) % self.minibatch_interval == 0:
                     t_start_minibatch = time.time()
                 if is_train:
                     # reset grads
