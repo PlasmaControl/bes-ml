@@ -43,4 +43,4 @@ if __name__=='__main__':
     analyzer.plot_training(save=True)
     analyzer.run_inference()
     analyzer.plot_inference(save=True)
-    plt.show()
+    analyzer.show()

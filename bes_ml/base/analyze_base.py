@@ -298,3 +298,9 @@ class _Analyzer_Base(object):
                 [f"Subclass {self.__class__.__name__} "
                     f"missing parameter {param_name} from class {parent_class.__name__}."]
 
+    @staticmethod
+    def show(*args, **kwargs):
+        """
+        Wrapper for `plt.show()`
+        """
+        plt.show(*args, **kwargs)

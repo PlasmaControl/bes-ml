@@ -13,8 +13,10 @@ model = Trainer()
 model.train()
 
 model_analyzer = Analyzer()
+model_analyzer.plot_training()
 model_analyzer.run_inference()
-model_analyzer.plot()
+model_analyzer.plot_inference()
+model_analyzer.show()
 ```
 
 The primary code objects are:
