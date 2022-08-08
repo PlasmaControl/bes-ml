@@ -10,7 +10,7 @@ except ImportError:
     from bes_ml.base.train_base import _Trainer_Base
 
 
-class ELM_Regression_Trainer(_Trainer_Base):
+class Trainer(_Trainer_Base):
 
     # __init__ must have exact copy of all kwargs from parent class
     def __init__(
@@ -127,14 +127,17 @@ class ELM_Regression_Trainer(_Trainer_Base):
     def _check_for_balanced_data(self, *args, **kwargs):
         pass
 
+    def train(self):
+        self.results['scores_label'] = 'R2'
+        super().train()
+
 
 if __name__=='__main__':
-    model = ELM_Regression_Trainer(
+    model = Trainer(
         batch_size=32, 
         minibatch_interval=50, 
-        # max_elms=5,
         fraction_validation=0.2,
-        fraction_test=0.4,
+        fraction_test=0.2,
         log_time=True,
         inverse_weight_label=True,
     )

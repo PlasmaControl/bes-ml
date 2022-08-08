@@ -10,7 +10,7 @@ except ImportError:
     from bes_ml.base.train_base import _Trainer_Base
 
 
-class ELM_Classification_Trainer(_Trainer_Base):
+class Trainer(_Trainer_Base):
 
     # __init__ must have exact copy of all kwargs from parent class
     def __init__(
@@ -190,13 +190,16 @@ class ELM_Classification_Trainer(_Trainer_Base):
             self.logger.info(f"  New % active: {active_elm_fraction*1e2:.1f} %")
         return packaged_valid_t0_indices
 
+    def train(self):
+        self.results['scores_label'] = 'F1'
+        super().train()
+
 
 if __name__=='__main__':
-    model = ELM_Classification_Trainer(
+    model = Trainer(
         batch_size=32, 
         minibatch_interval=50, 
-        # max_elms=5,
         fraction_validation=0.2,
-        fraction_test=0.4,
+        fraction_test=0.2,
     )
     model.train()
