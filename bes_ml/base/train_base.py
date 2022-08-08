@@ -274,7 +274,7 @@ class _Trainer_Base(object):
             drop_last=True,
         )
 
-        self.results = None
+        self.results = {}
 
     def _get_data(self) -> None:
 
@@ -365,10 +365,14 @@ class _Trainer_Base(object):
                 signals = np.array(elm_event["signals"], dtype=np.float32)
                 # transpose so time dim. first
                 signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)
+                if self.is_regression:
+                    label_type = np.float32
+                else:
+                    label_type = np.int8
                 try:
-                    labels = np.array(elm_event["labels"], dtype=np.float32)
+                    labels = np.array(elm_event["labels"], dtype=label_type)
                 except KeyError:
-                    labels = np.array(elm_event["manual_labels"], dtype=np.float32)
+                    labels = np.array(elm_event["manual_labels"], dtype=label_type)
                 labels, signals, valid_t0 = self._get_valid_indices(labels, signals)
                 if packaged_signals is None:
                     packaged_window_start = np.array([0])
@@ -477,16 +481,16 @@ class _Trainer_Base(object):
         )
 
     def train(self) -> None:
+        assert 'scores_label' in self.results, \
+            f"Subclass must define self.results['scores_label']"
         best_score = -np.inf
-        self.results = {
-            'train_loss': np.empty(0),
-            'valid_loss': np.empty(0),
-            'scores': np.empty(0),
-        }
+        self.results['train_loss'] = []
+        self.results['valid_loss'] = []
+        self.results['scores'] = []
         checkpoint_file = self.output_dir / self.checkpoint_file
 
         if not self.is_regression:
-            self.results['roc_scores'] = np.empty(0)
+            self.results['roc_scores'] = []
 
         # send model to device
         self.model = self.model.to(self.device)
@@ -508,10 +512,7 @@ class _Trainer_Base(object):
             if self.is_regression:
                 train_loss = np.sqrt(train_loss)
 
-            self.results['train_loss'] = np.append(
-                self.results['train_loss'],
-                train_loss,
-            )
+            self.results['train_loss'].append(train_loss.item())
 
             # valid_loss, predictions, true_labels = self._validation_epoch()
             valid_loss, predictions, true_labels = self._single_epoch_loop(
@@ -522,10 +523,7 @@ class _Trainer_Base(object):
                 # regression loss is MSE, so take sqrt to get units of time
                 valid_loss = np.sqrt(valid_loss)
 
-            self.results['valid_loss'] = np.append(
-                self.results['valid_loss'],
-                valid_loss,
-            )
+            self.results['valid_loss'].append(valid_loss.item())
 
             # apply learning rate scheduler
             self.scheduler.step(valid_loss)
@@ -539,10 +537,7 @@ class _Trainer_Base(object):
                     prediction_labels,
                 )
 
-            self.results['scores'] = np.append(
-                self.results['scores'],
-                score,
-            )
+            self.results['scores'].append(score.item())
 
             if not self.is_regression:
                 # ROC-AUC score for classification
@@ -550,14 +545,11 @@ class _Trainer_Base(object):
                     true_labels,
                     predictions,
                 )
-                self.results['roc_scores'] = np.append(
-                    self.results['roc_scores'],
-                    roc_score,
-                )
+                self.results['roc_scores'].append(roc_score.item())
 
             with (self.output_dir/self.results_file).open('w') as results_file:
                 yaml.dump(
-                    {key: self.results[key].tolist() for key in self.results},
+                    self.results,
                     results_file,
                     default_flow_style=False,
                 )

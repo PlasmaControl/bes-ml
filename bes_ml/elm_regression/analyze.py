@@ -29,9 +29,12 @@ class Analyzer(_Analyzer_Base):
         self.is_regression = True
         self._set_regression_or_classification_defaults()
 
-        self._restore_test_data()
+        self._load_test_data()
 
 
 if __name__=='__main__':
     analyzer = Analyzer()
+    analyzer.plot_training(save=True)
     analyzer.run_inference()
+    analyzer.plot_inference(save=True)
+    plt.show()

@@ -29,7 +29,7 @@ def test_elm_classification_dense_features():
     analyzer = elm_classification.Analyzer(
         output_dir=output_dir,
     )
-    analyzer.run_inference()
+    _common_analysis(analyzer)
 
 def test_elm_classification_cnn_features():
     input_args = DEFAULT_INPUT_ARGS.copy()
@@ -45,7 +45,7 @@ def test_elm_classification_cnn_features():
     analyzer = elm_classification.Analyzer(
         output_dir=output_dir,
     )
-    analyzer.run_inference()
+    _common_analysis(analyzer)
 
 def test_elm_regression_dense_features():
     input_args = DEFAULT_INPUT_ARGS.copy()
@@ -59,7 +59,7 @@ def test_elm_regression_dense_features():
     analyzer = elm_regression.Analyzer(
         output_dir=output_dir,
     )
-    analyzer.run_inference()
+    _common_analysis(analyzer)
 
 def test_elm_regression_cnn_features():
     input_args = DEFAULT_INPUT_ARGS.copy()
@@ -75,8 +75,15 @@ def test_elm_regression_cnn_features():
     analyzer = elm_regression.Analyzer(
         output_dir=output_dir,
     )
-    analyzer.run_inference()
+    _common_analysis(analyzer)
 
+
+def _common_analysis(analyzer):
+    analyzer.plot_training(save=True)
+    analyzer.run_inference()
+    analyzer.plot_inference(save=True)
+    assert (analyzer.output_dir/'training.pdf').exists()
+    assert (analyzer.output_dir/'inference.pdf').exists()
 
 if __name__=="__main__":
     print("NOTE: This test script runs for ~3-5 minutes")

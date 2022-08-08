@@ -127,14 +127,17 @@ class Trainer(_Trainer_Base):
     def _check_for_balanced_data(self, *args, **kwargs):
         pass
 
+    def train(self):
+        self.results['scores_label'] = 'R2'
+        super().train()
+
 
 if __name__=='__main__':
     model = Trainer(
         batch_size=32, 
         minibatch_interval=50, 
-        # max_elms=5,
         fraction_validation=0.2,
-        fraction_test=0.4,
+        fraction_test=0.2,
         log_time=True,
         inverse_weight_label=True,
     )

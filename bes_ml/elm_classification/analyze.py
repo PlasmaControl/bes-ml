@@ -25,13 +25,22 @@ class Analyzer(_Analyzer_Base):
             inputs_file=inputs_file,
             device=device,
         )
+
+        self.roc_scores = None
         
         self.is_regression = False
         self._set_regression_or_classification_defaults()
 
-        self._restore_test_data()
+        self._load_test_data()
+
+    def _load_training_results(self):
+        super()._load_training_results()
+        self.roc_scores = np.array(self.results['roc_scores'])
 
 
 if __name__=='__main__':
     analyzer = Analyzer()
+    analyzer.plot_training(save=True)
     analyzer.run_inference()
+    analyzer.plot_inference(save=True)
+    plt.show()
