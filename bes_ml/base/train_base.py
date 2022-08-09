@@ -41,7 +41,7 @@ class _Trainer_Base(object):
         checkpoint_file: str = 'checkpoint.pytorch',  # pytorch save file; if None, do not save
         export_onnx: bool = False,  # export ONNX format
         device: str = 'auto',  # auto (default), cpu, cuda, or cuda:X
-        num_workers: int = 1,  # number of subprocess workers for pytorch dataloader
+        num_workers: int = 0,  # number of subprocess workers for pytorch dataloader
         n_epochs: int = 2,  # training epochs
         batch_size: int = 64,  # power of 2, like 16-128
         minibatch_interval: int = 2000,  # print minibatch info
