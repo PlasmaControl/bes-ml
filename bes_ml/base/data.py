@@ -47,7 +47,7 @@ def elm_data_loader(
     dataset: ELM_Dataset = None,
     batch_size: int = 64,
     shuffle: bool = False,
-    num_workers: int = 1,
+    num_workers: int = 0,
     drop_last: bool = True,
     pin_memory: bool = True,
 ) -> torch.utils.data.DataLoader:
