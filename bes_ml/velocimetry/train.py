@@ -1,15 +1,21 @@
+import inspect
 from typing import Tuple, Union
 from pathlib import Path
 
 import numpy as np
+from torch.utils.data import DataLoader, BatchSampler
 
 from bes_data.sample_data import sample_data_dir
+from bes_ml.base.data import MultiSourceDataset
+
 try:
     from ..base.train_base import _Trainer_Base
     from ...bes_data.velocimetry_data_tools.dataset import VelocimetryDataset
+    from ...bes_data.velocimetry_data_tools.sampler import RandomBatchSampler
 except ImportError:
     from bes_ml.base.train_base import _Trainer_Base
     from bes_data.velocimetry_data_tools.dataset import VelocimetryDataset
+    from bes_data.velocimetry_data_tools.sampler import RandomBatchSampler
 
 
 class Velocimetry_Trainer(_Trainer_Base):
@@ -30,7 +36,7 @@ class Velocimetry_Trainer(_Trainer_Base):
         test_data_file: str = 'test_data.pkl',  # if None, do not save test data (can be large)
         checkpoint_file: str = 'checkpoint.pytorch',  # pytorch save file; if None, do not save
         # data parameters for velocimetry specific.
-        dataset_to_ram: bool = False, # Load datasets to ram
+        dataset_to_ram: bool = True, # Load datasets to ram
         export_onnx: bool = False,  # export ONNX format
         device: str = 'auto',  # auto (default), cpu, cuda, or cuda:X
         num_workers: int = 1,  # number of subprocess workers for pytorch dataloader
@@ -106,18 +112,58 @@ class Velocimetry_Trainer(_Trainer_Base):
         self.log_time = log_time
         self.inverse_weight_label = inverse_weight_label
         self.dataset_to_ram = dataset_to_ram
+        self.velocimetry_dataset = None
 
         self.make_model_and_device()
 
         self._finish_subclass_initialization()
 
-    def _make_data_loaders(self) -> None:
-        dataset = VelocimetryDataset()
-        train_set, valid_set = dataset.train_test_split(self.fraction_validation, seed=42)
+    def train(self) -> None:
+        self.results['scores_label'] = 'R2'
+        super().train()
+
+    def _make_datasets(self) -> None:
+        kwargs_for_data_class = self._create_data_class_inputs(self.__dict__)
+        self.velocimetry_dataset = VelocimetryDataset(**kwargs_for_data_class)
+        train_set, valid_set = self.velocimetry_dataset.train_test_split(self.fraction_validation, seed=42)
+
         if self.dataset_to_ram:
             # Load datasets into ram
             train_set.load_datasets()
             valid_set.load_datasets()
+
+        self.train_dataset = train_set
+        self.validation_dataset = valid_set
+
+    def _make_data_loaders(self) -> None:
+        self.train_data_loader = DataLoader(self.train_dataset,
+                                            batch_size=None,  # must be disabled when using samplers
+                                            sampler=BatchSampler(RandomBatchSampler(self.train_dataset,
+                                                                                    self.batch_size,
+                                                                                    self.signal_window_size),
+                                                                 batch_size=self.batch_size,
+                                                                 drop_last=True)
+                                      )
+
+        self.validation_data_loader = DataLoader(self.validation_dataset,
+                                                 batch_size=None,  # must be disabled when using samplers
+                                                 sampler=BatchSampler(RandomBatchSampler(self.validation_dataset,
+                                                                                         self.batch_size,
+                                                                                         self.signal_window_size),
+                                                                      batch_size=self.batch_size,
+                                                                      drop_last=True)
+                                      )
+
+
+    def _create_data_class_inputs(self, locals_copy: dict = None) -> dict:
+        assert self.__class__ is not _Trainer_Base
+        kwargs_for_data_class = {}
+        for cls in [VelocimetryDataset, MultiSourceDataset]:
+            class_parameters = inspect.signature(cls).parameters
+            for parameter_name in class_parameters:
+                if parameter_name in locals_copy:
+                    kwargs_for_data_class[parameter_name] = locals_copy[parameter_name]
+        return kwargs_for_data_class
 
     def _get_valid_indices(
         self,
@@ -128,6 +174,13 @@ class Velocimetry_Trainer(_Trainer_Base):
 
     def _check_for_balanced_data(self, *args, **kwargs):
         pass
+
+    def _get_data(self) -> None:
+        pass
+
+    def _save_test_data(self) -> None:
+        if self.velocimetry_dataset is not None:
+            self.velocimetry_dataset.save_test_data()
 
 
 if __name__=='__main__':

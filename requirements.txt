@@ -1,13 +1,13 @@
-torch
-seaborn
-numpy
-h5py
-scikit-learn
-matplotlib
-scipy
-pytest
+torch~=1.11.0+cu113
+seaborn~=0.11.2
+numpy~=1.22.3
+h5py~=3.6.0
+scikit-learn~=1.1.1
+matplotlib~=3.5.2
+scipy~=1.8.1
+pytest~=7.1.2
 pywt  # `pywavelets`
-torchinfo  # conda-forge or https://github.com/tyleryep/torchinfo
+torchinfo~=1.6.6
 pytorch_wavelets  # https://github.com/fbcotter/pytorch_wavelets
 
 #tqdm~=4.64.0
@@ -15,3 +15,8 @@ pytorch_wavelets  # https://github.com/fbcotter/pytorch_wavelets
 #pandas~=1.4.2
 #Pillow~=9.1.1
 #fastdtw~=0.3.4
+PyYAML~=6.0
+fastdtw~=0.3.4
+tqdm~=4.64.0
+pandas~=1.4.2
+Pillow~=9.1.1

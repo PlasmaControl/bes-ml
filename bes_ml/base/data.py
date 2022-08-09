@@ -1,3 +1,4 @@
+import h5py
 import numpy as np
 import torch
 # multisource imports
@@ -52,15 +53,27 @@ class ELM_Dataset(torch.utils.data.Dataset):
 class MultiSourceDataset(torch.utils.data.Dataset):
 
     def __init__(self,
-                 input_data_dir = None,
+                 data_location=None,
+                 output_dir='run_dir',
+                 signal_window_size=128,
+                 batch_size=64,
+                 fraction_test=0.15,
+                 fraction_validation=0.1,
+                 dataset_to_ram=True,
                  logger: logging.Logger | None = None,
                  ):
 
-        self.input_data_dir = input_data_dir
+        self.data_location = data_location
+        self.output_dir = output_dir
+        self.signal_window_size = signal_window_size
+        self.batch_size = batch_size
+        self.fraction_test = fraction_test
+        self.fraction_validation = fraction_validation
+        self.dataset_to_ram = dataset_to_ram
         self.logger = logger
 
-        assert Path(self.args.input_data_dir).exists()
-        self.logger.info(f'Loading files from {self.args.input_data_dir}')
+        assert Path(self.data_location).exists()
+        self.logger.info(f'Loading files from {self.data_location}')
 
         self.shot_nums, self.input_files = self._retrieve_filepaths()
         self.logger.info(f'Found {len(self.input_files)} files!')
@@ -83,13 +96,13 @@ class MultiSourceDataset(torch.utils.data.Dataset):
         return int(sum(self.f_lengths))
 
     def __getitem__(self, index: int):
-        if self.args.dataset_to_ram:
+        if self.dataset_to_ram:
             return self._get_from_ram(index)
         else:
             return self._get_from_hdf5(index)
 
     def __enter__(self):
-        if not self.args.dataset_to_ram:
+        if not self.dataset_to_ram:
             self.open()
         return self
 
@@ -104,7 +117,7 @@ class MultiSourceDataset(torch.utils.data.Dataset):
 
     def open(self):
         """
-        Open all the datasets in self.args.data_dir for access.
+        Open all the datasets in self.data_dir for access.
         """
         self.open_ = True
         hf_opened = []
@@ -133,13 +146,13 @@ class MultiSourceDataset(torch.utils.data.Dataset):
         hf_labels = self.labels[np.nonzero(self.valid_indices <= index[0])[0][-1]]
 
         idx_offset = self.valid_indices[(self.valid_indices <= index[0])][-1].astype(int)  # Adjust index relative to specific HDF5
-        hf_index = [i - idx_offset + self.args.signal_window_size for i in index]
-        hf_index = list(range(hf_index[0] - self.args.signal_window_size + 1, hf_index[0])) + hf_index
+        hf_index = [i - idx_offset + self.signal_window_size for i in index]
+        hf_index = list(range(hf_index[0] - self.signal_window_size + 1, hf_index[0])) + hf_index
 
-        signal_windows = self._roll_window(hf[hf_index], self.args.signal_window_size, self.args.batch_size)
-        labels = hf_labels[hf_index[-self.args.batch_size:]]
+        signal_windows = self._roll_window(hf[hf_index], self.signal_window_size, self.batch_size)
+        labels = hf_labels[hf_index[-self.batch_size:]]
 
-        return torch.tensor(signal_windows).unsqueeze(1), torch.tensor(labels)
+        return torch.tensor(signal_windows, dtype=torch.float32).unsqueeze(1), torch.tensor(labels, dtype=torch.float32)
 
     def _roll_window(self, arr, sws, bs):
         """
@@ -157,29 +170,19 @@ class MultiSourceDataset(torch.utils.data.Dataset):
             .swapaxes(-1, 1)\
             .reshape(bs, -1, 8, 8)
 
-    def _create_parent_class_inputs(self, locals_copy: dict = None) -> dict:
-        assert self.__class__ is not MultiSourceDataset
-        kwargs_for_parent_class = {}
-        for cls in [_Trainer, Multi_Features_Model]:
-            class_parameters = inspect.signature(cls).parameters
-            for parameter_name in class_parameters:
-                if parameter_name in locals_copy:
-                    kwargs_for_parent_class[parameter_name] = locals_copy[parameter_name]
-        return kwargs_for_parent_class
-
     def _set_state(self, state: str):
         self.istrain_ = False
         self.istest_ = False
         self.isvalid_ = False
         if state == 'train':
             self.istrain_ = True
-            self.frac_ = 1 - (self.args.fraction_valid + self.args.fraction_test)
+            self.frac_ = 1 - (self.fraction_validation + self.fraction_test)
         elif state == 'valid':
             self.isvalid_ = True
-            self.frac_ = self.args.fraction_valid
+            self.frac_ = self.fraction_validation
         elif state == 'test':
             self.istest_ = True
-            self.frac_ = self.args.fraction_test
+            self.frac_ = self.fraction_test
         else:
             pass
 
@@ -220,6 +223,11 @@ class MultiSourceDataset(torch.utils.data.Dataset):
 
         return train, test
 
+    def _retrieve_filepaths(self):
+        raise NotImplementedError
+
+    def _get_f_lengths(self):
+        raise NotImplementedError
 
 def elm_data_loader(
     dataset: ELM_Dataset = None,

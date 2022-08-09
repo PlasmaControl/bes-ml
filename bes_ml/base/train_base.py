@@ -235,9 +235,6 @@ class _Trainer_Base(object):
         self.validation_data = None
         self.test_data = None
         self._get_data()
-
-        if self.test_data_file and self.fraction_test>0.0:
-            self._save_test_data()
         
         self.train_dataset = None
         self.validation_dataset = None
@@ -247,10 +244,12 @@ class _Trainer_Base(object):
         self.validation_data_loader = None
         self._make_data_loaders()
 
+        if self.test_data_file and self.fraction_test>0.0:
+            self._save_test_data()
+
         self.results = {}
 
     def _get_data(self) -> None:
-
         self.data_location = self.data_location.resolve()
         assert self.data_location.exists(), f"{self.data_location} does not exist"
         self.logger.info(f"Data file: {self.data_location}")
@@ -276,6 +275,7 @@ class _Trainer_Base(object):
             elm_indices,
             [n_test_elms, n_test_elms+n_validation_elms]
         )
+
         self.logger.info(f"Training ELM events: {training_elms.size}")
         self.train_data = self._preprocess_data(
             training_elms,

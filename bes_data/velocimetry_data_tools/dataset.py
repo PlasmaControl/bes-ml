@@ -10,33 +10,41 @@ import numpy as np
 
 from bes_ml.base.data import MultiSourceDataset
 
+#repo imports
+from bes_data.sample_data import sample_data_dir
+
 
 class VelocimetryDataset(MultiSourceDataset):
     def __init__(self,
-                 input_data_dir,
-                 logger):
+                 signal_window_size=128,
+                 batch_size=64,
+                 logger=None,
+                 **kwargs):
         """PyTorch dataset class to get the ELM data and corresponding velocimetry calculations.
         The signals are grouped by `signal_window_size` which stacks the time data points
         and return a data chunk of size: (`signal_window_sizex8x8`). The dataset also returns the label which
         corresponds to the label of the last time step of the chunk. Implements weak shuffling,
         i.e. each batch is sampled randomly, however, the data points within a batch are contiguous.
 
-        :param args: Argparse object containing command line args.
-        :type args: argparse.Namespace
+        :param data_location: Directory where velocimetry data is stored.
+        :param signal_window_size: Signal window size.
+        :param batch_size: Batch size.
         :param logger: Logger object to log the dataset creation process.
-        :type logger: logging.getLogger
         """
 
-        super().__init__(input_data_dir=input_data_dir,
-                         logger=logger)
-        if not self.args.dataset_to_ram:
+        super().__init__(signal_window_size=signal_window_size,
+                         batch_size=batch_size,
+                         logger=logger,
+                         **kwargs)
+
+        if not self.dataset_to_ram:
             # used for __getitem__ when reading from HDF5
-            self.hf2np_signals = np.empty((64, self.args.batch_size + self.args.signal_window_size - 1))
-            self.hf2np_vZ = np.empty((self.args.batch_size, 8, 8))
-            self.hf2np_vR = np.empty((self.args.batch_size, 8, 8))
+            self.hf2np_signals = np.empty((64, self.batch_size + self.signal_window_size - 1))
+            self.hf2np_vZ = np.empty((self.batch_size, 8, 8))
+            self.hf2np_vR = np.empty((self.batch_size, 8, 8))
 
     def _get_from_hdf5(self, index):
-        return NotImplementedError('Can not get from hdf5.')
+        raise NotImplementedError('Can not get from hdf5.')
 
     def _retrieve_filepaths(self, input_dir=None):
         """
@@ -46,8 +54,8 @@ class VelocimetryDataset(MultiSourceDataset):
         :rtype: (list, list)
         """
         if input_dir:
-            self.input_data_dir = input_dir
-        dir = Path(self.input_data_dir)
+            self.data_location = input_dir
+        dir = Path(self.data_location)
         assert dir.exists(), f'Directory {dir} does not exist. Have you made datasets?'
         shots = {}
         for file in (dir.iterdir()):
@@ -72,7 +80,7 @@ class VelocimetryDataset(MultiSourceDataset):
         fs = []
         for f in self.input_files:
             with h5py.File(f, 'r') as ds:
-                fs.append(np.around(len(ds['vR']) * self.frac_) - self.args.signal_window_size - self.args.batch_size)
+                fs.append(np.around(len(ds['vR']) * self.frac_) - self.signal_window_size - self.batch_size)
         assert all([l >= 0 for l in fs]), "There are not enough data points to make dataset."
         return np.array(fs)
 
@@ -82,6 +90,7 @@ class VelocimetryDataset(MultiSourceDataset):
         Returns: None
 
         """
+        #TODO: Implement this for multiple shots.
 
         output = {}
 
@@ -90,13 +99,13 @@ class VelocimetryDataset(MultiSourceDataset):
             hf = self.hf_opened[0]
             # Load and save test data to pickle file
             n_indices = len(hf['vR'])
-            i_start = np.floor((1 - self.args.fraction_test) * n_indices).astype(int)
+            i_start = np.floor((1 - self.fraction_test) * n_indices).astype(int)
             # Load test data
             sx_t_data = np.s_[i_start:n_indices-1]
             sx_s_t_data = np.s_[:, i_start:n_indices-1]
 
             arr_len = sx_t_data.stop - sx_t_data.start
-            hf2np_t = np.empty((arr_len))
+            # hf2np_t = np.empty((arr_len))
             hf2np_s = np.empty((64, arr_len))
             hf2np_vR = np.empty((arr_len, 8, 8))
             hf2np_vZ = np.empty((arr_len, 8, 8))
@@ -104,14 +113,15 @@ class VelocimetryDataset(MultiSourceDataset):
             hf['signals'].read_direct(hf2np_s, sx_s_t_data, np.s_[...])
             hf['vR'].read_direct(hf2np_vR, sx_t_data, np.s_[...])
             hf['vZ'].read_direct(hf2np_vZ, sx_t_data, np.s_[...])
-            hf['time'].read_direct(hf2np_t, sx_t_data, np.s_[...])
+            # TODO: Add time to data imported from OMFit?
+            # hf['time'].read_direct(hf2np_t, sx_t_data, np.s_[...])
         else:
             return
 
         output['signals'] = hf2np_s.transpose().reshape((-1, 8, 8))
         output['vZ'] = hf2np_vZ
         output['vR'] = hf2np_vR
-        with open(Path(self.args.output_dir)/'test_data.pkl', 'w+b') as f:
+        with open(Path(self.output_dir)/'test_data.pkl', 'w+b') as f:
             pickle.dump(output, f)
         return
 
@@ -132,8 +142,8 @@ class VelocimetryDataset(MultiSourceDataset):
             hf = self.hf_opened[0]
             n_indices = len(hf['vR'])
             # Indices for start and stop of validation and test sets
-            i_start = np.floor((1 - (self.args.fraction_test + self.args.fraction_valid)) * n_indices).astype(int)
-            i_stop = np.floor((1 - self.args.fraction_test) * n_indices).astype(int)
+            i_start = np.floor((1 - (self.fraction_test + self.fraction_validation)) * n_indices).astype(int)
+            i_stop = np.floor((1 - self.fraction_test) * n_indices).astype(int)
 
             if self.isvalid_:
                 sx = np.s_[i_start:i_stop]
