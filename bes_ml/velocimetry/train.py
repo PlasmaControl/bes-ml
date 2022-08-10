@@ -18,7 +18,7 @@ except ImportError:
     from bes_data.velocimetry_data_tools.sampler import RandomBatchSampler
 
 
-class Velocimetry_Trainer(_Trainer_Base):
+class Trainer(_Trainer_Base):
 
     # __init__ must have exact copy of all kwargs from parent class
     def __init__(
@@ -184,7 +184,7 @@ class Velocimetry_Trainer(_Trainer_Base):
 
 
 if __name__=='__main__':
-    model = Velocimetry_Trainer(
+    model = Trainer(
         batch_size=32,
         minibatch_interval=50,
         max_elms=5,
