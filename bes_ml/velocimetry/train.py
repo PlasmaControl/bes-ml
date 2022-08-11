@@ -11,11 +11,11 @@ from bes_ml.base.data import MultiSourceDataset
 try:
     from ..base.train_base import _Trainer_Base
     from ...bes_data.velocimetry_data_tools.dataset import VelocimetryDataset
-    from ...bes_data.velocimetry_data_tools.sampler import RandomBatchSampler
+    from bes_ml.base.sampler import RandomBatchSampler
 except ImportError:
     from bes_ml.base.train_base import _Trainer_Base
     from bes_data.velocimetry_data_tools.dataset import VelocimetryDataset
-    from bes_data.velocimetry_data_tools.sampler import RandomBatchSampler
+    from bes_ml.base.sampler import RandomBatchSampler
 
 
 class Trainer(_Trainer_Base):
@@ -104,7 +104,6 @@ class Trainer(_Trainer_Base):
         )
 
         self.is_regression = True
-        self.task = 'velocimetry' # used for loading different data sets and loaders
         self._set_regression_or_classification_defaults()
 
         # subclass attributes

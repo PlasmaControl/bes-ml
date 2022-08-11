@@ -88,7 +88,6 @@ class _Trainer_Base(object):
         self.model_kwargs = model_kwargs
 
         self.is_regression = None  # set in subclass
-        self.task = None # set in velocimetry and turbulence subclasses
 
         # create logger (logs to file and terminal)
         self.logger = None
@@ -196,9 +195,13 @@ class _Trainer_Base(object):
             self.loss_function = torch.nn.MSELoss(reduction="none")
             self.score_function = metrics.r2_score
         else:
-            # classification model (e.g. active ELM prediction for `prediction_horizon` horizon
-            self.loss_function = torch.nn.BCEWithLogitsLoss(reduction="none")
+            if self.model_kwargs['mlp_output_size'] == 1:
+                # classification model (e.g. active ELM prediction for `prediction_horizon` horizon
+                self.loss_function = torch.nn.BCEWithLogitsLoss(reduction="none")
+            else:
+                self.loss_function = torch.nn.CrossEntropyLoss(reduction="none")
             self.score_function = metrics.f1_score
+
 
     def make_model_and_device(self):
         if self.device == 'auto':
@@ -533,20 +536,41 @@ class _Trainer_Base(object):
             if self.is_regression:
                 score = self.score_function(true_labels, predictions)
             else:
-                prediction_labels = (predictions > self.threshold).astype(int)
-                score = self.score_function(
-                    true_labels,
-                    prediction_labels,
-                )
+                if self.model_kwargs.get('mlp_output_size', 1) == 1:
+                    prediction_labels = (predictions > self.threshold).astype(int)
+                    score = self.score_function(
+                        true_labels,
+                        prediction_labels,
+                    )
+                else:
+                    prediction_labels = predictions.argmax(axis=1)
+                    score = self.score_function(
+                        true_labels,
+                        prediction_labels,
+                        average='weighted'
+                    )
+
 
             self.results['scores'].append(score.item())
 
             if not self.is_regression:
                 # ROC-AUC score for classification
-                roc_score = metrics.roc_auc_score(
-                    true_labels,
-                    predictions,
-                )
+                if self.model_kwargs.get('mlp_output_size', 1) == 1:
+                    roc_score = metrics.roc_auc_score(
+                        true_labels,
+                        predictions,
+                    )
+                else:
+                    one_hot = np.zeros_like(predictions)
+                    for i, j in zip(one_hot, true_labels):
+                        i[j] = 1
+                    try:
+                        roc_score = metrics.roc_auc_score(one_hot,
+                                                          predictions,
+                                                          multi_class='ovo', average='macro', labels=[0, 1, 2, 3])
+                    except:
+                        roc_score = np.float32(0)
+
                 self.results['roc_scores'].append(roc_score.item())
 
             with (self.output_dir/self.results_file).open('w') as results_file:
@@ -616,13 +640,20 @@ class _Trainer_Base(object):
                 signal_windows = signal_windows.to(self.device)
                 labels = labels.to(self.device)
                 predictions = self.model(signal_windows)
-                if not is_train and not self.is_regression:
+                if not is_train and not self.is_regression and self.model_kwargs.get('mlp_output_size', 1) == 1:
                     # if evaluation/inference mode and classificaiton model,
                     # apply sigmoid to get [0,1] probability
                     predictions = predictions.sigmoid()
+                    labels = labels.type_as(predictions)
+                elif not self.is_regression and self.model_kwargs.get('mlp_output_size', 1) > 1:
+                    # torch.nn.CrossEntropyLoss needs labels to be long and predictions not sigmoid
+                    labels = labels.type(torch.long)
+                else:
+                    # Set only label type, leave predictions not sigmoid
+                    labels = labels.type_as(predictions)
                 loss = self.loss_function(
                     predictions.squeeze(),
-                    labels.type_as(predictions),
+                    labels,
                 )
                 if self.is_regression and self.inverse_weight_label:
                     loss = torch.div(loss, labels)
