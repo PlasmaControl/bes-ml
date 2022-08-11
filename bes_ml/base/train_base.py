@@ -1,26 +1,26 @@
 # python library imports
-from importlib.resources import is_resource
-from pathlib import Path
-import logging
-from typing import Union, Iterable, Tuple
-import time
-import sys
-import io
-import pickle
-import inspect
 import contextlib
+import inspect
+import io
+import logging
+import pickle
+import sys
+import time
+from pathlib import Path
+from typing import Union, Iterable, Tuple
 
 # 3rd-party package imports
-import numpy as np
 import h5py
-from sklearn import metrics
+import numpy as np
 import torch
 import torch.utils.data
 import torchinfo
 import yaml
+from sklearn import metrics
 
 # repo import
 from bes_data.sample_data import sample_elm_data_file
+
 try:
     from .models import Multi_Features_Model
     from .data import ELM_Dataset, elm_data_loader

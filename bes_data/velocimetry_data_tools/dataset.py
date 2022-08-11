@@ -1,17 +1,19 @@
-import argparse
-import logging
 import pickle
 import re
 from pathlib import Path
-from typing import Union
 
 import h5py
 import numpy as np
 
 from bes_ml.base.data import MultiSourceDataset
+import pickle
+import re
+from pathlib import Path
 
-#repo imports
-from bes_data.sample_data import sample_data_dir
+import h5py
+import numpy as np
+
+from bes_ml.base.data import MultiSourceDataset
 
 
 class VelocimetryDataset(MultiSourceDataset):
