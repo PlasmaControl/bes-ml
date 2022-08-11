@@ -85,6 +85,13 @@ def test_velocimetry_training():
                                 **input_args)
     model.train()
 
+def test_confinement_training():
+    input_args = DEFAULT_INPUT_ARGS.copy()
+    output_dir = RUN_DIR / 'turbulence_test'
+    model = velocimetry.Trainer(output_dir=output_dir,
+                                **input_args)
+    model.train()
+
 
 def _common_analysis(analyzer):
     analyzer.plot_training(save=True)
