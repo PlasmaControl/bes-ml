@@ -86,6 +86,5 @@ def _common_analysis(analyzer):
     assert (analyzer.output_dir/'inference.pdf').exists()
 
 if __name__=="__main__":
-    print("NOTE: This test script runs for ~3-5 minutes")
     shutil.rmtree(RUN_DIR, ignore_errors=True)
     sys.exit(pytest.main(['--verbose', '--exitfirst', "--ignore-glob='*archive*'"]))
