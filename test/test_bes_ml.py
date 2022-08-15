@@ -6,6 +6,7 @@ import pytest
 
 from bes_ml import elm_classification
 from bes_ml import elm_regression
+from bes_ml import velocimetry
 
 
 RUN_DIR = Path('run_dir')
@@ -76,6 +77,20 @@ def test_elm_regression_cnn_features():
         output_dir=output_dir,
     )
     _common_analysis(analyzer)
+
+def test_velocimetry_training():
+    input_args = DEFAULT_INPUT_ARGS.copy()
+    output_dir = RUN_DIR / 'velocimetry_test'
+    model = velocimetry.Trainer(output_dir=output_dir,
+                                **input_args)
+    model.train()
+
+def test_confinement_training():
+    input_args = DEFAULT_INPUT_ARGS.copy()
+    output_dir = RUN_DIR / 'turbulence_test'
+    model = velocimetry.Trainer(output_dir=output_dir,
+                                **input_args)
+    model.train()
 
 
 def _common_analysis(analyzer):

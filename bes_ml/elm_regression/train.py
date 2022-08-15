@@ -20,7 +20,7 @@ class Trainer(_Trainer_Base):
         log_time: bool = False,  # if True, use log(time_to_elm_onset)
         inverse_weight_label: bool = False,  # must be False if log_time is False
         # parent class `_Trainer` parameters
-        data_file: Union[Path,str] = sample_elm_data_file,  # path to data file
+        data_location: Union[Path, str] = sample_elm_data_file,  # path to data file
         output_dir: Union[Path,str] = 'run_dir',  # path to output dir.
         results_file: str = 'results.yaml',  # output training results
         log_file: str = 'log.txt',  # output log file
@@ -135,7 +135,7 @@ class Trainer(_Trainer_Base):
 if __name__=='__main__':
     model = Trainer(
         batch_size=32, 
-        minibatch_interval=50, 
+        minibatch_interval=50,
         fraction_validation=0.2,
         fraction_test=0.2,
         log_time=True,

@@ -14,7 +14,7 @@ run_dir*/
 
 # exclusions
 # sample data files
-!bes_data/sample_data/*
+!bes_data/**
 
 # python artifacts
 __pycache__/

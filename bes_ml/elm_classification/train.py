@@ -21,7 +21,7 @@ class Trainer(_Trainer_Base):
         threshold: float = 0.5,  # threshold for binary classification
         oversample_active_elm: bool = True,  # if True, oversample active ELMs to balance data
         # parent class `_Trainer` parameters
-        data_file: Union[Path,str] = sample_elm_data_file,  # path to data file
+        data_location: Union[Path, str] = sample_elm_data_file,  # path to data file
         output_dir: Union[Path,str] = 'run_dir',  # path to output dir.
         results_file: str = 'results.yaml',  # output training results
         log_file: str = 'log.txt',  # output log file
@@ -199,7 +199,7 @@ if __name__=='__main__':
     model = Trainer(
         batch_size=32, 
         n_epochs=4,
-        minibatch_interval=50, 
+        minibatch_interval=50,
         fraction_validation=0.1,
         fraction_test=0.4,
     )
