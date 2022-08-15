@@ -30,7 +30,7 @@ class Analyzer(_Analyzer_Base):
         self.is_regression = False
         self._set_regression_or_classification_defaults()
 
-        self._restore_test_data()
+        self._load_test_data()
 
         self.roc_scores = None
 
