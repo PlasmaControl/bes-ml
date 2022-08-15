@@ -1,26 +1,26 @@
 # python library imports
-from importlib.resources import is_resource
-from pathlib import Path
-import logging
-from typing import Union, Iterable, Tuple
-import time
-import sys
-import io
-import pickle
-import inspect
 import contextlib
+import inspect
+import io
+import logging
+import pickle
+import sys
+import time
+from pathlib import Path
+from typing import Union, Iterable, Tuple
 
 # 3rd-party package imports
-import numpy as np
 import h5py
-from sklearn import metrics
+import numpy as np
 import torch
 import torch.utils.data
 import torchinfo
 import yaml
+from sklearn import metrics
 
 # repo import
 from bes_data.sample_data import sample_elm_data_file
+
 try:
     from .models import Multi_Features_Model
     from .data import ELM_Dataset, elm_data_loader
@@ -32,7 +32,7 @@ class _Trainer_Base(object):
 
     def __init__(
         self,
-        data_file: Union[Path,str] = sample_elm_data_file,  # path to data file
+        data_location: Union[Path, str] = sample_elm_data_file,  # path to data
         output_dir: Union[Path,str] = 'run_dir',  # path to output dir.
         results_file: str = 'results.yaml',  # output training results
         log_file: str = 'log.txt',  # output log file
@@ -59,11 +59,11 @@ class _Trainer_Base(object):
     ) -> None:
 
         # input data file and output directory
-        data_file = Path(data_file)
+        data_location = Path(data_location)
         output_dir = Path(output_dir)
         output_dir.mkdir(exist_ok=True, parents=True)
 
-        self.data_file = data_file
+        self.data_location = data_location
         self.output_dir = output_dir
         self.results_file = results_file
         self.log_file = log_file
@@ -195,9 +195,13 @@ class _Trainer_Base(object):
             self.loss_function = torch.nn.MSELoss(reduction="none")
             self.score_function = metrics.r2_score
         else:
-            # classification model (e.g. active ELM prediction for `prediction_horizon` horizon
-            self.loss_function = torch.nn.BCEWithLogitsLoss(reduction="none")
+            if self.model_kwargs['mlp_output_size'] == 1:
+                # classification model (e.g. active ELM prediction for `prediction_horizon` horizon
+                self.loss_function = torch.nn.BCEWithLogitsLoss(reduction="none")
+            else:
+                self.loss_function = torch.nn.CrossEntropyLoss(reduction="none")
             self.score_function = metrics.f1_score
+
 
     def make_model_and_device(self):
         if self.device == 'auto':
@@ -207,7 +211,7 @@ class _Trainer_Base(object):
 
         # make model
         self.model = Multi_Features_Model(
-            logger=self.logger, 
+            logger=self.logger,
             signal_window_size=self.signal_window_size,
             **self.model_kwargs,
         )
@@ -234,55 +238,26 @@ class _Trainer_Base(object):
         self.validation_data = None
         self.test_data = None
         self._get_data()
+        
+        self.train_dataset = None
+        self.validation_dataset = None
+        self._make_datasets()
+
+        self.train_data_loader = None
+        self.validation_data_loader = None
+        self._make_data_loaders()
 
         if self.test_data_file and self.fraction_test>0.0:
             self._save_test_data()
-        
-        # make pytorch `dataset` for train and validation data
-        self.train_dataset = ELM_Dataset(
-            signals = self.train_data[0],
-            labels = self.train_data[1],
-            sample_indices = self.train_data[2],
-            window_start = self.train_data[3],
-            signal_window_size = self.signal_window_size,
-            prediction_horizon = self.prediction_horizon,
-        )
-        self.validation_dataset = ELM_Dataset(
-            signals = self.validation_data[0],
-            labels = self.validation_data[1],
-            sample_indices = self.validation_data[2],
-            window_start = self.validation_data[3],
-            signal_window_size = self.signal_window_size,
-            prediction_horizon = self.prediction_horizon,
-        )
-
-        # make pytorch `dataloader` for train and validation data
-        self.train_data_loader = elm_data_loader(
-            dataset = self.train_dataset,
-            batch_size = self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers,
-            pin_memory=True,
-            drop_last=True,
-        )
-        self.validation_data_loader = elm_data_loader(
-            dataset = self.validation_dataset,
-            batch_size = self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=True,
-            drop_last=True,
-        )
 
         self.results = {}
 
     def _get_data(self) -> None:
+        self.data_location = self.data_location.resolve()
+        assert self.data_location.exists(), f"{self.data_location} does not exist"
+        self.logger.info(f"Data file: {self.data_location}")
 
-        self.data_file = self.data_file.resolve()
-        assert self.data_file.exists(), f"{self.data_file} does not exist"
-        self.logger.info(f"Data file: {self.data_file}")
-
-        with h5py.File(self.data_file, "r") as data_file:
+        with h5py.File(self.data_location, "r") as data_file:
             elm_indices = np.array(
                 [int(key) for key in data_file], 
                 dtype=np.int32,
@@ -358,7 +333,7 @@ class _Trainer_Base(object):
         packaged_window_start = None
         packaged_valid_t0 = []
         packaged_labels = []
-        with h5py.File(self.data_file, 'r') as h5_file:
+        with h5py.File(self.data_location, 'r') as h5_file:
             for elm_index in elm_indices:
                 elm_key = f"{elm_index:05d}"
                 elm_event = h5_file[elm_key]
@@ -428,9 +403,39 @@ class _Trainer_Base(object):
         # must implement in subclass
         raise NotImplementedError
 
+    def _make_datasets(self) -> None:
+        self.train_dataset = ELM_Dataset(
+            *self.train_data[0:4], 
+            signal_window_size = self.signal_window_size,
+            prediction_horizon = self.prediction_horizon,
+        )
+        self.validation_dataset = ELM_Dataset(
+            *self.validation_data[0:4], 
+            signal_window_size = self.signal_window_size,
+            prediction_horizon = self.prediction_horizon,
+        )
+
     def _get_valid_indices(self) -> None:
         # must implement in subclass
         raise NotImplementedError
+
+    def _make_data_loaders(self) -> None:
+        self.train_data_loader = torch.utils.data.DataLoader(
+                self.train_dataset,
+                batch_size=self.batch_size,
+                shuffle=True,
+                num_workers=self.num_workers,
+                pin_memory=True,
+                drop_last=True,
+            )
+        self.validation_data_loader = torch.utils.data.DataLoader(
+                self.validation_dataset,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=self.num_workers,
+                pin_memory=True,
+                drop_last=True,
+            )
 
     def _print_model_summary(self) -> None:
         self.logger.info("MODEL SUMMARY")
@@ -531,20 +536,41 @@ class _Trainer_Base(object):
             if self.is_regression:
                 score = self.score_function(true_labels, predictions)
             else:
-                prediction_labels = (predictions > self.threshold).astype(int)
-                score = self.score_function(
-                    true_labels,
-                    prediction_labels,
-                )
+                if self.model_kwargs.get('mlp_output_size', 1) == 1:
+                    prediction_labels = (predictions > self.threshold).astype(int)
+                    score = self.score_function(
+                        true_labels,
+                        prediction_labels,
+                    )
+                else:
+                    prediction_labels = predictions.argmax(axis=1)
+                    score = self.score_function(
+                        true_labels,
+                        prediction_labels,
+                        average='weighted'
+                    )
+
 
             self.results['scores'].append(score.item())
 
             if not self.is_regression:
                 # ROC-AUC score for classification
-                roc_score = metrics.roc_auc_score(
-                    true_labels,
-                    predictions,
-                )
+                if self.model_kwargs.get('mlp_output_size', 1) == 1:
+                    roc_score = metrics.roc_auc_score(
+                        true_labels,
+                        predictions,
+                    )
+                else:
+                    one_hot = np.zeros_like(predictions)
+                    for i, j in zip(one_hot, true_labels):
+                        i[j] = 1
+                    try:
+                        roc_score = metrics.roc_auc_score(one_hot,
+                                                          predictions,
+                                                          multi_class='ovo', average='macro', labels=[0, 1, 2, 3])
+                    except:
+                        roc_score = np.float32(0)
+
                 self.results['roc_scores'].append(roc_score.item())
 
             with (self.output_dir/self.results_file).open('w') as results_file:
@@ -606,7 +632,7 @@ class _Trainer_Base(object):
             mode = 'Valid'
         with context:
             for i_batch, (signal_windows, labels) in enumerate(data_loader):
-                if (i_batch+1)%self.minibatch_interval == 0:
+                if (i_batch+1) % self.minibatch_interval == 0:
                     t_start_minibatch = time.time()
                 if is_train:
                     # reset grads
@@ -614,13 +640,20 @@ class _Trainer_Base(object):
                 signal_windows = signal_windows.to(self.device)
                 labels = labels.to(self.device)
                 predictions = self.model(signal_windows)
-                if not is_train and not self.is_regression:
+                if not is_train and not self.is_regression and self.model_kwargs.get('mlp_output_size', 1) == 1:
                     # if evaluation/inference mode and classificaiton model,
                     # apply sigmoid to get [0,1] probability
                     predictions = predictions.sigmoid()
+                    labels = labels.type_as(predictions)
+                elif not self.is_regression and self.model_kwargs.get('mlp_output_size', 1) > 1:
+                    # torch.nn.CrossEntropyLoss needs labels to be long and predictions not sigmoid
+                    labels = labels.type(torch.long)
+                else:
+                    # Set only label type, leave predictions not sigmoid
+                    labels = labels.type_as(predictions)
                 loss = self.loss_function(
                     predictions.squeeze(),
-                    labels.type_as(predictions),
+                    labels,
                 )
                 if self.is_regression and self.inverse_weight_label:
                     loss = torch.div(loss, labels)

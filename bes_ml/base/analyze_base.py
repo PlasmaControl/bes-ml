@@ -80,7 +80,7 @@ class _Analyzer_Base(object):
         checkpoint_file = self.output_dir / self.inputs['checkpoint_file']
         assert checkpoint_file.exists(), f"{checkpoint_file} does not exist"
         model_state_dict = torch.load(
-            checkpoint_file, 
+            checkpoint_file,
             map_location=self.device,
         )
         self.model.load_state_dict(model_state_dict)
@@ -228,8 +228,8 @@ class _Analyzer_Base(object):
             plt.plot(elm_time, signals, label="BES")
             plt.plot(elm_time, labels, label="Label")
             plt.plot(
-                elm_time[prediction_offset:prediction_offset+predictions.size], 
-                predictions, 
+                elm_time[prediction_offset:prediction_offset+predictions.size],
+                predictions,
                 label="Prediction",
             )
             plt.xlabel("Time (micro-s)")
@@ -247,7 +247,7 @@ class _Analyzer_Base(object):
             inputs = sorted(self.output_dir.glob('inference_*.pdf'))
             output = self.output_dir/'inference.pdf'
             self._merge_pdfs(
-                inputs=inputs, 
+                inputs=inputs,
                 output=output,
                 delete_inputs=True,
             )
