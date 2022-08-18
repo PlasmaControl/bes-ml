@@ -17,7 +17,7 @@ class Analyzer(_Analyzer_Base):
 
 
 if __name__=='__main__':
-    analyzer = Analyzer()
+    analyzer = Analyzer(output_dir='/home/jazimmerman/PycharmProjects/bes-edgeml-models/bes-edgeml-work/elm_regression/test')
     analyzer.plot_training(save=True)
     analyzer.run_inference()
     analyzer.plot_inference(save=True)

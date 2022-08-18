@@ -134,6 +134,8 @@ def test_velocimetry_training():
         **input_args,
     )
     model.train()
+    analyzer = velocimetry.Analyzer(output_dir=output_dir)
+    _common_analysis(analyzer)
 
 def test_confinement_training():
     input_args = DEFAULT_INPUT_ARGS.copy()
@@ -144,7 +146,10 @@ def test_confinement_training():
         **input_args,
     )
     model.train()
-
+    analyzer = confinement_classification.Analyzer(
+        output_dir=output_dir
+    )
+    _common_analysis()
 def _common_analysis(analyzer):
     analyzer.plot_training(save=True)
     analyzer.run_inference()
