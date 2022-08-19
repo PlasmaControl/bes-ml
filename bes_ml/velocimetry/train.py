@@ -24,9 +24,9 @@ class Trainer(_Trainer_Base):
     def __init__(
         self,
         # subclass parameters
-        max_elms: int = None,  # limit ELMs
-        log_time: bool = False,  # if True, use log(time_to_elm_onset)
-        inverse_weight_label: bool = False,  # must be False if log_time is False
+        # max_elms: int = None,  # limit ELMs
+        # log_time: bool = False,  # if True, use log(time_to_elm_onset)
+        # inverse_weight_label: bool = False,  # must be False if log_time is False
         # parent class `_Trainer` parameters
         data_location: str = sample_data_dir / 'velocimetry_data', #location of stored data
         output_dir: Union[Path,str] = 'run_dir',  # path to output dir.
@@ -107,9 +107,9 @@ class Trainer(_Trainer_Base):
         self._set_regression_or_classification_defaults()
 
         # subclass attributes
-        self.max_elms = max_elms
-        self.log_time = log_time
-        self.inverse_weight_label = inverse_weight_label
+        # self.max_elms = max_elms
+        # self.log_time = log_time
+        # self.inverse_weight_label = inverse_weight_label
         self.dataset_to_ram = dataset_to_ram
         self.velocimetry_dataset = None
 
@@ -186,10 +186,10 @@ if __name__=='__main__':
     model = Trainer(
         batch_size=32,
         minibatch_interval=50,
-        max_elms=5,
+        # max_elms=5,
         fraction_validation=0.2,
         fraction_test=0.2,
-        log_time=True,
-        inverse_weight_label=True,
+        # log_time=True,
+        # inverse_weight_label=True,
     )
     model.train()

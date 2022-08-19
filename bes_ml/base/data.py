@@ -60,7 +60,7 @@ class MultiSourceDataset(torch.utils.data.Dataset):
                  fraction_test=0.15,
                  fraction_validation=0.1,
                  dataset_to_ram=True,
-                 logger: logging.Logger | None = None,
+                 logger: logging.Logger = None,
                  ):
 
         self.data_location = data_location
