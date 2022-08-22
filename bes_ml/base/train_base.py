@@ -8,7 +8,6 @@ import time
 from pathlib import Path
 from typing import Union, Iterable, Tuple
 import dataclasses
-from dataclasses import dataclass
 
 # 3rd-party package imports
 import h5py
@@ -27,7 +26,7 @@ except ImportError:
     from bes_ml.base.models import Multi_Features_Model, _Multi_Features_Model_Dataclass
 
 
-@dataclass
+@dataclasses.dataclass
 class _Trainer_Base(_Multi_Features_Model_Dataclass):
     data_location: Union[Path, str] = sample_elm_data_file  # path to data; dir or file depending on task
     output_dir: Union[Path,str] = Path('run_dir')  # path to output dir.

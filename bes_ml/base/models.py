@@ -1,6 +1,6 @@
 import logging
 import inspect
-from dataclasses import dataclass
+import dataclasses
 
 import numpy as np
 import torch
@@ -14,7 +14,7 @@ except ImportError:
     from bes_ml.base import dct
 
 
-@dataclass(eq=False)
+@dataclasses.dataclass(eq=False)
 class _Base_Features_Dataclass():
     signal_window_size: int = 64  # power of 2; ~16-512
     spatial_maxpool_size: int = 1  # 1 (default, no spatial maxpool), 2, or 4
@@ -25,8 +25,15 @@ class _Base_Features_Dataclass():
     logger: logging.Logger = None
 
 
-@dataclass(eq=False)
+@dataclasses.dataclass(eq=False)
 class _Base_Features(nn.Module, _Base_Features_Dataclass):
+    signal_window_size: int = 64  # power of 2; ~16-512
+    spatial_maxpool_size: int = 1  # 1 (default, no spatial maxpool), 2, or 4
+    time_interval: int = 1  # time domain slice interval (i.e. time[::interval])
+    subwindow_size: int = -1  # power of 2, or -1 (default) for full signal window
+    negative_slope: float = 1e-3  # relu negative slope; ~1e-3
+    dropout_rate: float = 0.1  # ~0.1
+    logger: logging.Logger = None
 
     def __post_init__(self):
         super().__init__()
@@ -77,12 +84,12 @@ class _Base_Features(nn.Module, _Base_Features_Dataclass):
         return torch.flatten(self.relu(self.dropout(x)), 1)
 
 
-@dataclass(eq=False)
+@dataclasses.dataclass(eq=False)
 class _Dense_Features_Dataclass(_Base_Features_Dataclass):
     dense_num_kernels: int = 0
 
 
-@dataclass(eq=False)
+@dataclasses.dataclass(eq=False)
 class Dense_Features(_Dense_Features_Dataclass, _Base_Features):
 
     def __post_init__(self):
@@ -129,32 +136,39 @@ class Dense_Features(_Dense_Features_Dataclass, _Base_Features):
         return x
 
 
-@dataclass(eq=False)
+@dataclasses.dataclass(eq=False)
 class _CNN_Features_Dataclass(_Base_Features_Dataclass):
     cnn_layer1_num_kernels: int = 0
-    cnn_layer1_kernel_time_size: int = 8
+    cnn_layer1_kernel_time_size: int = 5  # must be odd
     cnn_layer1_kernel_spatial_size: int = 3
-    cnn_layer1_maxpool_time_size: int = 1
+    cnn_layer1_maxpool_time_size: int = 4
     cnn_layer1_maxpool_spatial_size: int = 1
     cnn_layer2_num_kernels: int = 0
-    cnn_layer2_kernel_time_size: int = 8
+    cnn_layer2_kernel_time_size: int = 5  # must be odd
     cnn_layer2_kernel_spatial_size: int = 3
-    cnn_layer2_maxpool_time_size: int = 1
+    cnn_layer2_maxpool_time_size: int = 4
     cnn_layer2_maxpool_spatial_size: int = 2
 
 
-@dataclass(eq=False)
+@dataclasses.dataclass(eq=False)
 class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
 
     def __post_init__(self):
         super().__post_init__()
 
         # CNN only valid with subwindow_size == time_points == signal_window_size
-        assert self.subwindow_size == self.signal_window_size
-        assert self.time_interval == 1
-        assert self.subwindow_nbins == 1
-        assert self.time_points == self.signal_window_size
-        assert self.spatial_maxpool_size == 1
+        assert (
+            self.subwindow_size == self.signal_window_size and
+            self.time_interval == 1 and
+            self.subwindow_nbins == 1 and
+            self.time_points == self.signal_window_size and
+            self.spatial_maxpool_size == 1
+        )
+
+        assert (
+            self.cnn_layer1_kernel_time_size % 2 == 1 and
+            self.cnn_layer2_kernel_time_size % 2 == 1
+        )
 
         input_shape = (1, self.signal_window_size, 8, 8)
 
@@ -245,13 +259,13 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
         return torch.flatten(x, 1)
 
 
-@dataclass(eq=False)
+@dataclasses.dataclass(eq=False)
 class _FFT_Features_Dataclass(_Base_Features_Dataclass):
     fft_num_kernels: int = 0
     fft_nbins: int = 4
 
 
-@dataclass(eq=False)
+@dataclasses.dataclass(eq=False)
 class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
 
     def __post_init__(self):
@@ -318,13 +332,13 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
         return output_features
 
 
-@dataclass(eq=False)
+@dataclasses.dataclass(eq=False)
 class _DCT_Features_Dataclass(_Base_Features_Dataclass):
     dct_num_kernels: int = 0
     dct_nbins: int = 2
 
 
-@dataclass(eq=False)
+@dataclasses.dataclass(eq=False)
 class DCT_Features(_DCT_Features_Dataclass, _Base_Features):
 
     def __post_init__(self):
@@ -388,14 +402,14 @@ class DCT_Features(_DCT_Features_Dataclass, _Base_Features):
         return output_features
 
 
-@dataclass(eq=False)
+@dataclasses.dataclass(eq=False)
 class _DWT_Features_Dataclass(_Base_Features_Dataclass):
     dwt_num_kernels: int = 0
     dwt_wavelet: str = 'db4'
     dwt_level: int = -1
 
 
-@dataclass(eq=False)
+@dataclasses.dataclass(eq=False)
 class DWT_Features(_DWT_Features_Dataclass, _Base_Features):
 
     def __post_init__(self):
@@ -483,7 +497,7 @@ class DWT_Features(_DWT_Features_Dataclass, _Base_Features):
         return output_features
 
 
-@dataclass(eq=False)
+@dataclasses.dataclass(eq=False)
 class _Multi_Features_Model_Dataclass(
     _Dense_Features_Dataclass,
     _CNN_Features_Dataclass,
@@ -496,7 +510,7 @@ class _Multi_Features_Model_Dataclass(
     mlp_output_size: int = 1
 
 
-@dataclass(eq=False)
+@dataclasses.dataclass(eq=False)
 class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
 
     def __post_init__(self):

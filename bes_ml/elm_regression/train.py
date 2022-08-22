@@ -1,5 +1,5 @@
 from typing import Tuple
-from dataclasses import dataclass
+import dataclasses
 
 import numpy as np
 
@@ -12,7 +12,7 @@ except ImportError:
     from bes_ml.base.data import ELM_Dataset
 
 
-@dataclass(eq=False)
+@dataclasses.dataclass(eq=False)
 class Trainer(_Trainer_Base):
     max_elms: int = None  # limit ELMs
     log_time: bool = False  # if True, use log(time_to_elm_onset)
@@ -61,10 +61,11 @@ class Trainer(_Trainer_Base):
         )
 
 
-
 if __name__=='__main__':
     model = Trainer(
-        dense_num_kernels=8,
+        # dense_num_kernels=8,
+        cnn_layer1_num_kernels = 8,
+        cnn_layer2_num_kernels = 8,
         batch_size=64,
         n_epochs=2,
         minibatch_interval=50,

@@ -1,9 +1,8 @@
 from typing import Tuple
-from dataclasses import dataclass
+import dataclasses
 
 import numpy as np
 
-from bes_data.sample_data import sample_elm_data_file
 try:
     from ..base.train_base import _Trainer_Base
     from ..base.data import ELM_Dataset
@@ -12,7 +11,7 @@ except ImportError:
     from bes_ml.base.data import ELM_Dataset
 
 
-@dataclass(eq=False)
+@dataclasses.dataclass(eq=False)
 class Trainer(_Trainer_Base):
     max_elms: int = None  # limit ELMs
     prediction_horizon: int = 200  # prediction horizon in time samples
@@ -123,7 +122,6 @@ class Trainer(_Trainer_Base):
             signal_window_size = self.signal_window_size,
             prediction_horizon = self.prediction_horizon,
         )
-
 
 
 if __name__=='__main__':
