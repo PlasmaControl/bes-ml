@@ -182,18 +182,15 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
         self.optimizer = None
         self.lr_scheduler = None
         self._make_optimizer_scheduler_loss()
-        assert (self.optimizer and self.lr_scheduler)
 
         self.train_data = None
         self.validation_data = None
         self.test_data = None
         self._get_data()
-        assert self.train_data
         
         self.train_dataset = None
         self.validation_dataset = None
         self._make_datasets()
-        assert self.train_dataset
 
         self.train_data_loader = None
         self.validation_data_loader = None
@@ -589,7 +586,7 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
                     predictions.squeeze(),
                     labels,
                 )
-                if self.is_regression and self.inverse_weight_label:
+                if self.is_regression and hasattr(self, 'inverse_weight_loss') and self.inverse_weight_label:
                     loss = torch.div(loss, labels)
                 loss = loss.mean()  # batch loss
                 losses = np.append(losses, loss.detach().cpu().numpy())  # track batch losses
