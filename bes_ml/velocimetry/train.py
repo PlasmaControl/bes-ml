@@ -113,9 +113,9 @@ class Trainer(_Trainer_Base):
         self.dataset_to_ram = dataset_to_ram
         self.velocimetry_dataset = None
 
-        self.make_model_and_device()
+        self.make_model_and_set_device()
 
-        self._finish_subclass_initialization()
+        self.finish_subclass_initialization()
 
     def train(self) -> None:
         self.results['scores_label'] = 'R2'
