@@ -296,7 +296,7 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
         )
 
     def forward(self, x):
-        x = x.to(self.args.device)  # needed for PowerPC architecture
+        # x = x.to(self.device)  # needed for PowerPC architecture
         x = self._time_interval_and_maxpool(x)
         fft_features_size = [
             x.shape[0],
@@ -370,7 +370,7 @@ class DCT_Features(_DCT_Features_Dataclass, _Base_Features):
         )
 
     def forward(self, x):
-        x = x.to(self.args.device)  # needed for PowerPC architecture
+        # x = x.to(self.device)  # needed for PowerPC architecture
         x = self._time_interval_and_maxpool(x)
         dct_features_size = [
             x.shape[0],
@@ -392,9 +392,10 @@ class DCT_Features(_DCT_Features_Dataclass, _Base_Features):
             dct_bins = torch.empty(size=dct_bins_size, dtype=x.dtype, device=x.device)
             x_subwindow = x[:, :, i_sw*self.subwindow_size:(i_sw+1)*self.subwindow_size, :, :]
             for i_bin in torch.arange(self.dct_nbins):
-                dct_bins[:, i_bin: i_bin + 1, :, :, :] = dct.dct_3d(
+                tmp = dct.dct_3d(
                     x_subwindow[:, :, i_bin * self.ndct:(i_bin+1) * self.ndct, :, :]
                 )
+                dct_bins[:, i_bin: i_bin + 1, :, :, :] = tmp
             dct_sw = torch.mean(dct_bins, dim=1, keepdim=True)
             dct_sw_features = torch.unsqueeze( self.conv[i_sw](dct_sw), 1)
             dct_features[:, i_sw:i_sw+1, :, :, :, :] = dct_sw_features

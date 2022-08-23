@@ -126,7 +126,8 @@ class Trainer(_Trainer_Base):
 
 if __name__=='__main__':
     model = Trainer(
-        dense_num_kernels=8,
+        # dense_num_kernels=8,
+        dct_num_kernels=8,
         batch_size=64,
         n_epochs=2,
         minibatch_interval=50,

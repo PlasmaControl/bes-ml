@@ -49,6 +49,51 @@ def test_elm_classification_cnn_features():
     )
     _common_analysis(analyzer)
 
+def test_elm_classification_fft_features():
+    input_args = DEFAULT_INPUT_ARGS.copy()
+    output_dir = RUN_DIR / 'elm_classification_fft'
+    model = elm_classification.Trainer(
+        output_dir=output_dir,
+        max_elms=5,
+        fft_num_kernels=8,
+        **input_args,
+    )
+    model.train()
+    analyzer = elm_classification.Analyzer(
+        output_dir=output_dir,
+    )
+    _common_analysis(analyzer)
+
+def test_elm_classification_dwt_features():
+    input_args = DEFAULT_INPUT_ARGS.copy()
+    output_dir = RUN_DIR / 'elm_classification_dwt'
+    model = elm_classification.Trainer(
+        output_dir=output_dir,
+        max_elms=5,
+        dwt_num_kernels=8,
+        **input_args,
+    )
+    model.train()
+    analyzer = elm_classification.Analyzer(
+        output_dir=output_dir,
+    )
+    _common_analysis(analyzer)
+
+# def test_elm_classification_dct_features():
+#     input_args = DEFAULT_INPUT_ARGS.copy()
+#     output_dir = RUN_DIR / 'elm_classification_dct'
+#     model = elm_classification.Trainer(
+#         output_dir=output_dir,
+#         max_elms=5,
+#         dct_num_kernels=8,
+#         **input_args,
+#     )
+#     model.train()
+#     analyzer = elm_classification.Analyzer(
+#         output_dir=output_dir,
+#     )
+#     _common_analysis(analyzer)
+
 def test_elm_regression_dense_features():
     input_args = DEFAULT_INPUT_ARGS.copy()
     output_dir = RUN_DIR / 'elm_regression_dense'
