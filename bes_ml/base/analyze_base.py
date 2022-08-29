@@ -1,26 +1,27 @@
 from pathlib import Path
-from typing import Union, Sequence
+from typing import Union
 import pickle
-import shutil
-import subprocess
 import dataclasses
 
 import yaml
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn import metrics
 import torch
 
 try:
-    from .models import Multi_Features_Model, _Multi_Features_Model_Dataclass
+    from .models import Multi_Features_Model  #, _Multi_Features_Model_Dataclass
     from .data import ELM_Dataset, elm_data_loader
+    from .utilities import merge_pdfs
 except ImportError:
-    from bes_ml.base.models import Multi_Features_Model, _Multi_Features_Model_Dataclass
+    from bes_ml.base.models import Multi_Features_Model  #, _Multi_Features_Model_Dataclass
     from bes_ml.base.data import ELM_Dataset, elm_data_loader
+    from bes_ml.base.utilities import merge_pdfs
 
 
 @dataclasses.dataclass
-class _Analyzer_Base(_Multi_Features_Model_Dataclass):
+class _Analyzer_Base(
+    # _Multi_Features_Model_Dataclass,
+):
     output_dir: Union[str,Path] = 'run_dir'
     inputs_file: Union[str,Path] = 'inputs.yaml'
     device: str = 'auto'  # auto (default), cpu, cuda, or cuda:X
@@ -44,16 +45,14 @@ class _Analyzer_Base(_Multi_Features_Model_Dataclass):
         if self.device == 'auto':
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device = torch.device(self.device)
+        print(f"Using device: {self.device}")
 
         # instantiate model, send to device, and load model parameters
         fields = list(dataclasses.fields(Multi_Features_Model))
         for i_field, field_name in enumerate([field.name for field in fields]):
             if field_name == 'logger':
                 fields.pop(i_field)
-        model_kwargs = {
-            field.name: self.inputs[field.name] 
-            for field in fields
-        }
+        model_kwargs = {field.name: self.inputs[field.name] for field in fields}
         self.model = Multi_Features_Model(**model_kwargs)
         self.model = self.model.to(self.device)
         self._load_model_parameters()
@@ -74,16 +73,14 @@ class _Analyzer_Base(_Multi_Features_Model_Dataclass):
         self.is_regression = None
         self.is_classification = None
 
-    def _load_test_data(self):
+    def _load_test_data(self) -> None:
         # restore test data
         test_data_file = self.output_dir / self.inputs['test_data_file']
         assert test_data_file.exists(), f"{test_data_file} does not exist."
         with test_data_file.open('rb') as file:
             self.test_data = pickle.load(file)
 
-    def _load_model_parameters(
-        self,
-    ) -> None:
+    def _load_model_parameters(self) -> None:
         checkpoint_file = self.output_dir / self.inputs['checkpoint_file']
         assert checkpoint_file.exists(), f"{checkpoint_file} does not exist"
         model_state_dict = torch.load(
@@ -92,9 +89,7 @@ class _Analyzer_Base(_Multi_Features_Model_Dataclass):
         )
         self.model.load_state_dict(model_state_dict)
 
-    def run_inference(
-        self,
-    ) -> None:
+    def run_inference(self) -> None:
         n_elms = len(self.test_data['elm_indices'])
         self.all_predictions = []
         self.all_labels = []
@@ -148,7 +143,7 @@ class _Analyzer_Base(_Multi_Features_Model_Dataclass):
                 self.all_signals.append(elm_signals[:,2,3])
         print('Inference complete')
 
-    def _load_training_results(self):
+    def _load_training_results(self) -> None:
         results_file = self.output_dir / self.inputs['results_file']
         assert results_file.exists, f"{results_file} does not exist"
         with results_file.open('r') as f:
@@ -161,7 +156,7 @@ class _Analyzer_Base(_Multi_Features_Model_Dataclass):
     def plot_training(
         self,
         save: bool = False,  # save PDF
-    ):
+    ) -> None:
         self._load_training_results()
         n_epochs = self.scores.size
         epochs = np.arange(n_epochs) + 1
@@ -193,7 +188,7 @@ class _Analyzer_Base(_Multi_Features_Model_Dataclass):
     def plot_inference(
         self,
         save: bool = False,  # save PDFs
-    ):
+    ) -> None:
         assert None not in [self.all_labels, self.all_predictions, self.all_signals], \
             print("Nothing to plot; run inference first")
         n_elms = self.test_data['elm_indices'].size
@@ -237,44 +232,14 @@ class _Analyzer_Base(_Multi_Features_Model_Dataclass):
         if save:
             inputs = sorted(self.output_dir.glob('inference_*.pdf'))
             output = self.output_dir/'inference.pdf'
-            self._merge_pdfs(
+            merge_pdfs(
                 inputs=inputs,
                 output=output,
                 delete_inputs=True,
             )
 
     @staticmethod
-    def _merge_pdfs(
-        inputs: Union[Sequence,list] = None,
-        output: Union[str,Path] = None,
-        delete_inputs: bool = False,
-    ):
-        inputs = [Path(input) for input in inputs]
-        output = Path(output)
-        gs_cmd = shutil.which('gs')
-        assert gs_cmd is not None, \
-            "`gs` command (ghostscript) not found; available in conda-forge"
-        print(f"Merging PDFs into file: {output.as_posix()}")
-        cmd = [
-            gs_cmd,
-            '-q',
-            '-dBATCH',
-            '-dNOPAUSE',
-            '-sDEVICE=pdfwrite',
-            '-dPDFSETTINGS=/prepress',
-            '-dCompatibilityLevel=1.4',
-        ]
-        cmd.append(f"-sOutputFile={output.as_posix()}")
-        for pdf_file in inputs:
-            cmd.append(f"{pdf_file.as_posix()}")
-        result = subprocess.run(cmd, check=True)
-        assert result.returncode == 0 and output.exists()
-        if delete_inputs is True:
-            for pdf_file in inputs:
-                pdf_file.unlink()
-
-    @staticmethod
-    def show(*args, **kwargs):
+    def show(*args, **kwargs) -> None:
         """
         Wrapper for `plt.show()`
         """

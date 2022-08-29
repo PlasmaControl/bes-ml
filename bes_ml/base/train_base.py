@@ -12,6 +12,7 @@ import dataclasses
 # 3rd-party package imports
 import h5py
 import numpy as np
+import matplotlib.pyplot as plt
 import torch
 import torch.utils.data
 import torchinfo
@@ -22,8 +23,10 @@ from sklearn import metrics
 from bes_data.sample_data import sample_elm_data_file
 try:
     from .models import Multi_Features_Model, _Multi_Features_Model_Dataclass
+    from .utilities import merge_pdfs
 except ImportError:
     from bes_ml.base.models import Multi_Features_Model, _Multi_Features_Model_Dataclass
+    from bes_ml.base.utilities import merge_pdfs
 
 
 @dataclasses.dataclass
@@ -217,6 +220,7 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
                 },
                 file,
             )
+        assert test_data_file.exists(), f"{test_data_file} does not exist"
         self.logger.info(f"  File size: {test_data_file.stat().st_size/1e6:.1f} MB")
 
     def _get_data(self) -> None:
@@ -227,17 +231,17 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
         with h5py.File(self.data_location, "r") as data_file:
             elm_indices = np.array(
                 [int(key) for key in data_file], 
-                dtype=np.int32,
+                dtype=int,
             )
             time_frames = sum([data_file[key]['time'].shape[0] for key in data_file])
         self.logger.info(f"Events in data file: {elm_indices.size}")
         self.logger.info(f"Total time frames: {time_frames}")
 
-        if hasattr(self, 'max_elms'):  # TODO: remove `max_elms` from base class
-            np.random.shuffle(elm_indices)
-            if self.max_elms:
-                elm_indices = elm_indices[:self.max_elms]
-                self.logger.info(f"Limiting data to {self.max_elms} ELM events")
+        # TODO: remove `max_elms` from base class
+        np.random.shuffle(elm_indices)
+        if hasattr(self, 'max_elms') and self.max_elms:
+            elm_indices = elm_indices[:self.max_elms]
+            self.logger.info(f"Limiting data to {self.max_elms} ELM events")
 
         n_validation_elms = int(self.fraction_validation * elm_indices.size)
         n_test_elms = int(self.fraction_test * elm_indices.size)
@@ -262,6 +266,7 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
             elm_indices=validation_elms,
             shuffle_indices=False,
             oversample_active_elm=False,
+            save_filename='validation_elms',
         )
 
         if self.fraction_test > 0.0:
@@ -270,6 +275,7 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
                 elm_indices=test_elms,
                 shuffle_indices=False,
                 oversample_active_elm=False,
+                save_filename='test_elms',
             )
         else:
             self.logger.info("Skipping test data")
@@ -280,6 +286,7 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
         elm_indices: Iterable = None,
         shuffle_indices: bool = False,
         oversample_active_elm: bool = False,
+        save_filename: str = '',
     ) -> None:
         packaged_signals = None
         packaged_window_start = None
@@ -290,8 +297,17 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
         elif self.is_classification:
             label_type = np.int8
         assert label_type
+        if save_filename:
+            plt.ioff()
+            _, axes = plt.subplots(nrows=3, ncols=4, figsize=(16, 9))
+            self.logger.info(f"  Plotting valid indices: {save_filename}.pdf")
+            i_page = 1
         with h5py.File(self.data_location, 'r') as h5_file:
-            for elm_index in elm_indices:
+            for i_elm, elm_index in enumerate(elm_indices):
+                if save_filename and i_elm%12==0:
+                    for axis in axes.flat:
+                        plt.sca(axis)
+                        plt.cla()
                 elm_key = f"{elm_index:05d}"
                 elm_event = h5_file[elm_key]
                 signals = np.array(elm_event["signals"], dtype=np.float32)  # (64, <time>)
@@ -301,6 +317,23 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
                 except KeyError:
                     labels = np.array(elm_event["manual_labels"], dtype=label_type)
                 labels, signals, valid_t0 = self._get_valid_indices(labels, signals)
+                if save_filename:
+                    plt.sca(axes.flat[i_elm%12])
+                    plt.plot(signals[:,2,3]/10, label='BES 20')
+                    plt.plot(signals[:,2,5]/10, label='BES 22')
+                    plt.plot(labels, label='Label')
+                    plt.title(f"ELM index {elm_key}")
+                    plt.legend(fontsize='x-small')
+                    plt.xlabel('Time (mu-s)')
+                    if i_elm%12==11 or i_elm==elm_indices.size-1:
+                        plt.tight_layout()
+                        output_file = self.output_dir/(save_filename + f"_{i_page:02d}.pdf")
+                        plt.savefig(
+                            output_file, 
+                            format="pdf", 
+                            transparent=True,
+                        )
+                        i_page += 1
                 if packaged_signals is None:
                     packaged_window_start = np.array([0])
                     packaged_valid_t0 = valid_t0
@@ -316,6 +349,12 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
                     packaged_signals = np.concatenate([packaged_signals, signals], axis=0)
                     packaged_labels = np.concatenate([packaged_labels, labels], axis=0)                
 
+        if save_filename:
+            plt.close()
+            pdf_files = sorted(self.output_dir.glob(f'{save_filename}_*.pdf'))
+            output = self.output_dir / f'{save_filename}.pdf'
+            merge_pdfs(pdf_files, output, delete_inputs=True)
+        
         # valid indices for data sampling
         packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype="int")
         packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
