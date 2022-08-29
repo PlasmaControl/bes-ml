@@ -3,7 +3,6 @@ import dataclasses
 
 import numpy as np
 
-from bes_data.sample_data import sample_elm_data_file
 try:
     from ..base.train_base import _Trainer_Base
     from ..base.data import ELM_Dataset
