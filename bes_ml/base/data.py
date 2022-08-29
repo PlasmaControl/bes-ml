@@ -1,14 +1,15 @@
-import h5py
-import numpy as np
-import torch
-# multisource imports
 import copy
 from pathlib import Path
 import logging
 import traceback
+
+import h5py
+import numpy as np
+import torch
 import torch.utils.data
 
 
+# TODO: make dataclass
 class ELM_Dataset(torch.utils.data.Dataset):
 
     def __init__(
@@ -16,7 +17,7 @@ class ELM_Dataset(torch.utils.data.Dataset):
         signals: np.ndarray = None, 
         labels: np.ndarray = None, 
         sample_indices: np.ndarray = None, 
-        window_start: np.ndarray = None,
+        window_start: np.ndarray = None,  # TODO: refactor to remove `window_start` parameter
         signal_window_size: int = None,
         prediction_horizon: int = None,  # =0 for time-to-ELM regression; >=0 for classification prediction
     ) -> None:
@@ -60,7 +61,7 @@ class MultiSourceDataset(torch.utils.data.Dataset):
                  fraction_test=0.15,
                  fraction_validation=0.1,
                  dataset_to_ram=True,
-                 logger: logging.Logger | None = None,
+                 logger: logging.Logger = None,
                  ):
 
         self.data_location = data_location
