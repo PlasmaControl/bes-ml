@@ -1,3 +1,4 @@
+import dataclasses
 import itertools
 from pathlib import Path
 
@@ -6,6 +7,8 @@ import torch
 from sklearn.metrics import confusion_matrix, classification_report
 from matplotlib import pyplot as plt
 from torch.utils.data import DataLoader, BatchSampler
+
+from bes_ml.base.utilities import merge_pdfs
 
 try:
     from ..base.analyze_base import _Analyzer_Base
@@ -16,26 +19,14 @@ except ImportError:
     from bes_ml.base.sampler import RandomBatchSampler, SequentialBatchSampler
     from bes_data.confinement_data_tools.dataset import ConfinementDataset
 
-
+@dataclasses.dataclass
 class Analyzer(_Analyzer_Base):
 
-    def __init__(
-            self,
-            output_dir: str | Path = 'run_dir',
-            inputs_file: str | Path = 'inputs.yaml',
-            device: str = 'auto',  # auto (default), cpu, cuda, or cuda:X
-    ) -> None:
-        self._validate_subclass_inputs()
-        super().__init__(
-            output_dir=output_dir,
-            inputs_file=inputs_file,
-            device=device,
-        )
+    def __post_init__(self) -> None:
+        super().__post_init__()
 
         self.is_regression = False
-        self._set_regression_or_classification_defaults()
-
-        self._load_test_data()
+        self.is_classification = not self.is_regression
 
     def run_inference(
             self,
@@ -153,7 +144,7 @@ class Analyzer(_Analyzer_Base):
 
             inputs = sorted(self.output_dir.glob('inference_*.pdf'))
             output = self.output_dir / 'inference.pdf'
-            self._merge_pdfs(
+            merge_pdfs(
                 inputs=inputs,
                 output=output,
                 delete_inputs=True,

@@ -24,16 +24,15 @@ class Trainer(_Trainer_Base):
 
     # __init__ must have exact copy of all kwargs from parent class
     def __post_init__(self):
+
+        self.mlp_output_size = 128
+
         super().__post_init__()
 
         self.is_regression = True
         self.is_classification = not self.is_regression
-
         self.velocimetry_dataset = None
-
-        self.mlp_output_size = 128
         self.make_model_and_set_device()
-
         self.finish_subclass_initialization()
 
     def _get_valid_indices(self, *args, **kwargs) -> None:

@@ -26,17 +26,18 @@ class Trainer(_Trainer_Base):
 
     # __init__ must have exact copy of all kwargs from parent class
     def __post_init__(self) -> None:
+
+        self.mlp_output_size = 4
+
         super().__post_init__()
 
         self.is_regression = False
         self.is_classification = not self.is_regression
-
         self.turbulence_dataset = None
 
-        self.mlp_output_size = 4
         self.make_model_and_set_device()
-
         self.finish_subclass_initialization()
+
 
     def _make_datasets(self) -> None:
         kwargs_for_data_class = self._create_data_class_inputs(self.__dict__)
