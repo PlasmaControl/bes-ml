@@ -24,16 +24,15 @@ class Trainer(_Trainer_Base):
 
     # __init__ must have exact copy of all kwargs from parent class
     def __post_init__(self):
+
+        self.mlp_output_size = 128
+
         super().__post_init__()
 
         self.is_regression = True
         self.is_classification = not self.is_regression
-
         self.velocimetry_dataset = None
-
-        self.mlp_output_size = 128
         self.make_model_and_set_device()
-
         self.finish_subclass_initialization()
 
     def _get_valid_indices(self, *args, **kwargs) -> None:
@@ -45,7 +44,7 @@ class Trainer(_Trainer_Base):
     def _make_datasets(self) -> None:
         kwargs_for_data_class = self._create_data_class_inputs(self.__dict__)
         self.velocimetry_dataset = VelocimetryDataset(**kwargs_for_data_class)
-        train_set, valid_set = self.velocimetry_dataset.train_test_split(self.fraction_validation, seed=42)
+        train_set, valid_set, test_set = self.velocimetry_dataset.train_test_split(seed=42)
 
         if self.dataset_to_ram:
             # Load datasets into ram
@@ -54,6 +53,7 @@ class Trainer(_Trainer_Base):
 
         self.train_dataset = train_set
         self.validation_dataset = valid_set
+        self.test_dataset = test_set
 
     def _make_data_loaders(self) -> None:
         self.train_data_loader = DataLoader(
@@ -97,8 +97,9 @@ class Trainer(_Trainer_Base):
         pass
 
     def _save_test_data(self) -> None:
-        if self.velocimetry_dataset is not None:
-            self.velocimetry_dataset.save_test_data()
+        if self.test_dataset is not None:
+            self.test_dataset.load_datasets()
+            self.test_dataset.save(self.output_dir / self.test_data_file)
 
 
 if __name__=='__main__':

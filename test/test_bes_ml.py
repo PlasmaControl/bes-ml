@@ -125,7 +125,7 @@ def test_elm_regression_cnn_features():
     )
     _common_analysis(analyzer)
 
-def test_velocimetry_training():
+def test_velocimetry():
     input_args = DEFAULT_INPUT_ARGS.copy()
     output_dir = RUN_DIR / 'velocimetry_test'
     model = velocimetry.Trainer(
@@ -134,8 +134,10 @@ def test_velocimetry_training():
         **input_args,
     )
     model.train()
+    analyzer = velocimetry.Analyzer(output_dir=output_dir)
+    _common_analysis(analyzer)
 
-def test_confinement_training():
+def test_confinement():
     input_args = DEFAULT_INPUT_ARGS.copy()
     output_dir = RUN_DIR / 'turbulence_test'
     model = confinement_classification.Trainer(
@@ -144,7 +146,10 @@ def test_confinement_training():
         **input_args,
     )
     model.train()
-
+    analyzer = confinement_classification.Analyzer(
+        output_dir=output_dir
+    )
+    _common_analysis(analyzer)
 def _common_analysis(analyzer):
     analyzer.plot_training(save=True)
     analyzer.run_inference()

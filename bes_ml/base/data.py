@@ -1,3 +1,5 @@
+import pickle
+import re
 import copy
 from pathlib import Path
 import logging
@@ -61,6 +63,7 @@ class MultiSourceDataset(torch.utils.data.Dataset):
                  fraction_test=0.15,
                  fraction_validation=0.1,
                  dataset_to_ram=True,
+                 state: str = None,
                  logger: logging.Logger = None,
                  ):
 
@@ -70,28 +73,28 @@ class MultiSourceDataset(torch.utils.data.Dataset):
         self.batch_size = batch_size
         self.fraction_test = fraction_test
         self.fraction_validation = fraction_validation
-        self.dataset_to_ram = dataset_to_ram
         self.logger = logger
 
-        assert Path(self.data_location).exists()
+        assert Path(self.data_location).exists(), f'{self.data_location} does not exist'
         self.logger.info(f'Loading files from {self.data_location}')
 
         self.shot_nums, self.input_files = self._retrieve_filepaths()
         self.logger.info(f'Found {len(self.input_files)} files!')
+        self.dataset_to_ram = dataset_to_ram if len(self.shot_nums) >= 3 else True
 
         # Some flags for operations and checks
         self.open_ = False
-        self.istrain_ = False
-        self.istest_ = False
-        self.isvalid_ = False
+        self.istrain_ = bool('train' in str(state).lower())
+        self.istest_ = bool('test' in str(state).lower())
+        self.isvalid_ = bool('valid' in str(state).lower())
         self.frac_ = 1
+        self.signals = None
+        self.labels = None
+        self.time = None
+        self.hf_opened = None
 
         self.f_lengths = self._get_f_lengths()
         self.valid_indices = np.cumsum(np.concatenate((np.array([0]), self.f_lengths)))[:-1]
-
-        self.signals = None
-        self.labels = None
-        self.hf_opened = None
 
     def __len__(self):
         return int(sum(self.f_lengths))
@@ -141,6 +144,32 @@ class MultiSourceDataset(torch.utils.data.Dataset):
         self.hf_opened = None
         return
 
+    def _retrieve_filepaths(self, input_dir=None):
+        """
+        Get filenames of all labeled files.
+        :param input_dir: (optional) Change the input data directory.
+        :return: all shot numbers, all shot file paths.
+        :rtype: (list, list)
+        """
+        if input_dir:
+            self.data_location = input_dir
+        data_loc = Path(self.data_location)
+        assert data_loc.exists(), f'Directory {data_loc} does not exist. Have you made datasets?'
+        shots = {}
+        for file in (data_loc.iterdir()):
+            try:
+                shot_num = re.findall(r'_(\d+).+.hdf5', str(file))[0]
+            except IndexError:
+                continue
+            if shot_num not in shots.keys():
+                shots[shot_num] = file
+
+        # Keeps them in the same order for __getitem__
+        self.input_files = [shots[key] for key in sorted(shots.keys())]
+        self.shot_nums = list(sorted(shots.keys()))
+
+        return self.shot_nums, self.input_files
+
     def _get_from_ram(self, index):
 
         hf = self.signals[np.nonzero(self.valid_indices <= index[0])[0][-1]]
@@ -187,7 +216,7 @@ class MultiSourceDataset(torch.utils.data.Dataset):
         else:
             pass
 
-    def train_test_split(self, test_frac: float, seed=None):
+    def train_test_split(self, seed: int = 42):
         """
         Splits full dataset into train and test sets. Returns copies of self.
         :param test_frac: Fraction of dataset for test set.
@@ -197,15 +226,25 @@ class MultiSourceDataset(torch.utils.data.Dataset):
         """
         np.random.seed(seed)
         shots_files = np.array(list(zip(self.shot_nums, self.input_files)))
-        test_idx, train_idx = [0], [0]
-        if len(shots_files) != 1:
+        valid_idx, train_idx, test_idx = [], [], []
+        if len(shots_files) >= 3:
             sf_idx = np.arange(len(shots_files), dtype=np.int32)
-            n_test = int(np.floor(len(shots_files) * test_frac))
+            n_valid = int(np.floor(len(shots_files) * self.fraction_validation))
+            n_valid = n_valid if n_valid else 1
+            n_test = int(np.floor(len(shots_files) * self.fraction_test))
             n_test = n_test if n_test else 1
-            test_idx = np.random.choice(sf_idx, n_test, replace=False)
-            train_idx = np.array([i for i in sf_idx if i not in test_idx], dtype=np.int32)
+            valid_and_test = np.random.choice(sf_idx, n_valid+n_test, replace=False)
+            train_idx = np.array([i for i in sf_idx if i not in valid_and_test], dtype=np.int32)
+            valid_idx = np.random.choice(valid_and_test, n_valid, replace=False)
+            test_idx = np.array([i for i in valid_and_test if i not in valid_idx], dtype=np.int32)
+        else:
+            for s in range(len(shots_files)):
+                valid_idx.append(s)
+                train_idx.append(s)
+                test_idx.append(s)
 
         test_set = shots_files[test_idx]
+        valid_set = shots_files[valid_idx]
         train_set = shots_files[train_idx]
 
         train = copy.deepcopy(self)
@@ -215,17 +254,49 @@ class MultiSourceDataset(torch.utils.data.Dataset):
         train.f_lengths = train._get_f_lengths()
         train.valid_indices = np.cumsum(np.concatenate((np.array([0]), train.f_lengths)))[:-1]
 
+        valid = copy.deepcopy(self)
+        valid._set_state('valid')
+        valid.shot_nums = [i[0] for i in valid_set]
+        valid.input_files = [i[1] for i in valid_set]
+        valid.f_lengths = valid._get_f_lengths()
+        valid.valid_indices = np.cumsum(np.concatenate((np.array([0]), valid.f_lengths)))[:-1]
+
         test = copy.deepcopy(self)
-        test._set_state('valid')
+        test._set_state('test')
         test.shot_nums = [i[0] for i in test_set]
         test.input_files = [i[1] for i in test_set]
-        test.f_lengths = test._get_f_lengths()
+        test.f_lengths = valid._get_f_lengths()
         test.valid_indices = np.cumsum(np.concatenate((np.array([0]), test.f_lengths)))[:-1]
 
-        return train, test
+        assert all([len(ds) > 0 for ds in [train, test, valid]]), 'There is not enough data to split datasets.'
 
-    def _retrieve_filepaths(self):
-        raise NotImplementedError
+        return train, valid, test
+
+    def save(self, output_file: str | Path):
+
+        if self.dataset_to_ram:
+            signals = np.concatenate(self.signals)
+            labels = np.concatenate(self.labels)
+            try:
+                time = np.concatenate(self.time)
+            except TypeError:
+                time = None
+        else:
+            self.open()
+            signals, labels, time = None, None, None
+            for hf in self.hf_opened:
+                signals = np.array(hf['signals'])
+                labels = np.array(hf['labels'])
+                try:
+                    time = np.array(hf['time'])
+                except TypeError:
+                    time = None
+
+        data_dict = {'signals': signals, 'labels': labels, 'time': time}
+        with open(output_file, 'w+b') as f:
+            pickle.dump(data_dict, f)
+        self.close()
+        return
 
     def _get_f_lengths(self):
         raise NotImplementedError
