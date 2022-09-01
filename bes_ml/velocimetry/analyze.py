@@ -80,9 +80,8 @@ class Analyzer(_Analyzer_Base):
                        idx: int = None,
                        save: bool = False,
                        ):
-
-        assert None not in [self.all_labels, self.all_predictions, self.all_signals], \
-            print("Nothing to plot; run inference first")
+        if None in [self.all_labels, self.all_predictions, self.all_signals]:
+            self.run_inference()
 
         plt.rcParams['axes.labelsize'] = 24
         plt.rcParams['axes.titlesize'] = 18
@@ -212,9 +211,7 @@ class Analyzer(_Analyzer_Base):
 
 
 if __name__ == '__main__':
-    analyzer = Analyzer(
-        output_dir='/home/jazimmerman/PycharmProjects/bes-edgeml-models/bes-edgeml-work/velocimetry/test')
+    analyzer = Analyzer()
     analyzer.plot_training(save=True)
-    analyzer.run_inference()
     analyzer.plot_inference(save=True)
     analyzer.show()

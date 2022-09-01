@@ -86,8 +86,8 @@ class Analyzer(_Analyzer_Base):
                        save: bool = False,
                        ):
 
-        assert None not in [self.all_labels, self.all_predictions, self.all_signals], \
-            print("Nothing to plot; run inference first")
+        if None in [self.all_labels, self.all_predictions, self.all_signals]:
+            self.run_inference()
 
         signals = self.all_signals[0]
         labels = self.all_labels[0]
@@ -114,8 +114,8 @@ class Analyzer(_Analyzer_Base):
 
         ax1.text(-1.3, 0.5,
                  f'{cr}\n'
-                 f'ROC: {self.scores.max():0.2f} (epoch {np.argmax(self.scores)})    '
-                 f'Best Loss: {self.valid_loss.max():0.2f} (epoch {np.argmax(self.valid_loss)})',
+                 f'ROC: {np.max(self.scores):0.2f} (epoch {np.argmax(self.scores)})    '
+                 f'Best Loss: {np.max(self.valid_loss):0.2f} (epoch {np.argmax(self.valid_loss)})',
                  transform=ax1.transAxes,
                  ha='right', va='center', ma='left',
                  bbox=dict(boxstyle="square", fc='w', lw=2))
@@ -190,9 +190,7 @@ class Analyzer(_Analyzer_Base):
 
 
 if __name__ == '__main__':
-    analyzer = Analyzer(
-        output_dir='/home/jazimmerman/PycharmProjects/bes-edgeml-models/bes-edgeml-work/confinement_classification/test')
+    analyzer = Analyzer()
     analyzer.plot_training(save=True)
-    analyzer.run_inference()
     analyzer.plot_inference(save=True)
     analyzer.show()
