@@ -261,13 +261,16 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
             oversample_active_elm=self.oversample_active_elm,
         )
 
-        self.logger.info(f"Validation ELM events: {validation_elms.size}")
-        self.validation_data = self._preprocess_data(
-            elm_indices=validation_elms,
-            shuffle_indices=False,
-            oversample_active_elm=False,
-            save_filename='validation_elms',
-        )
+        if self.fraction_validation > 0.0:
+            self.logger.info(f"Validation ELM events: {validation_elms.size}")
+            self.validation_data = self._preprocess_data(
+                elm_indices=validation_elms,
+                shuffle_indices=False,
+                oversample_active_elm=False,
+                save_filename='validation_elms',
+            )
+        else:
+            self.logger.info("Skipping validation data")
 
         if self.fraction_test > 0.0:
             self.logger.info(f"Test ELM events: {test_elms.size}")
@@ -279,7 +282,6 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
             )
         else:
             self.logger.info("Skipping test data")
-            self.test_data = None
 
     def _preprocess_data(
         self,
@@ -411,14 +413,15 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
                 pin_memory=True,
                 drop_last=True,
             )
-        self.validation_data_loader = torch.utils.data.DataLoader(
-                self.validation_dataset,
-                batch_size=self.batch_size,
-                shuffle=False,
-                num_workers=self.num_workers,
-                pin_memory=True,
-                drop_last=True,
-            )
+        if self.fraction_validation > 0.0:
+            self.validation_data_loader = torch.utils.data.DataLoader(
+                    self.validation_dataset,
+                    batch_size=self.batch_size,
+                    shuffle=False,
+                    num_workers=self.num_workers,
+                    pin_memory=True,
+                    drop_last=True,
+                )
 
     def _make_optimizer_scheduler_loss(self) -> None:
         if self.optimizer_type.lower() == 'adam':
@@ -485,63 +488,64 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
 
             self.results['train_loss'].append(train_loss.item())
 
-            # valid_loss, predictions, true_labels = self._validation_epoch()
-            valid_loss, predictions, true_labels = self._single_epoch_loop(
-                is_train=False,
-                data_loader=self.validation_data_loader,
-            )
-            if self.is_regression:
-                # regression loss is MSE, so take sqrt to get units of time
-                valid_loss = np.sqrt(valid_loss)
-
-            self.results['valid_loss'].append(valid_loss.item())
-
-            # apply learning rate scheduler
-            self.lr_scheduler.step(valid_loss)
-
             score = None
-            if self.is_regression:
-                score = self.score_function(true_labels, predictions)
-            elif self.is_classification:
-                if self.model.mlp_output_size == 1:
-                    assert hasattr(self, 'threshold')
-                    prediction_labels = (predictions > self.threshold).astype(int)
-                    score = self.score_function(
-                        true_labels,
-                        prediction_labels,
-                    )
-                else:
-                    prediction_labels = predictions.argmax(axis=1)
-                    score = self.score_function(
-                        true_labels,
-                        prediction_labels,
-                        average='weighted'
-                    )
-            assert score is not None
-            self.results['scores'].append(score.item())
+            valid_loss = None
+            if self.validation_data_loader is not None:
+                valid_loss, predictions, true_labels = self._single_epoch_loop(
+                    is_train=False,
+                    data_loader=self.validation_data_loader,
+                )
+                if self.is_regression:
+                    # regression loss is MSE, so take sqrt to get units of time
+                    valid_loss = np.sqrt(valid_loss)
 
-            # ROC-AUC score for classification
-            if self.is_classification:
-                if self.model.mlp_output_size == 1:
-                    roc_score = metrics.roc_auc_score(
-                        true_labels,
-                        predictions,
-                    )
-                else:
-                    one_hot = np.zeros_like(predictions)
-                    for i, j in zip(one_hot, true_labels):
-                        i[j] = 1
-                    try:
-                        roc_score = metrics.roc_auc_score(
-                            one_hot,
-                            predictions,
-                            multi_class='ovo', 
-                            average='macro', 
-                            labels=[0, 1, 2, 3],
+                self.results['valid_loss'].append(valid_loss.item())
+
+                # apply learning rate scheduler
+                self.lr_scheduler.step(valid_loss)
+
+                if self.is_regression:
+                    score = self.score_function(true_labels, predictions)
+                elif self.is_classification:
+                    if self.model.mlp_output_size == 1:
+                        assert hasattr(self, 'threshold')
+                        prediction_labels = (predictions > self.threshold).astype(int)
+                        score = self.score_function(
+                            true_labels,
+                            prediction_labels,
                         )
-                    except:
-                        roc_score = np.float32(0)
-                self.results['roc_scores'].append(roc_score.item())
+                    else:
+                        prediction_labels = predictions.argmax(axis=1)
+                        score = self.score_function(
+                            true_labels,
+                            prediction_labels,
+                            average='weighted'
+                        )
+                assert score is not None
+                self.results['scores'].append(score.item())
+
+                # ROC-AUC score for classification
+                if self.is_classification:
+                    if self.model.mlp_output_size == 1:
+                        roc_score = metrics.roc_auc_score(
+                            true_labels,
+                            predictions,
+                        )
+                    else:
+                        one_hot = np.zeros_like(predictions)
+                        for i, j in zip(one_hot, true_labels):
+                            i[j] = 1
+                        try:
+                            roc_score = metrics.roc_auc_score(
+                                one_hot,
+                                predictions,
+                                multi_class='ovo', 
+                                average='macro', 
+                                labels=[0, 1, 2, 3],
+                            )
+                        except:
+                            roc_score = np.float32(0)
+                    self.results['roc_scores'].append(roc_score.item())
 
             with (self.output_dir/self.results_file).open('w') as results_file:
                 yaml.dump(
@@ -551,9 +555,10 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
                 )
 
             # best score and save model
-            if score > best_score:
-                best_score = score
-                self.logger.info(f"Ep {i_epoch+1:03d}: Best score {best_score:.3f}, saving model...")
+            if score is None or score > best_score:
+                if score is not None:
+                    best_score = score
+                    self.logger.info(f"Ep {i_epoch+1:03d}: Best score {best_score:.3f}, saving model...")
                 self.logger.info(f"Saving model to: {checkpoint_file.as_posix()}")
                 torch.save(self.model.state_dict(), checkpoint_file.as_posix())
                 self.logger.info(f"  File size: {checkpoint_file.stat().st_size/1e3:.1f} kB")                
@@ -573,10 +578,11 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
 
             prediction_labels =  f"Ep {i_epoch+1:03d}: "
             prediction_labels += f"train loss {train_loss:.3f}  "
-            prediction_labels += f"val loss {valid_loss:.3f}  "
-            prediction_labels += f"{self.score_function_name} {score:.3f}  "
-            if self.is_classification:
-                prediction_labels += f"ROC {roc_score:.3f}  "
+            if score is not None and valid_loss is not None:
+                prediction_labels += f"val loss {valid_loss:.3f}  "
+                prediction_labels += f"{self.score_function_name} {score:.3f}  "
+                if self.is_classification:
+                    prediction_labels += f"ROC {roc_score:.3f}  "
             prediction_labels += f"ep time {time.time()-t_start_epoch:.1f} s "
             prediction_labels += f"(total time {time.time()-t_start_training:.1f} s)"
             self.logger.info(prediction_labels)

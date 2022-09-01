@@ -54,10 +54,11 @@ class Trainer(_Trainer_Base):
             *self.train_data[0:4], 
             signal_window_size = self.signal_window_size,
         )
-        self.validation_dataset = ELM_Dataset(
-            *self.validation_data[0:4], 
-            signal_window_size = self.signal_window_size,
-        )
+        if self.validation_data:
+            self.validation_dataset = ELM_Dataset(
+                *self.validation_data[0:4], 
+                signal_window_size = self.signal_window_size,
+            )
 
 
 if __name__=='__main__':
@@ -66,8 +67,8 @@ if __name__=='__main__':
         batch_size=64,
         n_epochs=2,
         minibatch_interval=50,
-        fraction_validation=0.2,
-        fraction_test=0.2,
+        fraction_validation=0.0,
+        fraction_test=0.0,
         log_time=True,
         inverse_weight_label=True,
     )
