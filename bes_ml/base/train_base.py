@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Union, Iterable, Tuple
 import dataclasses
 
-# 3rd-party package imports
+# 3rd-party imports
 import h5py
 import numpy as np
 import matplotlib.pyplot as plt
@@ -18,6 +18,11 @@ import torch.utils.data
 import torchinfo
 import yaml
 from sklearn import metrics
+
+try:
+    import optuna
+except ImportError:
+    optuna = None
 
 # repo import
 from bes_data.sample_data import sample_elm_data_file
@@ -54,6 +59,7 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
     weight_decay: float = 5e-3  # optimizer L2 regularization factor
     batches_per_print: int = 5000  # train/validation batches per print update
     logger: logging.Logger = None
+    trial: Union[optuna.trial.Trial, optuna.trial.FrozenTrial] = None  # optuna trial
 
     def __post_init__(self):
         self.data_location = Path(self.data_location)
@@ -107,8 +113,11 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
     def _save_inputs_to_yaml(self):
         filename = Path(self.output_dir / self.inputs_file)
         self_fields_dict = dataclasses.asdict(self)
-        self_fields_dict.pop('logger')
+        for skip_key in ['logger', 'trial']:
+            self_fields_dict.pop(skip_key)
         for key in self_fields_dict:
+            if key in ['logger', 'trial']:
+                self_fields_dict.pop(key)
             if isinstance(self_fields_dict[key], Path):
                 self_fields_dict[key] = self_fields_dict[key].as_posix()
         with filename.open('w') as parameters_file:
@@ -453,7 +462,7 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
             verbose=True,
         )
 
-    def train(self) -> None:
+    def train(self) -> dict:
         best_score = -np.inf
         self.results = {
             'train_loss': [],
@@ -574,7 +583,21 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
                         verbose=True,
                         opset_version=11
                     )
-                    self.logger.info(f"  File size: {onnx_file.stat().st_size/1e3:.1f} kB")                
+                    self.logger.info(f"  File size: {onnx_file.stat().st_size/1e3:.1f} kB")
+
+            # report epoch result to optuna
+            if optuna is not None and self.trial is not None:
+                assert score is not None
+                self.trial.report(score, i_epoch)
+                # save outputs as lists in trial user attributes
+                for key in self.results:
+                    self.trial.set_user_attr(key, self.results[key])
+                if self.trial.should_prune():
+                    self.logger.info("==> Pruning trial with Optuna")
+                    for handler in self.logger.handlers[:]:
+                        handler.close()
+                        self.logger.removeHandler(handler)
+                    optuna.TrialPruned()
 
             prediction_labels =  f"Ep {i_epoch+1:03d}: "
             prediction_labels += f"train loss {train_loss:.3f}  "
@@ -589,6 +612,8 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
 
         self.logger.info(f"End training loop")
         self.logger.info(f"Elapsed time {time.time()-t_start_training:.1f} s")
+
+        return self.results.copy()
 
     def _single_epoch_loop(
         self,

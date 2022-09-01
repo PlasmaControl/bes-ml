@@ -4,6 +4,7 @@ import copy
 from pathlib import Path
 import logging
 import traceback
+from typing import Union
 
 import h5py
 import numpy as np
@@ -272,7 +273,7 @@ class MultiSourceDataset(torch.utils.data.Dataset):
 
         return train, valid, test
 
-    def save(self, output_file: str | Path):
+    def save(self, output_file: Union[Path,str]):
 
         if self.dataset_to_ram:
             signals = np.concatenate(self.signals)
