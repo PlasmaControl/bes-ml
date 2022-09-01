@@ -8,6 +8,7 @@ from bes_ml import elm_classification
 from bes_ml import elm_regression
 from bes_ml import velocimetry
 from bes_ml import confinement_classification
+from bes_ml.base.analyze_base import _Analyzer_Base
 
 
 RUN_DIR = Path('run_dir')
@@ -21,6 +22,23 @@ DEFAULT_INPUT_ARGS = {
 def test_elm_classification_dense_features():
     input_args = DEFAULT_INPUT_ARGS.copy()
     output_dir = RUN_DIR / 'elm_classification_dense'
+    model = elm_classification.Trainer(
+        output_dir=output_dir,
+        max_elms=5,
+        dense_num_kernels=8,
+        **input_args,
+    )
+    model.train()
+    analyzer = elm_classification.Analyzer(
+        output_dir=output_dir,
+    )
+    _common_analysis(analyzer)
+
+def test_elm_classification_zero_validation_test():
+    input_args = DEFAULT_INPUT_ARGS.copy()
+    output_dir = RUN_DIR / 'elm_classification_dense'
+    input_args['fraction_validation'] = 0.0
+    input_args['fraction_test'] = 0.0
     model = elm_classification.Trainer(
         output_dir=output_dir,
         max_elms=5,
@@ -150,12 +168,14 @@ def test_confinement():
         output_dir=output_dir
     )
     _common_analysis(analyzer)
-def _common_analysis(analyzer):
+
+def _common_analysis(analyzer: _Analyzer_Base):
     analyzer.plot_training(save=True)
-    analyzer.run_inference()
     analyzer.plot_inference(save=True)
     assert (analyzer.output_dir/'training.pdf').exists()
-    assert (analyzer.output_dir/'inference.pdf').exists()
+    if analyzer.test_data is not None:
+        assert (analyzer.output_dir/'inference.pdf').exists()
+
 
 if __name__=="__main__":
     shutil.rmtree(RUN_DIR, ignore_errors=True)

@@ -59,7 +59,8 @@ class _Analyzer_Base(
         self.model.eval()
 
         self.test_data = None
-        self._load_test_data()
+        if self.inputs['fraction_test'] > 0.0:
+            self._load_test_data()
 
         self.all_predictions = None
         self.all_labels = None
@@ -90,6 +91,9 @@ class _Analyzer_Base(
         self.model.load_state_dict(model_state_dict)
 
     def run_inference(self) -> None:
+        if self.test_data is None:
+            print("Skipping inference, no test data")
+            return
         n_elms = len(self.test_data['elm_indices'])
         self.all_predictions = []
         self.all_labels = []
@@ -148,9 +152,9 @@ class _Analyzer_Base(
         assert results_file.exists, f"{results_file} does not exist"
         with results_file.open('r') as f:
             self.results = yaml.safe_load(f)
-        self.scores = np.array(self.results['scores'])
-        self.train_loss = np.array(self.results['train_loss'])
-        self.valid_loss = np.array(self.results['valid_loss'])
+        self.train_loss = self.results['train_loss']
+        self.valid_loss = self.results['valid_loss']
+        self.scores = self.results['scores']
         self.scores_label = self.results['scores_label']
 
     def plot_training(
@@ -158,19 +162,21 @@ class _Analyzer_Base(
         save: bool = False,  # save PDF
     ) -> None:
         self._load_training_results()
-        n_epochs = self.scores.size
+        n_epochs = len(self.train_loss)
         epochs = np.arange(n_epochs) + 1
         _, axes = plt.subplots(ncols=2, nrows=1, figsize=(8,3))
         plt.suptitle(f"{self.output_dir.resolve()}")
         plt.sca(axes.flat[0])
         plt.plot(epochs, self.train_loss, label='Training loss')
-        plt.plot(epochs, self.valid_loss, label='Valid. loss')
+        if self.valid_loss:
+            plt.plot(epochs, self.valid_loss, label='Valid. loss')
         plt.title('Training/validation loss')
         plt.ylabel('Loss')
         plt.sca(axes.flat[1])
-        plt.plot(epochs, self.scores, label=self.scores_label)
-        if self.is_classification and hasattr(self, 'roc_scores'):
-            plt.plot(epochs, self.roc_scores, label='ROC-AUC')
+        if self.scores:
+            plt.plot(epochs, self.scores, label=self.scores_label)
+            if self.is_classification and hasattr(self, 'roc_scores'):
+                plt.plot(epochs, self.roc_scores, label='ROC-AUC')
         plt.title('Validation scores')
         plt.ylabel('Score')
         for axis in axes.flat:
@@ -189,8 +195,11 @@ class _Analyzer_Base(
         self,
         save: bool = False,  # save PDFs
     ) -> None:
-        assert None not in [self.all_labels, self.all_predictions, self.all_signals], \
-            print("Nothing to plot; run inference first")
+        if self.test_data is None:
+            print("Skipping inference, no test data")
+            return
+        if None in [self.all_labels, self.all_predictions, self.all_signals]:
+            self.run_inference()
         n_elms = self.test_data['elm_indices'].size
         assert len(self.all_labels) == n_elms and \
             len(self.all_predictions) == n_elms and \
