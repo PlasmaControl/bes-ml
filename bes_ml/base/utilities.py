@@ -8,6 +8,7 @@ def merge_pdfs(
         inputs: Union[Sequence,list] = None,
         output: Union[str,Path] = None,
         delete_inputs: bool = False,
+        verbose: bool = False,
     ):
         inputs = [Path(input) for input in inputs]
         assert len(inputs) > 0 and inputs[0].exists()
@@ -15,7 +16,8 @@ def merge_pdfs(
         gs_cmd = shutil.which('gs')
         assert gs_cmd is not None, \
             "`gs` command (ghostscript) not found; available in conda-forge"
-        print(f"Merging PDFs into file: {output}")
+        if verbose:
+            print(f"Merging PDFs into file: {output}")
         cmd = [
             gs_cmd,
             '-q',

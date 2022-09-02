@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Tuple, Union
 import dataclasses
 
 import numpy as np
@@ -71,5 +71,6 @@ if __name__=='__main__':
         fraction_test=0.0,
         log_time=True,
         inverse_weight_label=True,
+        seed=0,
     )
     model.train()

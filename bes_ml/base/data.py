@@ -4,6 +4,7 @@ import copy
 from pathlib import Path
 import logging
 import traceback
+from typing import Union
 
 import h5py
 import numpy as np
@@ -272,7 +273,7 @@ class MultiSourceDataset(torch.utils.data.Dataset):
 
         return train, valid, test
 
-    def save(self, output_file: str | Path):
+    def save(self, output_file: Union[Path,str]):
 
         if self.dataset_to_ram:
             signals = np.concatenate(self.signals)
@@ -301,20 +302,20 @@ class MultiSourceDataset(torch.utils.data.Dataset):
     def _get_f_lengths(self):
         raise NotImplementedError
 
-def elm_data_loader(
-    dataset: ELM_Dataset = None,
-    batch_size: int = 64,
-    shuffle: bool = False,
-    num_workers: int = 0,
-    drop_last: bool = True,
-    pin_memory: bool = True,
-) -> torch.utils.data.DataLoader:
-    data_loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        drop_last=drop_last,
-    )
-    return data_loader
+# def elm_data_loader(
+#     dataset: ELM_Dataset = None,
+#     batch_size: int = 64,
+#     shuffle: bool = False,
+#     num_workers: int = 0,
+#     drop_last: bool = True,
+#     pin_memory: bool = True,
+# ) -> torch.utils.data.DataLoader:
+#     data_loader = torch.utils.data.DataLoader(
+#         dataset,
+#         batch_size=batch_size,
+#         shuffle=shuffle,
+#         num_workers=num_workers,
+#         pin_memory=pin_memory,
+#         drop_last=drop_last,
+#     )
+#     return data_loader
