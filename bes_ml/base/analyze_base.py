@@ -7,14 +7,15 @@ import yaml
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
+import torch.utils.data
 
 try:
     from .models import Multi_Features_Model  #, _Multi_Features_Model_Dataclass
-    from .data import ELM_Dataset, elm_data_loader
+    from .data import ELM_Dataset
     from .utilities import merge_pdfs
 except ImportError:
     from bes_ml.base.models import Multi_Features_Model  #, _Multi_Features_Model_Dataclass
-    from bes_ml.base.data import ELM_Dataset, elm_data_loader
+    from bes_ml.base.data import ELM_Dataset
     from bes_ml.base.utilities import merge_pdfs
 
 
@@ -124,7 +125,7 @@ class _Analyzer_Base(
                     signal_window_size=self.inputs['signal_window_size'],
                     prediction_horizon=0 if self.is_regression else self.inputs['prediction_horizon'],
                 )
-                elm_test_data_loader = elm_data_loader(
+                elm_test_data_loader = torch.utils.data.DataLoader(
                     dataset=elm_test_dataset,
                     batch_size=128,
                     shuffle=False,
