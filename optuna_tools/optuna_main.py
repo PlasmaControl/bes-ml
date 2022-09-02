@@ -7,7 +7,7 @@ from typing import Callable, Union
 
 import optuna
 
-from bes_ml.elm_regression import Trainer
+from bes_ml import elm_regression
 
 
 def run_optuna(
@@ -15,13 +15,14 @@ def run_optuna(
         n_gpus: int,
         n_workers_per_gpu: int,
         n_trials_per_worker: int,
-        sampler_startup_trials: int,
-        pruner_startup_trials: int,
-        pruner_warmup_epochs: int,
-        pruner_minimum_trials_at_epoch: int,
-        pruner_patience: int,
         n_epochs: int,
         objective_func: Callable,
+        trainer_class: Callable,
+        sampler_startup_trials: int,  # random startup trials before activating sampler
+        pruner_startup_trials: int,  # startup trials before pruning
+        pruner_warmup_epochs: int,  # initial epochs before pruning
+        pruner_minimum_trials_at_epoch: int,  # minimum trials at each epoch before pruning
+        pruner_patience: int,  # epochs to wait for improvement before pruning
 ):
 
     db_file = Path(db_name) / f'{db_name}.db'
@@ -63,23 +64,26 @@ def run_optuna(
             futures = []
             for i_worker in range(n_workers):
                 i_gpu = i_worker % n_gpus
-                print(f'Launching worker {i_worker+1} (of {n_workers}) on gpu {i_gpu} and running {n_trials_per_worker} trials')
+                print(f'Launching worker {i_worker+1} '
+                      f'(of {n_workers}) on gpu {i_gpu} '
+                      f'and running {n_trials_per_worker} trials')
                 future = executor.submit(
                     subprocess_worker,  # callable that calls study.optimize()
                     db_url,
                     db_file.parent.as_posix(),
                     n_trials_per_worker,
                     i_gpu,
+                    n_epochs,
+                    objective_func,
+                    trainer_class,
                     sampler_startup_trials,
                     pruner_startup_trials,
                     pruner_warmup_epochs,
                     pruner_minimum_trials_at_epoch,
                     pruner_patience,
-                    n_epochs,
-                    objective_func,
                 )
                 futures.append(future)
-                time.sleep(5)
+                time.sleep(1)
             concurrent.futures.wait(futures)
             for i_future, future in enumerate(futures):
                 if future.exception() is None:
@@ -96,13 +100,14 @@ def run_optuna(
             db_dir=db_file.parent.as_posix(),
             n_trials_per_worker=n_trials_per_worker,
             i_gpu=0,
+            n_epochs=n_epochs,
+            objective_func=objective_func,
+            trainer_class=trainer_class,
             sampler_startup_trials=sampler_startup_trials,
             pruner_startup_trials=pruner_startup_trials,
             pruner_warmup_epochs=pruner_warmup_epochs,
             pruner_minimum_trials_at_epoch=pruner_minimum_trials_at_epoch,
             pruner_patience=pruner_patience,
-            n_epochs=n_epochs,
-            objective_func=objective_func,
         )
 
 
@@ -111,22 +116,16 @@ def subprocess_worker(
     db_dir: str,
     n_trials_per_worker: int,
     i_gpu: int,
+    n_epochs: int,
+    objective_func: Callable,
+    trainer_class: Callable,
     sampler_startup_trials: int,
     pruner_startup_trials: int,
     pruner_warmup_epochs: int,
     pruner_minimum_trials_at_epoch: int,
     pruner_patience: int,
-    n_epochs: int,
-    objective_func: Callable,
 ):
 
-    # sampler = optuna.samplers.CmaEsSampler(
-    #     n_startup_trials=trials_before_sampler,
-    #     independent_sampler=optuna.samplers.TPESampler(),
-    #     warn_independent_sampling=True,
-    #     restart_strategy='ipop',
-    #     consider_pruned_trials=False,
-    # )
     sampler = optuna.samplers.TPESampler(
         n_startup_trials=sampler_startup_trials,
         constant_liar=True,
@@ -158,6 +157,7 @@ def subprocess_worker(
             i_gpu=i_gpu,
             n_epochs=n_epochs,
             objective_func=objective_func,
+            trainer_class=trainer_class,
         )
 
     # run an optimization process
@@ -165,7 +165,6 @@ def subprocess_worker(
         launch_trial_wrapper,
         n_trials=n_trials_per_worker,  # trials for this study.optimize() call
         gc_after_trial=True,
-        # catch=(AssertionError,),  # fail trials with assertion error and continue study
     )
 
 
@@ -175,6 +174,7 @@ def launch_trial(
         i_gpu: int,
         n_epochs: int,
         objective_func: Callable,
+        trainer_class: Callable,
 ):
 
     db_dir = Path(db_dir)
@@ -196,7 +196,7 @@ def launch_trial(
         for key, value in input_kwargs.items():
             print(f'  Model input: {key}, value: {value}')
 
-        trainer = Trainer(
+        trainer = trainer_class(
             trial=trial,
             **input_kwargs,
         )
@@ -217,27 +217,26 @@ def study_test(
         'fraction_validation': 0.2,
         'log_time': True,
         'inverse_weight_label': True,
+        'learning_rate': 10 ** trial.suggest_int('lr_exp', -6, -2),
+        'cnn_layer1_num_kernels': 10 * trial.suggest_int('cnn_layer1_num_kernels_factor_10', 1, 8),
+        'cnn_layer2_num_kernels': 5 * trial.suggest_int('cnn_layer2_num_kernels_factor_5', 1, 8),
     }
-
-    input_kwargs['cnn_layer1_num_kernels'] = 10 * trial.suggest_int('cnn_layer1_num_kernels_factor_10', 1, 8)
-    input_kwargs['cnn_layer2_num_kernels'] = 5 * trial.suggest_int('cnn_layer2_num_kernels_factor_5', 1, 8)
-    input_kwargs['learning_rate'] = 10 ** trial.suggest_int('lr_exp', -6, -2)
-
     return input_kwargs
 
 
-if __name__=='__main__':
+if __name__ == '__main__':
 
     run_optuna(
         db_name=study_test.__name__,
         n_gpus=2,  # <=2 for head node, <=4 for compute node
         n_workers_per_gpu=3,  # max 3 for V100
-        n_trials_per_worker=12,
+        n_trials_per_worker=4,
+        n_epochs=4,
+        objective_func=study_test,
+        trainer_class=elm_regression.Trainer,
         sampler_startup_trials=60,
         pruner_startup_trials=10,
         pruner_warmup_epochs=6,
         pruner_minimum_trials_at_epoch=20,
         pruner_patience=4,
-        n_epochs=16,
-        objective_func=study_test,
     )

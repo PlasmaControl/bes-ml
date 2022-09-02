@@ -27,13 +27,6 @@ class _Base_Features_Dataclass():
 
 @dataclasses.dataclass(eq=False)
 class _Base_Features(nn.Module, _Base_Features_Dataclass):
-    signal_window_size: int = 64  # power of 2; ~16-512
-    spatial_maxpool_size: int = 1  # 1 (default, no spatial maxpool), 2, or 4
-    time_interval: int = 1  # time domain slice interval (i.e. time[::interval])
-    subwindow_size: int = -1  # power of 2, or -1 (default) for full signal window
-    negative_slope: float = 1e-3  # relu negative slope; ~1e-3
-    dropout_rate: float = 0.1  # ~0.1
-    logger: logging.Logger = None
 
     def __post_init__(self):
         super().__init__()
