@@ -6,7 +6,7 @@ import pickle
 import sys
 import time
 from pathlib import Path
-from typing import Union, Iterable, Tuple
+from typing import Union, Iterable, Tuple, Any
 import dataclasses
 
 # 3rd-party imports
@@ -56,11 +56,12 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
     sgd_momentum: float = 0.0  # momentum for SGD optimizer
     sgd_dampening: float = 0.0  # dampening for SGD optimizer
     learning_rate: float = 1e-3  # optimizer learning rate
+    lr_scheduler_patience: int = 4  # epochs to wait before triggering lr scheduler
     weight_decay: float = 5e-3  # optimizer L2 regularization factor
     batches_per_print: int = 5000  # train/validation batches per print update
     logger: logging.Logger = None
     seed: int = None  # RNG seed for deterministic, reproducable shuffling (ELMs, sample indices, etc.)
-    trial = None  # optuna trial
+    trial: Any = None  # optuna trial
 
     def __post_init__(self):
         self.data_location = Path(self.data_location)
@@ -249,6 +250,7 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
         self.logger.info(f"Events in data file: {elm_indices.size}")
         self.logger.info(f"Total time frames: {time_frames}")
 
+        # shuffle ELM events
         self.rng_generator.shuffle(elm_indices)
 
         # TODO: remove `max_elms` from base class
@@ -462,7 +464,7 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
             self.optimizer,
             mode="min",
             factor=0.5,
-            patience=2,
+            patience=self.lr_scheduler_patience,
             verbose=True,
         )
 
@@ -473,6 +475,7 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
             'valid_loss': [],
             'scores': [],
             'scores_label': self.score_function_name,
+            'lr': [],
         }
         checkpoint_file = self.output_dir / self.checkpoint_file
 
@@ -500,6 +503,8 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
                 train_loss = np.sqrt(train_loss)
 
             self.results['train_loss'].append(train_loss.item())
+
+            self.results['lr'].append(self.optimizer.param_groups[0]['lr'])
 
             score = None
             valid_loss = None

@@ -65,12 +65,11 @@ if __name__=='__main__':
     model = Trainer(
         dense_num_kernels=8,
         batch_size=64,
-        n_epochs=2,
+        n_epochs=4,
         minibatch_interval=50,
-        fraction_validation=0.0,
-        fraction_test=0.0,
+        fraction_validation=0.2,
+        fraction_test=0.2,
         log_time=True,
         inverse_weight_label=True,
-        seed=0,
     )
     model.train()
