@@ -59,6 +59,7 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
     weight_decay: float = 5e-3  # optimizer L2 regularization factor
     batches_per_print: int = 5000  # train/validation batches per print update
     logger: logging.Logger = None
+    rng_seed: int = None  # RNG seed for deterministic shuffling (ELMs, sample indices, etc.)
     trial: Union[optuna.trial.Trial, optuna.trial.FrozenTrial] = None  # optuna trial
 
     def __post_init__(self):
