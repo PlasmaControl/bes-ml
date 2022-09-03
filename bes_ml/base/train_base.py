@@ -596,8 +596,12 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
 
             # report epoch result to optuna
             if optuna is not None and self.trial is not None:
-                assert score is not None
-                self.trial.report(score, i_epoch)
+                maximize_score = self.trial.user_attrs['maximize_score']
+                if maximize_score is True:
+                    assert score is not None
+                    self.trial.report(score, i_epoch)
+                else:
+                    self.trial.report(train_loss, i_epoch)
                 # save outputs as lists in trial user attributes
                 for key in self.results:
                     self.trial.set_user_attr(key, self.results[key])

@@ -5,6 +5,7 @@ import concurrent.futures
 import time
 from typing import Callable, Union
 
+import numpy as np
 import optuna
 
 from bes_ml import elm_regression
@@ -23,8 +24,12 @@ def run_optuna(
         pruner_warmup_epochs: int,  # initial epochs before pruning
         pruner_minimum_trials_at_epoch: int,  # minimum trials at each epoch before pruning
         pruner_patience: int,  # epochs to wait for improvement before pruning
-        auto: bool = False,  # True to run on CPUs with multiprocessing
-):
+        run_on_cpu: bool = False,  # True to run on CPUs with multiprocessing
+        maximize_score: bool = True,  #  True (default) to maximize validation score; False to minimize training loss
+) -> None:
+
+    if run_on_cpu:
+        assert n_gpus == 1
 
     db_file = Path(db_name) / f'{db_name}.db'
     db_file.parent.mkdir(parents=True, exist_ok=True)
@@ -40,7 +45,7 @@ def run_optuna(
         study_name='study',
         storage=storage,
         load_if_exists=True,
-        direction='maximize',
+        direction='maximize' if maximize_score else 'minimize',
     )
 
     # FAIL any zombie trials that are stuck in `RUNNING` state
@@ -73,7 +78,7 @@ def run_optuna(
                     db_url,
                     db_file.parent.as_posix(),
                     n_trials_per_worker,
-                    i_gpu if not auto else 'auto',
+                    i_gpu if not run_on_cpu else 'cpu',
                     n_epochs,
                     objective_func,
                     trainer_class,
@@ -82,6 +87,7 @@ def run_optuna(
                     pruner_warmup_epochs,
                     pruner_minimum_trials_at_epoch,
                     pruner_patience,
+                    maximize_score,
                 )
                 futures.append(future)
                 time.sleep(1)
@@ -100,7 +106,7 @@ def run_optuna(
             db_url=db_url,
             db_dir=db_file.parent.as_posix(),
             n_trials_per_worker=n_trials_per_worker,
-            i_gpu=0 if not auto else 'auto',
+            i_gpu=0 if not run_on_cpu else 'cpu',
             n_epochs=n_epochs,
             objective_func=objective_func,
             trainer_class=trainer_class,
@@ -109,6 +115,7 @@ def run_optuna(
             pruner_warmup_epochs=pruner_warmup_epochs,
             pruner_minimum_trials_at_epoch=pruner_minimum_trials_at_epoch,
             pruner_patience=pruner_patience,
+            maximize_score=maximize_score
         )
 
 
@@ -125,7 +132,8 @@ def subprocess_worker(
     pruner_warmup_epochs: int,
     pruner_minimum_trials_at_epoch: int,
     pruner_patience: int,
-):
+    maximize_score: bool,
+) -> None:
 
     sampler = optuna.samplers.TPESampler(
         n_startup_trials=sampler_startup_trials,
@@ -151,7 +159,7 @@ def subprocess_worker(
         pruner=pruner,
     )
 
-    def launch_trial_wrapper(trial):
+    def launch_trial_wrapper(trial) -> float:
         return launch_trial(
             trial=trial,
             db_dir=db_dir,
@@ -159,6 +167,7 @@ def subprocess_worker(
             n_epochs=n_epochs,
             objective_func=objective_func,
             trainer_class=trainer_class,
+            maximize_score=maximize_score,
         )
 
     # run an optimization process
@@ -176,11 +185,14 @@ def launch_trial(
         n_epochs: int,
         objective_func: Callable,
         trainer_class: Callable,
-):
+        maximize_score: bool,
+) -> float:
 
     db_dir = Path(db_dir)
     assert db_dir.exists()
     trial_dir = db_dir / f'trial_{trial.number:04d}'
+
+    trial.set_user_attr('maximize_score', maximize_score)
 
     with open(os.devnull, 'w') as f:
         sys.stdout = f
@@ -207,7 +219,12 @@ def launch_trial(
     sys.stdout = sys.__stdout__
     sys.stderr = sys.__stderr__
 
-    return outputs['scores'][-1]
+    if maximize_score:
+        result = np.max(outputs['scores'])
+    else:
+        result = np.min(outputs['train_loss'])
+
+    return result
 
 
 def study_test(
@@ -215,7 +232,7 @@ def study_test(
 ) -> dict:
     input_kwargs = {
         'fraction_test': 0.0,
-        'fraction_validation': 0.2,
+        'fraction_validation': 0.0,
         'max_elms':5,
         'log_time': True,
         'inverse_weight_label': True,
@@ -230,9 +247,9 @@ if __name__ == '__main__':
 
     run_optuna(
         db_name=study_test.__name__,
-        n_gpus=1,  # <=2 for head node, <=4 for compute node
+        n_gpus=1,  # <=2 for head node, <=4 for compute node, ==1 if run_on_cpu
         n_workers_per_gpu=2,  # max 3 for V100
-        n_trials_per_worker=4,
+        n_trials_per_worker=3,
         n_epochs=4,
         objective_func=study_test,
         trainer_class=elm_regression.Trainer,
@@ -241,5 +258,6 @@ if __name__ == '__main__':
         pruner_warmup_epochs=6,
         pruner_minimum_trials_at_epoch=20,
         pruner_patience=4,
-        auto=True,
+        run_on_cpu=True,
+        maximize_score=False,
     )
