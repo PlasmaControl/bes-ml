@@ -23,6 +23,7 @@ def run_optuna(
         pruner_warmup_epochs: int,  # initial epochs before pruning
         pruner_minimum_trials_at_epoch: int,  # minimum trials at each epoch before pruning
         pruner_patience: int,  # epochs to wait for improvement before pruning
+        auto: bool = False,  # True to run on CPUs with multiprocessing
 ):
 
     db_file = Path(db_name) / f'{db_name}.db'
@@ -72,7 +73,7 @@ def run_optuna(
                     db_url,
                     db_file.parent.as_posix(),
                     n_trials_per_worker,
-                    i_gpu,
+                    i_gpu if not auto else 'auto',
                     n_epochs,
                     objective_func,
                     trainer_class,
@@ -99,7 +100,7 @@ def run_optuna(
             db_url=db_url,
             db_dir=db_file.parent.as_posix(),
             n_trials_per_worker=n_trials_per_worker,
-            i_gpu=0,
+            i_gpu=0 if not auto else 'auto',
             n_epochs=n_epochs,
             objective_func=objective_func,
             trainer_class=trainer_class,
@@ -115,7 +116,7 @@ def subprocess_worker(
     db_url: str,
     db_dir: str,
     n_trials_per_worker: int,
-    i_gpu: int,
+    i_gpu: Union[int,str],
     n_epochs: int,
     objective_func: Callable,
     trainer_class: Callable,
@@ -171,7 +172,7 @@ def subprocess_worker(
 def launch_trial(
         trial: Union[optuna.trial.Trial, optuna.trial.FrozenTrial],
         db_dir: str,
-        i_gpu: int,
+        i_gpu: Union[int,str],
         n_epochs: int,
         objective_func: Callable,
         trainer_class: Callable,
@@ -188,7 +189,7 @@ def launch_trial(
         input_kwargs = objective_func(trial)
         input_kwargs['n_epochs'] = n_epochs
         input_kwargs['output_dir'] = trial_dir.as_posix()
-        input_kwargs['device'] = f'cuda:{i_gpu:d}'
+        input_kwargs['device'] = f'cuda:{i_gpu:d}' if isinstance(i_gpu, int) else i_gpu
 
         print(f'Trial {trial.number}')
         for key, value in trial.params.items():
@@ -215,6 +216,7 @@ def study_test(
     input_kwargs = {
         'fraction_test': 0.0,
         'fraction_validation': 0.2,
+        'max_elms':5,
         'log_time': True,
         'inverse_weight_label': True,
         'learning_rate': 10 ** trial.suggest_int('lr_exp', -6, -2),
@@ -228,8 +230,8 @@ if __name__ == '__main__':
 
     run_optuna(
         db_name=study_test.__name__,
-        n_gpus=2,  # <=2 for head node, <=4 for compute node
-        n_workers_per_gpu=3,  # max 3 for V100
+        n_gpus=1,  # <=2 for head node, <=4 for compute node
+        n_workers_per_gpu=2,  # max 3 for V100
         n_trials_per_worker=4,
         n_epochs=4,
         objective_func=study_test,
@@ -239,4 +241,5 @@ if __name__ == '__main__':
         pruner_warmup_epochs=6,
         pruner_minimum_trials_at_epoch=20,
         pruner_patience=4,
+        auto=True,
     )
