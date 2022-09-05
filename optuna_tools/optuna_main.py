@@ -26,6 +26,7 @@ def run_optuna(
         pruner_patience: int,  # epochs to wait for improvement before pruning
         run_on_cpu: bool = False,  # True to run on CPUs with multiprocessing
         maximize_score: bool = True,  #  True (default) to maximize validation score; False to minimize training loss
+        fail_stale_trials: bool = False,  # if True, fail any stale trials
 ) -> None:
 
     if run_on_cpu:
@@ -48,20 +49,21 @@ def run_optuna(
         direction='maximize' if maximize_score else 'minimize',
     )
 
-    # FAIL any zombie trials that are stuck in `RUNNING` state
-    stale_trials = storage.get_all_trials(
-        study._study_id,
-        deepcopy=False,
-        states=(optuna.trial.TrialState.RUNNING,),
-    )
-
-    for stale_trial in stale_trials:
-        print(f'Setting trial {stale_trial.number} with state {stale_trial.state} to FAIL')
-        status = storage.set_trial_state(
-            stale_trial._trial_id,
-            optuna.trial.TrialState.FAIL,
+    if fail_stale_trials:
+        # FAIL any zombie trials that are stuck in `RUNNING` state
+        stale_trials = storage.get_all_trials(
+            study._study_id,
+            deepcopy=False,
+            states=(optuna.trial.TrialState.RUNNING,),
         )
-        print(f'Success?: {status}')
+
+        for stale_trial in stale_trials:
+            print(f'Setting trial {stale_trial.number} with state {stale_trial.state} to FAIL')
+            status = storage.set_trial_state(
+                stale_trial._trial_id,
+                optuna.trial.TrialState.FAIL,
+            )
+            print(f'Success?: {status}')
 
     # launch workers
     n_workers = n_gpus * n_workers_per_gpu

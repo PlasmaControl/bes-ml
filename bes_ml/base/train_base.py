@@ -64,10 +64,10 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
     trial: Any = None  # optuna trial
 
     def __post_init__(self):
-        self.data_location = Path(self.data_location)
+        self.data_location = Path(self.data_location).resolve()
         assert self.data_location.exists(), f"{self.data_location} does not exist"
 
-        self.output_dir = Path(self.output_dir)
+        self.output_dir = Path(self.output_dir).resolve()
         self.output_dir.mkdir(exist_ok=True, parents=True)
 
         # subclass must set either is_regression or is_classification to True
@@ -257,6 +257,9 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
         if hasattr(self, 'max_elms') and self.max_elms:
             elm_indices = elm_indices[:self.max_elms]
             self.logger.info(f"Limiting data to {self.max_elms} ELM events")
+
+        if elm_indices.size >= 5:
+            self.logger.info(f"Initial ELM indices: {elm_indices[0:5]}")
 
         n_validation_elms = int(self.fraction_validation * elm_indices.size)
         n_test_elms = int(self.fraction_test * elm_indices.size)
@@ -462,8 +465,8 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
 
         self.lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
-            mode="min",
             factor=0.5,
+            threshold=1e-3,
             patience=self.lr_scheduler_patience,
             verbose=True,
         )
@@ -625,6 +628,10 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
 
         self.logger.info(f"End training loop")
         self.logger.info(f"Elapsed time {time.time()-t_start_training:.1f} s")
+
+        for handler in self.logger.handlers[:]:
+            handler.close()
+            self.logger.removeHandler(handler)
 
         return self.results.copy()
 
