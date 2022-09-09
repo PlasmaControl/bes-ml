@@ -24,9 +24,10 @@ def run_optuna(
         pruner_warmup_epochs: int,  # initial epochs before pruning
         pruner_minimum_trials_at_epoch: int,  # minimum trials at each epoch before pruning
         pruner_patience: int,  # epochs to wait for improvement before pruning
-        run_on_cpu: bool = False,  # True to run on CPUs with multiprocessing
+        run_on_cpu: bool = False,  # if True, run on CPUs with multiprocessing
         maximize_score: bool = True,  #  True (default) to maximize validation score; False to minimize training loss
         fail_stale_trials: bool = False,  # if True, fail any stale trials
+        constant_liar: bool = False,  # if True, add penalty to running trials to avoid redundant sampling
 ) -> None:
 
     if run_on_cpu:
@@ -56,7 +57,6 @@ def run_optuna(
             deepcopy=False,
             states=(optuna.trial.TrialState.RUNNING,),
         )
-
         for stale_trial in stale_trials:
             print(f'Setting trial {stale_trial.number} with state {stale_trial.state} to FAIL')
             status = storage.set_trial_state(
@@ -67,6 +67,21 @@ def run_optuna(
 
     # launch workers
     n_workers = n_gpus * n_workers_per_gpu
+    subprocess_kwargs = {
+        'db_url': db_url,
+        'db_dir': db_file.parent.as_posix(),
+        'n_trials_per_worker': n_trials_per_worker,
+        'n_epochs': n_epochs,
+        'objective_func': objective_func,
+        'trainer_class': trainer_class,
+        'sampler_startup_trials': sampler_startup_trials,
+        'pruner_startup_trials': pruner_startup_trials,
+        'pruner_warmup_epochs': pruner_warmup_epochs,
+        'pruner_minimum_trials_at_epoch': pruner_minimum_trials_at_epoch,
+        'pruner_patience': pruner_patience,
+        'maximize_score': maximize_score,
+        'constant_liar': constant_liar,
+    }
     if n_workers > 1:
         with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
             futures = []
@@ -77,22 +92,11 @@ def run_optuna(
                       f'and running {n_trials_per_worker} trials')
                 future = executor.submit(
                     subprocess_worker,  # callable that calls study.optimize()
-                    db_url,
-                    db_file.parent.as_posix(),
-                    n_trials_per_worker,
-                    i_gpu if not run_on_cpu else 'cpu',
-                    n_epochs,
-                    objective_func,
-                    trainer_class,
-                    sampler_startup_trials,
-                    pruner_startup_trials,
-                    pruner_warmup_epochs,
-                    pruner_minimum_trials_at_epoch,
-                    pruner_patience,
-                    maximize_score,
+                    i_gpu=i_gpu if not run_on_cpu else 'cpu',
+                    **subprocess_kwargs,
                 )
                 futures.append(future)
-                time.sleep(1)
+                time.sleep(2)
             concurrent.futures.wait(futures)
             for i_future, future in enumerate(futures):
                 if future.exception() is None:
@@ -105,19 +109,8 @@ def run_optuna(
     else:
         print("Starting trial")
         subprocess_worker(
-            db_url=db_url,
-            db_dir=db_file.parent.as_posix(),
-            n_trials_per_worker=n_trials_per_worker,
             i_gpu=0 if not run_on_cpu else 'cpu',
-            n_epochs=n_epochs,
-            objective_func=objective_func,
-            trainer_class=trainer_class,
-            sampler_startup_trials=sampler_startup_trials,
-            pruner_startup_trials=pruner_startup_trials,
-            pruner_warmup_epochs=pruner_warmup_epochs,
-            pruner_minimum_trials_at_epoch=pruner_minimum_trials_at_epoch,
-            pruner_patience=pruner_patience,
-            maximize_score=maximize_score
+            **subprocess_kwargs,
         )
 
 
@@ -135,11 +128,12 @@ def subprocess_worker(
     pruner_minimum_trials_at_epoch: int,
     pruner_patience: int,
     maximize_score: bool,
+    constant_liar: bool,
 ) -> None:
 
     sampler = optuna.samplers.TPESampler(
         n_startup_trials=sampler_startup_trials,
-        constant_liar=True,
+        constant_liar=constant_liar,
     )
     sampler.reseed_rng()
 
@@ -262,4 +256,5 @@ if __name__ == '__main__':
         pruner_patience=4,
         run_on_cpu=True,
         maximize_score=False,
+        constant_liar=True,
     )
