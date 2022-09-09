@@ -131,7 +131,7 @@ if __name__=='__main__':
         batch_size=64,
         n_epochs=2,
         minibatch_interval=50,
-        fraction_validation=0.0,
-        fraction_test=0.0,
+        fraction_validation=0.2,
+        fraction_test=0.2,
     )
     model.train()

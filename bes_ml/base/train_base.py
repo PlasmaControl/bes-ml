@@ -502,8 +502,6 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
                 is_train=True,
                 data_loader=self.train_data_loader,
             )
-            if self.is_regression:
-                train_loss = np.sqrt(train_loss)
 
             self.results['train_loss'].append(train_loss.item())
 
@@ -516,9 +514,6 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
                     is_train=False,
                     data_loader=self.validation_data_loader,
                 )
-                if self.is_regression:
-                    # regression loss is MSE, so take sqrt to get units of time
-                    valid_loss = np.sqrt(valid_loss)
 
                 self.results['valid_loss'].append(valid_loss.item())
 
@@ -542,7 +537,6 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
                             prediction_labels,
                             average='weighted'
                         )
-                assert score is not None
                 self.results['scores'].append(score.item())
 
                 # ROC-AUC score for classification
@@ -640,7 +634,7 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
         is_train: bool = True,  # True for train, False for evaluation/inference
         data_loader: torch.utils.data.DataLoader = None,  # train or validation data loader
     ) -> Union[np.ndarray, Tuple]:
-        losses = np.array(0)
+        losses = np.array([])
         all_predictions = []
         all_labels = []
         if is_train:
@@ -656,22 +650,22 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
                 if (i_batch+1) % self.minibatch_interval == 0:
                     t_start_minibatch = time.time()
                 if is_train:
-                    # reset grads
                     self.optimizer.zero_grad()
                 signal_windows = signal_windows.to(self.device)
                 labels = labels.to(self.device)
                 predictions = self.model(signal_windows)
-                if not is_train and self.is_classification and self.model.mlp_output_size == 1:
-                    # if evaluation/inference mode and classificaiton model,
-                    # apply sigmoid to get [0,1] probability
-                    predictions = predictions.sigmoid()
-                    labels = labels.type_as(predictions)
-                elif self.is_classification and self.model.mlp_output_size > 1:
-                    # torch.nn.CrossEntropyLoss needs labels to be long and predictions not sigmoid
-                    labels = labels.type(torch.long)
-                else:
-                    # Set only label type, leave predictions not sigmoid
-                    labels = labels.type_as(predictions)
+                # if not is_train and self.is_classification and self.model.mlp_output_size == 1:
+                #     # if evaluation/inference mode and classificaiton model,
+                #     # apply sigmoid to get [0,1] probability
+                #     # predictions = predictions.sigmoid()
+                #     labels = labels.type_as(predictions)
+                # elif self.is_classification and self.model.mlp_output_size > 1:
+                #     # torch.nn.CrossEntropyLoss needs labels to be long and predictions not sigmoid
+                #     labels = labels.type(torch.long)
+                # else:
+                #     # Set only label type, leave predictions not sigmoid
+                #     labels = labels.type_as(predictions)
+                labels = labels.type_as(predictions)
                 loss = self.loss_function(
                     predictions.squeeze(),
                     labels,
