@@ -15,12 +15,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch
 import torch.utils.data
-import torchinfo
+import torchinfo  # conda-forge
 import yaml
 from sklearn import metrics
 
 try:
-    import optuna  # available on conda-forge
+    import optuna  # conda-forge
 except ImportError:
     optuna = None
 
