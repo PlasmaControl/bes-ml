@@ -96,7 +96,7 @@ def run_optuna(
                     **subprocess_kwargs,
                 )
                 futures.append(future)
-                time.sleep(2)
+                time.sleep(1)
             concurrent.futures.wait(futures)
             for i_future, future in enumerate(futures):
                 if future.exception() is None:

@@ -15,12 +15,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch
 import torch.utils.data
-import torchinfo
+import torchinfo  # conda-forge
 import yaml
 from sklearn import metrics
 
 try:
-    import optuna  # available on conda-forge
+    import optuna  # conda-forge
 except ImportError:
     optuna = None
 
@@ -523,7 +523,6 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
                 if self.is_regression:
                     score = self.score_function(true_labels, predictions)
                 elif self.is_classification:
-                    predictions = predictions.sigmoid()
                     if self.model.mlp_output_size == 1:
                         assert hasattr(self, 'threshold')
                         prediction_labels = (predictions > self.threshold).astype(int)
