@@ -665,7 +665,10 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
                 # else:
                 #     # Set only label type, leave predictions not sigmoid
                 #     labels = labels.type_as(predictions)
-                labels = labels.type_as(predictions)
+                if self.is_classification and self.mlp_output_size > 1:
+                    labels = labels.type(torch.long)
+                else:
+                    labels = labels.type_as(predictions)
                 loss = self.loss_function(
                     predictions.squeeze(),
                     labels,
