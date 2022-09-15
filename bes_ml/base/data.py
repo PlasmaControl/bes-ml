@@ -24,8 +24,16 @@ class ELM_Dataset(torch.utils.data.Dataset):
         signal_window_size: int = None,
         prediction_horizon: int = None,  # =0 for time-to-ELM regression; >=0 for classification prediction
     ) -> None:
-        self.signals = signals
-        self.labels = labels
+        self.signals = torch.unsqueeze(torch.from_numpy(signals), 0)
+        assert (
+            self.signals.ndim == 4 and 
+            self.signals.shape[0] == 1 and 
+            self.signals.shape[2] == 8 and 
+            self.signals.shape[3] == 8
+        ), "Signals have incorrect shape"
+        self.labels = torch.from_numpy(labels)
+        assert self.labels.ndim == 1, "Labels have incorrect shape"
+        assert self.labels.shape[0] == self.signals.shape[1], "Labels and signals have different time dimensions"
         self.sample_indices = sample_indices
         # self.window_start = window_start
         self.signal_window_size = signal_window_size
@@ -37,19 +45,9 @@ class ELM_Dataset(torch.utils.data.Dataset):
     def __getitem__(self, idx: int):
         time_idx = self.sample_indices[idx]
         # BES signal window data
-        signal_window = self.signals[
-            time_idx : time_idx + self.signal_window_size
-        ]
-        signal_window = signal_window[np.newaxis, ...]
-        signal_window = torch.as_tensor(signal_window, dtype=torch.float32)
+        signal_window = self.signals[:, time_idx : time_idx + self.signal_window_size, :, :]
         # label for signal window
-        label = self.labels[
-            time_idx
-            + self.signal_window_size
-            + self.prediction_horizon
-            - 1
-        ]
-        label = torch.as_tensor(label)
+        label = self.labels[ time_idx + self.signal_window_size + self.prediction_horizon - 1 ]
 
         return signal_window, label
 
