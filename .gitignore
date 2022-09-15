@@ -35,6 +35,5 @@ __pycache__/
 # testing, coverage, etc
 pytest.ini
 .coverage*
-profile/
-# profile/*profile*
-# !profile/*.py
+profile/*.txt
+profile/*.out
