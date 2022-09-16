@@ -138,7 +138,7 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
         self.model = self.model.to(self.device)
 
         # print model summary
-        self.input_shape = (self.batch_size, 1, self.signal_window_size, 8, 8)
+        self.input_shape = (self.batch_size, 1, self.signal_window_size, 8 * self.sinterp, 8 * self.sinterp)
         self._print_model_summary()
 
     def _print_model_summary(self):

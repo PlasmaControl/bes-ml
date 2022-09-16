@@ -22,6 +22,7 @@ class _Base_Features_Dataclass():
     subwindow_size: int = -1  # power of 2, or -1 (default) for full signal window
     negative_slope: float = 1e-3  # relu negative slope; ~1e-3
     dropout_rate: float = 0.1  # ~0.1
+    sinterp: int = 1
     logger: logging.Logger = None
 
 
@@ -99,8 +100,8 @@ class Dense_Features(_Dense_Features_Dataclass, _Base_Features):
 
         filter_size = (
             self.subwindow_size,
-            8 // self.spatial_maxpool_size,
-            8 // self.spatial_maxpool_size,
+            8 * self.sinterp // self.spatial_maxpool_size,
+            8 * self.sinterp // self.spatial_maxpool_size,
         )
 
         # list of conv. filter banks (each with self.num_kernels) with size self.subwindow_bins
@@ -170,7 +171,7 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
             self.cnn_layer2_kernel_time_size % 2 == 1
         )
 
-        input_shape = (1, self.signal_window_size, 8, 8)
+        input_shape = (1, self.signal_window_size, 8 * self.sinterp, 8 * self.sinterp)
 
         def test_bad_shape(shape):
             assert np.all(np.array(shape)>=1), f"Bad shape: {shape}"
@@ -280,8 +281,8 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
 
         filter_size = (
             self.nfreqs, 
-            8 // self.spatial_maxpool_size, 
-            8 // self.spatial_maxpool_size,
+            8 * self.sinterp // self.spatial_maxpool_size,
+            8 * self.sinterp // self.spatial_maxpool_size,
         )
 
         # list of conv. filter banks (each with self.num_kernels) with size self.subwindow_bins
@@ -354,8 +355,8 @@ class DCT_Features(_DCT_Features_Dataclass, _Base_Features):
 
         filter_size = (
             self.nfreqs, 
-            8 // self.spatial_maxpool_size, 
-            8 // self.spatial_maxpool_size,
+            8 * self.sinterp // self.spatial_maxpool_size,
+            8 * self.sinterp // self.spatial_maxpool_size,
         )
 
         # list of conv. filter banks (each with self.num_kernels) with size self.subwindow_bins
@@ -442,8 +443,8 @@ class DWT_Features(_DWT_Features_Dataclass, _Base_Features):
 
         filter_size = (
             self.dwt_output_length, 
-            8 // self.spatial_maxpool_size, 
-            8 // self.spatial_maxpool_size,
+            8 * self.sinterp // self.spatial_maxpool_size,
+            8 * self.sinterp // self.spatial_maxpool_size,
         )
 
         # list of conv. filter banks (each with self.num_kernels) with size self.subwindow_bins

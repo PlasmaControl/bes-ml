@@ -21,12 +21,13 @@ except ImportError:
 class Trainer(_Trainer_Base):
     data_location: Union[Path,str] = sample_data_dir / 'velocimetry_data' #location of stored data
     dataset_to_ram: bool = True # Load datasets to ram
+    sinterp: int = 1 # interpolation factor of BES signals
 
     # __init__ must have exact copy of all kwargs from parent class
     def __post_init__(self):
 
         self.mlp_output_size = 128
-
+        assert isinstance(self.sinterp, int), f"sinterp must be type int. Got type {type(self.sinterp)}"
         super().__post_init__()
 
         self.is_regression = True
@@ -103,12 +104,35 @@ class Trainer(_Trainer_Base):
 
 
 if __name__=='__main__':
+    n_epochs = 250
+    t_size = 3
+    s_size = 3
+    sws = 4
+    dense_num = 0
+    cnn_l1_num = 512
     model = Trainer(
-        dense_num_kernels=8,
+        data_location='/home/jazimmerman/PycharmProjects/bes-edgeml-models/bes-edgeml-work/velocimetry/data/',
+        output_dir=f'/home/jazimmerman/PycharmProjects/bes-edgeml-models/bes-edgeml-work/velocimetry/'
+                   f'cnn{cnn_l1_num}_spatial{s_size}_time{t_size}_dense{dense_num}_sws{sws}_epochs{n_epochs}',
+        sinterp=5,
+        fraction_test=0.1,
+        fraction_validation=0.1,
+        minibatch_interval=1000,
+        dense_num_kernels=dense_num,
         batch_size=64,
-        n_epochs=2,
-        minibatch_interval=50,
-        fraction_validation=0.2,
-        fraction_test=0.2,
+        signal_window_size=sws,
+        cnn_layer1_kernel_time_size=t_size,
+        cnn_layer1_kernel_spatial_size=s_size,
+        cnn_layer1_maxpool_time_size=1,
+        cnn_layer2_kernel_time_size=t_size,
+        cnn_layer2_kernel_spatial_size=s_size,
+        cnn_layer2_maxpool_time_size=1,
+        cnn_layer1_num_kernels=cnn_l1_num,
+        cnn_layer2_num_kernels=cnn_l1_num // 2,
+        mlp_layer1_size=(cnn_l1_num + dense_num) // 4,
+        mlp_layer2_size=(((cnn_l1_num + dense_num) // 4) + 128) // 2, # halfway between mlp_layer1 and mlp_output
+        n_epochs=n_epochs,
+        optimizer_type='adam',
+        weight_decay=0.0
     )
     model.train()
