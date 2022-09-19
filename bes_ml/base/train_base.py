@@ -165,12 +165,12 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
         sys.stdout = sys.__stdout__
         # print model summary
         n_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        x = torch.rand(*self.input_shape)
-        x = x.to(self.device)
+        test_input = torch.rand(*self.input_shape).to(self.device)
+        test_output = self.model(test_input)
         self.logger.info(tmp_io.getvalue())
         self.logger.info(f"Model contains {n_params} trainable parameters")
-        self.logger.info(f'Batched input size: {x.shape}')
-        self.logger.info(f"Batched output size: {self.model(x).shape}")
+        self.logger.info(f'Batched input size: {test_input.shape}')
+        self.logger.info(f"Batched output size: {test_output.shape}")
 
     def finish_subclass_initialization(self) -> None:
         # subclass must set is_regression XOR is_classification
@@ -195,23 +195,33 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
             self.score_function_name
         )
 
-        self.optimizer = None
-        self.lr_scheduler = None
+        self.optimizer = self.lr_scheduler = None
         self._make_optimizer_scheduler_loss()
 
-        self.train_data = None
-        self.validation_data = None
-        self.test_data = None
+        # get data
+        self.train_data = self.validation_data = self.test_data = None
         self._get_data()
+        # ensure all data is np.ndarray at this point
+        for data_list in [self.train_data, self.validation_data, self.test_data]:
+            if data_list is None: continue
+            for item in data_list:
+                assert isinstance(item, np.ndarray)
         
-        self.train_dataset = None
-        self.validation_dataset = None
+        # make datasets
+        self.train_dataset = self.validation_dataset = None
         self._make_datasets()
+        # ensure datasets are torch.utils.data.Dataset
+        for dataset in [self.train_dataset, self.validation_dataset]:
+            if dataset is None: continue
+            assert isinstance(dataset, torch.utils.data.Dataset)
 
-        self.train_data_loader = None
-        self.validation_data_loader = None
+        # make data loaders
+        self.train_data_loader = self.validation_data_loader = None
         self._make_data_loaders()
-        assert self.train_data_loader
+        # ensure data loaders are torch.utils.data.DataLoader
+        for data_loader in [self.train_data_loader, self.validation_data_loader]:
+            if data_loader is None: continue
+            assert isinstance(data_loader, torch.utils.data.DataLoader)
 
         if self.test_data_file and self.fraction_test>0.0:
             self._save_test_data()
@@ -397,18 +407,23 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
             packaged_window_start,
         ]:
             tmp = f"  shape {tensor.shape}, dtype {tensor.dtype},"
-            tmp += f" min {np.min(tensor):.3f}, max {np.max(tensor):.3f}"
+            tmp += f" min {tensor.min():.3f}, max {tensor.max():.3f}"
             if hasattr(tensor, "device"):
                 tmp += f" device {tensor.device[-5:]}"
             self.logger.info(tmp)
 
-        return (
+        return_tuple = (
             packaged_signals, 
             packaged_labels, 
             packaged_valid_t0_indices, 
             packaged_window_start, 
             elm_indices,
         )
+        # ensure everything is np.ndarray
+        for item in return_tuple:
+            assert isinstance(item, np.ndarray)
+
+        return return_tuple
 
     def _check_for_balanced_data(self) -> None:
         # must implement in subclass
@@ -486,7 +501,7 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
             self.results['roc_scores'] = []
 
         # send model to device
-        self.model = self.model.to(self.device)
+        # self.model = self.model.to(self.device)
 
         self.logger.info(f"Batches per epoch {len(self.train_data_loader)}")
         self.logger.info(f"Begin training loop over {self.n_epochs} epochs")
@@ -525,19 +540,20 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
                 elif self.is_classification:
                     if self.model.mlp_output_size == 1:
                         assert hasattr(self, 'threshold')
-                        prediction_labels = (predictions > self.threshold).astype(int)
+                        status = (predictions > self.threshold).astype(int)
                         score = self.score_function(
                             true_labels,
-                            prediction_labels,
+                            status,
                         )
                     else:
-                        prediction_labels = predictions.argmax(axis=1)
+                        status = predictions.argmax(axis=1)
                         score = self.score_function(
                             true_labels,
-                            prediction_labels,
+                            status,
                             average='weighted'
                         )
-                self.results['scores'].append(score.item())
+                score = score.item()
+                self.results['scores'].append(score)
 
                 # ROC-AUC score for classification
                 if self.is_classification:
@@ -562,6 +578,7 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
                             roc_score = np.float32(0)
                     self.results['roc_scores'].append(roc_score.item())
 
+            # save results to yaml
             with (self.output_dir/self.results_file).open('w') as results_file:
                 yaml.dump(
                     self.results,
@@ -573,13 +590,11 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
             if score is None or score > best_score:
                 if score is not None:
                     best_score = score
-                    self.logger.info(f"Ep {i_epoch+1:03d}: Best score {best_score:.3f}, saving model...")
-                self.logger.info(f"Saving model to: {checkpoint_file.as_posix()}")
+                    self.logger.info(f"  Best {self.score_function_name}: {best_score:.3f}  saving model...")
                 torch.save(self.model.state_dict(), checkpoint_file.as_posix())
-                self.logger.info(f"  File size: {checkpoint_file.stat().st_size/1e3:.1f} kB")                
+                self.logger.info(f"  Saved model: {checkpoint_file}  file size: {checkpoint_file.stat().st_size/1e3:.1f} kB")
                 if self.export_onnx:
                     onnx_file = self.output_dir / 'checkpoint.onnx'
-                    self.logger.info(f"Saving to ONNX: {onnx_file.as_posix()}")
                     torch.onnx.export(
                         self.model, 
                         torch.rand(*self.input_shape)[0].unsqueeze(0),
@@ -589,7 +604,19 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
                         verbose=True,
                         opset_version=11
                     )
-                    self.logger.info(f"  File size: {onnx_file.stat().st_size/1e3:.1f} kB")
+                    self.logger.info(f"  Saved ONNX model: {onnx_file}  file size: {onnx_file.stat().st_size/1e3:.1f} kB")
+
+            # log status
+            status =  f"Ep {i_epoch+1:03d}: "
+            status += f"train loss {train_loss:.3f}  "
+            if score is not None and valid_loss is not None:
+                status += f"val loss {valid_loss:.3f}  "
+                status += f"{self.score_function_name} {score:.3f}  "
+                if self.is_classification:
+                    status += f"ROC {roc_score:.3f}  "
+            status += f"ep time {time.time()-t_start_epoch:.1f} s "
+            status += f"(total time {time.time()-t_start_training:.1f} s)"
+            self.logger.info(status)
 
             # report epoch result to optuna
             if optuna is not None and self.trial is not None:
@@ -611,17 +638,6 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
                         self.logger.removeHandler(handler)
                     optuna.TrialPruned()
 
-            prediction_labels =  f"Ep {i_epoch+1:03d}: "
-            prediction_labels += f"train loss {train_loss:.3f}  "
-            if score is not None and valid_loss is not None:
-                prediction_labels += f"val loss {valid_loss:.3f}  "
-                prediction_labels += f"{self.score_function_name} {score:.3f}  "
-                if self.is_classification:
-                    prediction_labels += f"ROC {roc_score:.3f}  "
-            prediction_labels += f"ep time {time.time()-t_start_epoch:.1f} s "
-            prediction_labels += f"(total time {time.time()-t_start_training:.1f} s)"
-            self.logger.info(prediction_labels)
-
         self.logger.info(f"End training loop")
         self.logger.info(f"Elapsed time {time.time()-t_start_training:.1f} s")
 
@@ -636,7 +652,7 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
         is_train: bool = True,  # True for train, False for evaluation/inference
         data_loader: torch.utils.data.DataLoader = None,  # train or validation data loader
     ) -> Union[np.ndarray, Tuple]:
-        losses = np.array([])
+        batch_losses = []
         all_predictions = []
         all_labels = []
         if is_train:
@@ -653,51 +669,43 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
                     t_start_minibatch = time.time()
                 if is_train:
                     self.optimizer.zero_grad()
-                signal_windows = signal_windows.to(self.device)
-                labels = labels.to(self.device)
                 predictions = self.model(signal_windows)
-                # if not is_train and self.is_classification and self.model.mlp_output_size == 1:
-                #     # if evaluation/inference mode and classificaiton model,
-                #     # apply sigmoid to get [0,1] probability
-                #     # predictions = predictions.sigmoid()
-                #     labels = labels.type_as(predictions)
-                # elif self.is_classification and self.model.mlp_output_size > 1:
-                #     # torch.nn.CrossEntropyLoss needs labels to be long and predictions not sigmoid
-                #     labels = labels.type(torch.long)
-                # else:
-                #     # Set only label type, leave predictions not sigmoid
-                #     labels = labels.type_as(predictions)
                 if self.is_classification and self.mlp_output_size > 1:
-                    labels = labels.type(torch.long)
+                    labels = labels.type(torch.long)  # must be torch.long for CrossEntropy() loss (why?)
                 else:
                     labels = labels.type_as(predictions)
-                loss = self.loss_function(
+                sample_losses = self.loss_function(
                     predictions.squeeze(),
                     labels,
                 )
                 if self.is_regression and hasattr(self, 'inverse_weight_loss') and self.inverse_weight_label:
-                    loss = torch.div(loss, labels)
-                loss = loss.mean()  # batch loss
-                losses = np.append(losses, loss.detach().cpu().numpy())  # track batch losses
+                    sample_losses = torch.div(sample_losses, labels)
+                batch_loss = sample_losses.mean()  # batch loss
+                batch_losses.append(batch_loss.item())  # accumulate batch losses for this epoch
                 if is_train:
-                    # backpropagate and take optimizer step
-                    loss.backward()
+                    # for training, backpropagate and step optimizer
+                    batch_loss.backward()
                     self.optimizer.step()
                 else:
+                    # for validation, accumulate labels and predictions
                     all_labels.append(labels.cpu().numpy())
                     all_predictions.append(predictions.cpu().numpy())
+
+                # minibatch status
                 if (i_batch+1)%self.minibatch_interval == 0:
-                    tmp =  f"  {mode} batch {i_batch+1:05d}/{len(self.train_data_loader)}  "
-                    tmp += f"batch loss {loss:.3f} (avg loss {losses.mean():.3f})  "
-                    tmp += f"minibatch time {time.time()-t_start_minibatch:.3f} s"
-                    self.logger.info(tmp)
+                    epoch_loss = np.mean(batch_losses)
+                    status =  f"  {mode} batch {i_batch+1:05d}/{len(self.train_data_loader)}  "
+                    status += f"batch loss {batch_loss:.3f} (avg loss {epoch_loss:.3f})  "
+                    status += f"minibatch time {time.time()-t_start_minibatch:.3f} s"
+                    self.logger.info(status)
+        epoch_loss = np.mean(batch_losses)
         if is_train:
-            return_value = losses.mean()
+            return_value = epoch_loss
         else:
             all_labels = np.concatenate(all_labels)
             all_predictions = np.concatenate(all_predictions)
             return_value = (
-                losses.mean(),
+                epoch_loss,
                 all_predictions,
                 all_labels,
             )

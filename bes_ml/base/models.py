@@ -109,22 +109,25 @@ class Dense_Features(_Dense_Features_Dataclass, _Base_Features):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self._time_interval_and_maxpool(x)
-        x_new_size = [
-            x.shape[0],
-            self.dense_num_kernels,
-            self.subwindow_nbins,
-            1,
-            1,
-        ]
-        x_new = torch.empty(size=x_new_size, dtype=x.dtype, device=x.device)
-        for i_bin in range(self.subwindow_nbins):
-            i_start = i_bin * self.subwindow_size
-            i_stop = (i_bin+1) * self.subwindow_size
-            if torch.any(torch.isnan(self.conv[i_bin].weight)) or torch.any(torch.isnan(self.conv[i_bin].bias)):
-                assert False
-            x_new[:, :, i_bin:i_bin+1, :, :] = self.conv[i_bin](
-                x[:, :, i_start:i_stop, :, :]
-            )
+        if self.subwindow_nbins == 1:
+            x_new = self.conv[0](x)
+        else:
+            x_new_size = [
+                x.shape[0],
+                self.dense_num_kernels,
+                self.subwindow_nbins,
+                1,
+                1,
+            ]
+            x_new = torch.empty(size=x_new_size, dtype=x.dtype, device=x.device)
+            for i_bin in range(self.subwindow_nbins):
+                i_start = i_bin * self.subwindow_size
+                i_stop = (i_bin+1) * self.subwindow_size
+                # if torch.any(torch.isnan(self.conv[i_bin].weight)) or torch.any(torch.isnan(self.conv[i_bin].bias)):
+                #     assert False
+                x_new[:, :, i_bin:i_bin+1, :, :] = self.conv[i_bin](
+                    x[:, :, i_start:i_stop, :, :]
+                )
         x = self._dropout_relu_flatten(x_new)
         return x
 
