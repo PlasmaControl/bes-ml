@@ -11,6 +11,38 @@ import optuna
 from bes_ml import elm_regression
 
 
+def fail_stale_trials(
+        db_name: str,
+):
+    db_file = Path(db_name) / f'{db_name}.db'
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+    assert db_file.exists()
+    db_url = f'sqlite:///{db_file.as_posix()}'
+
+    storage = optuna.storages.RDBStorage(
+        url=db_url,
+    )
+
+    study = optuna.load_study(
+        study_name='study',
+        storage=storage,
+    )
+
+    stale_trials = storage.get_all_trials(
+        study_id=study._study_id,
+        deepcopy=False,
+        states=(optuna.trial.TrialState.RUNNING,),
+    )
+
+    for stale_trial in stale_trials:
+        print(f'Setting trial {stale_trial.number} with state {stale_trial.state} to FAIL')
+        status = storage.set_trial_state(
+            trial_id=stale_trial._trial_id,
+            state=optuna.trial.TrialState.FAIL,
+        )
+        print(f'Success?: {status}')
+
+
 def run_optuna(
         db_name: str,
         n_gpus: int,
@@ -96,7 +128,7 @@ def run_optuna(
                     **subprocess_kwargs,
                 )
                 futures.append(future)
-                time.sleep(1)
+                time.sleep(4)
             concurrent.futures.wait(futures)
             for i_future, future in enumerate(futures):
                 if future.exception() is None:

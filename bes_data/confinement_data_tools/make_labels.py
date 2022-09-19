@@ -1,6 +1,7 @@
 import logging
 import re
 from pathlib import Path
+from typing import Union
 
 import h5py
 import numpy as np
@@ -36,8 +37,8 @@ def make_parser():
     return parser
 def make_labels(data_dir: str = None,
                 df_name: str = 'confinement_database.xlsx',
-                shot_dir: str | Path = 'confinement_data',
-                labeled_dir: str | Path = 'labeled_datasets',
+                shot_dir: Union[str,Path] = 'confinement_data',
+                labeled_dir: Union[str,Path] = 'labeled_datasets',
                 logger: logging.Logger = None):
     """
     Function to create labeled datasets for turbulence regime classification.

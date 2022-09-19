@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import optuna
 import seaborn as sns
 
-# from bes_ml.elm_regression.analyze import Analyzer
+from bes_ml.elm_regression.analyze import Analyzer
 
 
 NON_RUNNING_STATES = (
@@ -70,8 +70,9 @@ def merge_pdfs(
 
 def plot_study(
         study_dir: Union[Path, str],  # study dir. or db file
-        plot_top_trials=False,
+        # plot_top_trials=False,
         save=False,
+        use_train_loss = False,
 ):
     study_dir = Path(study_dir).resolve()
     study = open_study(study_dir)
@@ -83,17 +84,25 @@ def plot_study(
         ),
     )
 
-    if not trials[0].user_attrs['scores']:
-        for i_trial in range(len(trials)):
-            trials[i_trial].user_attrs['scores'] = -1 * np.array(trials[i_trial].user_attrs['train_loss'])
+    if use_train_loss:
+        attr_name = 'train_loss'
+        attr_dir = np.min
+    else:
+        attr_name = 'scores'
+        attr_dir = np.max
+
+    # if not trials[0].user_attrs['scores']:
+    #     for i_trial in range(len(trials)):
+    #         trials[i_trial].user_attrs['scores'] = -1 * np.array(trials[i_trial].user_attrs['train_loss'])
 
     # sort trials by max score during training
     trials = sorted(
         trials,
-        key=lambda trial: np.max(trial.user_attrs['scores']),
-        reverse=True,
+        key=lambda trial: attr_dir(trial.user_attrs[attr_name]),
     )
-    values = np.array([np.max(trial.user_attrs['scores']) for trial in trials])
+    if attr_name == 'scores':
+        trials.reverse()
+    values = np.array([attr_dir(trial.user_attrs[attr_name]) for trial in trials])
     print(f'Completed trials: {len(trials)}')
 
     # subset of top trials
@@ -138,43 +147,36 @@ def plot_study(
         print(f'Saving file: {filepath.as_posix()}')
         plt.savefig(filepath, transparent=True)
 
-    if plot_top_trials:
-        top_trial = top_trials[0]
-        top_trial_dir = study_dir / f"trial_{top_trial.number:04d}"
-        run = Analysis(run_dir=top_trial_dir, save=save)
-        run.plot_training_epochs()
-        run.plot_valid_indices_analysis()
 
 def plot_top_trials(
         study_dir,
         n_trials = 1,
         device = None,
         max_elms = None,
+        use_train_loss = False,
 ):
     study_dir = Path(study_dir).resolve()
-    assert study_dir.exists()
+    study = open_study(study_dir)
 
-    db_file = list(study_dir.glob('*.db'))[0]
-    print(f'Opening RDB: {db_file.as_posix()}')
-
-    db_url = f'sqlite:///{db_file.as_posix()}'
-
-    study = optuna.load_study('study', db_url)
     trials = study.get_trials(
         states=(optuna.trial.TrialState.COMPLETE,
                 optuna.trial.TrialState.PRUNED,),
     )
     print(f'Completed trials: {len(trials)}')
-    values = np.array([np.max(trial.user_attrs['scores']) for trial in trials])
+    if use_train_loss:
+        attr_name = 'train_loss'
+    else:
+        attr_name = 'scores'
+    values = np.array([np.max(trial.user_attrs[attr_name]) for trial in trials])
 
     sorted_indices = np.flip(np.argsort(values))
     for i in np.arange(n_trials):
         i_trial = sorted_indices[i]
         trial = trials[i_trial]
         trial_dir = study_dir / f'trial_{trial.number:04d}'
-        run = Analysis(trial_dir, device=device)
+        run = Analyzer(trial_dir, device=device)
         run.plot_training_epochs()
-        run.plot_valid_indices_analysis()
+        # run.plot_valid_indices_analysis()
         if max_elms:
             run.plot_full_inference(max_elms=max_elms)
 
@@ -194,6 +196,8 @@ def summarize_study(
         ]:
             tmp += f"  ep {len(trial.user_attrs['train_loss'])}"
             tmp += f"  loss {trial.user_attrs['train_loss'][-1]:.4f}"
+            if trial.user_attrs['scores']:
+                tmp += f"  score {trial.user_attrs['scores'][-1]:.4f}"
         print(tmp)
 
     print(f"Total trials: {len(trials)}")
@@ -213,15 +217,6 @@ def summarize_study(
 
     importance = optuna.importance.get_param_importances(
         study,
-        # params=[
-        #     'lr_exp',
-        #     'batch_size_pow2',
-        #     'weight_decay',
-        #     'signal_window_size_pow2',
-        #     'mlp_layer1_size_pow2',
-        #     'mlp_layer2_size_pow2',
-        #     'sgd_momentum_fac',
-        # ],
     )
     for param_name in importance:
         print(f"  {param_name}  importance {importance[param_name]:0.3f}")
@@ -230,11 +225,13 @@ def summarize_study(
 if __name__ == '__main__':
     plt.close('all')
 
-    study_dir = Path.home() / 'edgeml/scratch/study_logreg_cnn_v01'
+    study_dir = Path.home() / 'edgeml/scratch/study_logreg_cnn_v02'
 
     summarize_study(study_dir)
 
-    plot_study(study_dir)
+    plot_study(study_dir, use_train_loss=True)
+
+    # plot_top_trials(study_dir, use_train_loss=True, n_trials=4)
 
     # work_dir = Path.home() / 'edgeml/scratch/work/study_06'
     # assert work_dir.exists()

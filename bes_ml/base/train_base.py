@@ -595,9 +595,11 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
             if optuna is not None and self.trial is not None:
                 maximize_score = self.trial.user_attrs['maximize_score']
                 if maximize_score is True:
-                    assert score is not None
+                    assert np.isfinite(score)
                     self.trial.report(score, i_epoch)
                 else:
+                    if not np.isfinite(train_loss) or np.isnan(train_loss):
+                        train_loss = 1
                     self.trial.report(train_loss, i_epoch)
                 # save outputs as lists in trial user attributes
                 for key in self.results:
