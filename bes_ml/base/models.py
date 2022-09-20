@@ -1,7 +1,5 @@
 import logging
 import inspect
-from typing import Union
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -12,10 +10,8 @@ from pytorch_wavelets.dwt.transform1d import DWT1DForward
 
 try:
     from . import dct
-    from . import utilities
 except ImportError:
     from bes_ml.base import dct
-    from bes_ml.base import utilities
 
 class _Base_Features(nn.Module):
 
@@ -37,8 +33,6 @@ class _Base_Features(nn.Module):
             self.logger = logging.getLogger(__name__)
             self.logger.setLevel(logging.INFO)
             self.logger.addHandler(logging.StreamHandler())
-
-        utilities._print_inputs(cls=_Base_Features, locals_copy=locals().copy(), logger=self.logger)
 
         # spatial maxpool
         self.spatial_maxpool_size = spatial_maxpool_size
@@ -69,6 +63,7 @@ class _Base_Features(nn.Module):
         assert self.subwindow_nbins >= 1
         
         self.relu = nn.LeakyReLU(negative_slope=negative_slope)
+        self.swish = nn.SiLU()
         self.dropout = nn.Dropout3d(p=dropout_rate)
 
         self.num_kernels = None  # set in subclass
@@ -84,6 +79,8 @@ class _Base_Features(nn.Module):
     def _dropout_relu_flatten(self, x: torch.Tensor) -> torch.Tensor:
         return torch.flatten(self.relu(self.dropout(x)), 1)
 
+    def _dropout_swish_flatten(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.flatten(self.swish(self.dropout(x)), 1)    
 
 class Dense_Features(_Base_Features):
     def __init__(
@@ -114,8 +111,6 @@ class Dense_Features(_Base_Features):
                 Defaults to 10.
         """
         super().__init__(**kwargs)
-
-        utilities._print_inputs(cls=self.__class__, locals_copy=locals().copy(), logger=self.logger)
 
         # filters per subwindow
         self.num_kernels = dense_num_kernels
@@ -176,8 +171,6 @@ class CNN_Features(_Base_Features):
         **kwargs,
     ):
         super().__init__(**kwargs)
-
-        utilities._print_inputs(cls=self.__class__, locals_copy=locals().copy(), logger=self.logger)
 
         # CNN only valid with subwindow_size == time_points == signal_window_size
         assert self.subwindow_size == self.signal_window_size
@@ -319,8 +312,6 @@ class FFT_Features(_Base_Features):
         """
         super().__init__(**kwargs)
 
-        utilities._print_inputs(cls=self.__class__, locals_copy=locals().copy(), logger=self.logger)
-
         self.fft_nbins = fft_nbins
         assert np.log2(self.fft_nbins) % 1 == 0  # ensure power of 2
 
@@ -415,8 +406,6 @@ class DCT_Features(_Base_Features):
         """
         super().__init__(**kwargs)
 
-        utilities._print_inputs(cls=self.__class__, locals_copy=locals().copy(), logger=self.logger)
-
         self.dct_nbins = dct_nbins
         assert np.log2(self.dct_nbins) % 1 == 0  # ensure power of 2
 
@@ -485,8 +474,6 @@ class DWT_Features(_Base_Features):
         **kwargs,
     ):
         super().__init__(**kwargs)
-
-        utilities._print_inputs(cls=self.__class__, locals_copy=locals().copy(), logger=self.logger)
 
         self.dwt_wavelet = dwt_wavelet
         self.dwt_level = dwt_level
@@ -583,7 +570,7 @@ class Multi_Features_Model(nn.Module):
         negative_slope: float = 1e-3,  # relu negatuve slope
         dropout_rate: float = 0.1,
         logger: logging.Logger = None,
-        model_inputs_file: Union[str, Path] = 'model_inputs.yaml',
+        # model_inputs_file: Union[str, Path] = 'model_inputs.yaml',
         # inputs for `*Features` classes
         signal_window_size: int = 64,  # power of 2; ~16-512
         spatial_maxpool_size: int = 1,  # 1 (default, no spatial maxpool), 2, or 4
@@ -607,6 +594,7 @@ class Multi_Features_Model(nn.Module):
         dwt_num_kernels: int = 0,
         dwt_wavelet: str = 'db4',
         dwt_level: int = -1,
+        **kwargs,
     ):
         super().__init__()
 
@@ -636,14 +624,6 @@ class Multi_Features_Model(nn.Module):
                 assert p_name in class_parameters, f"{self.__class__.__name__} is missing parameter {p_name}"
                 feature_kwargs[p_name] = locals_copy[p_name]
 
-        # save and print inputs
-        utilities._print_inputs(cls=self.__class__, locals_copy=locals_copy, logger=logger)
-        utilities._save_inputs_to_yaml(
-            cls=self.__class__, 
-            locals_copy=locals_copy,
-            filename=Path(model_inputs_file),
-        )
-
         self.dense_features = Dense_Features(**feature_kwargs) if dense_num_kernels > 0 else None
         self.fft_features = FFT_Features(**feature_kwargs) if fft_num_kernels > 0 else None
         self.dct_features = DCT_Features(**feature_kwargs) if dct_num_kernels > 0 else None
@@ -667,34 +647,60 @@ class Multi_Features_Model(nn.Module):
 
         self.mlp_layer1 = nn.Linear(in_features=self.total_features, out_features=mlp_layer1_size)
         self.mlp_layer2 = nn.Linear(in_features=mlp_layer1_size, out_features=mlp_layer2_size)
+        self.mlp_layer4 = nn.Linear(in_features=mlp_layer2_size, out_features=mlp_layer2_size)
+        self.mlp_layer5 = nn.Linear(in_features=mlp_layer2_size, out_features=mlp_layer2_size)
         self.mlp_layer3 = nn.Linear(in_features=mlp_layer2_size, out_features=mlp_output_size)
         logger.info(f"MLP layer 1 size: {mlp_layer1_size}")
         logger.info(f"MLP layer 2 size: {mlp_layer2_size}")
         logger.info(f"MLP output size: {mlp_output_size}")
 
+        logger.info(f"dense_features size: {self.dense_features}")
+        logger.info(f"fft_features size: {self.fft_features}")
+        logger.info(f"dwt_features size: {self.dwt_features}")
+        logger.info(f"dct_features size: {self.dct_features}")
+        logger.info(f"cnn_features size: {self.cnn_features}")          
+        
         self.dropout = nn.Dropout(p=dropout_rate)
         self.relu = nn.LeakyReLU(negative_slope=negative_slope)
+        self.swish = nn.SiLU()
 
     def forward(self, x):
+        # logging.info(f"x size: {x.shape}")
+        
         dense_features = self.dense_features(x) if self.dense_features else None
         fft_features = self.fft_features(x) if self.fft_features else None
         dwt_features = self.dwt_features(x) if self.dwt_features else None
         dct_features = self.dct_features(x) if self.dct_features else None
         cnn_features = self.cnn_features(x) if self.cnn_features else None
-
+                
         all_features = [
             features
             for features in [dense_features, fft_features, dwt_features, dct_features, cnn_features]
             if features is not None
         ]
-
+        
+        # self.logger.info(f"dense_features size: {self.dense_features.shape}")
+        # self.logger.info(f"fft_features size: {self.fft_features.shape}")
+        # self.logger.info(f"dwt_features size: {self.dwt_features.shape}")
+        # self.logger.info(f"dct_features size: {self.dct_features.shape}")
+        # self.logger.info(f"cnn_features size: {self.cnn_features.shape}") 
+        # logging.info(f"dense_features size: {dense_features}")
+        # self.logger.warning(f"fft_features size: {fft_features}")
+        # self.logger.info(f"dwt_features size: {dwt_features}")
+        # self.logger.info(f"dct_features size: {dct_features}")
+        # self.logger.info(f"cnn_features size: {cnn_features}")         
+        
         x = torch.cat(all_features, dim=1)
 
         x = self.relu(self.dropout(self.mlp_layer1(x)))
         x = self.relu(self.dropout(self.mlp_layer2(x)))
+        x = self.relu(self.dropout(self.mlp_layer4(x)))
+        x = self.relu(self.dropout(self.mlp_layer5(x)))
+        # x = self.swish(self.dropout(self.mlp_layer1(x)))
+        # x = self.swish(self.dropout(self.mlp_layer2(x)))        
         x = self.mlp_layer3(x)
 
         return x
-
+            
 if __name__=='__main__':
     m = Multi_Features_Model()

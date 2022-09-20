@@ -1,4 +1,5 @@
 # python library imports
+from importlib.resources import is_resource
 from pathlib import Path
 import logging
 from typing import Union, Iterable, Tuple
@@ -7,36 +8,38 @@ import sys
 import io
 import pickle
 import inspect
+import contextlib
 
 # 3rd-party package imports
 import numpy as np
 import h5py
 from sklearn import metrics
 import torch
+import torch.utils.data
 import torchinfo
 import yaml
 
 # repo import
-from bes_data.sample_data import sample_elm_data_file
+# from bes_data.sample_data import sample_elm_data_file
+
+sample_elm_data_file = Path('/scratch/gpfs/dsmith/edgeml/data/labeled-elm-events.hdf5')
+
 try:
     from .models import Multi_Features_Model
-    from .data import ELM_Dataset
-    from . import utilities
+    from .data import ELM_Dataset, elm_data_loader
 except ImportError:
     from bes_ml.base.models import Multi_Features_Model
-    from bes_ml.base.data import ELM_Dataset
-    from bes_ml.base import utilities
+    from bes_ml.base.data import ELM_Dataset, elm_data_loader
 
-class _Trainer(object):
+class _Trainer_Base(object):
 
     def __init__(
         self,
-        input_data_file: Union[Path,str] = sample_elm_data_file,  # path to data file
+        data_file: Union[Path,str] = sample_elm_data_file,  # path to data file
         output_dir: Union[Path,str] = 'run_dir',  # path to output dir.
         results_file: str = 'results.yaml',  # output training results
         log_file: str = 'log.txt',  # output log file
-        trainer_inputs_file: str = 'trainer_inputs.yaml',  # save inputs to yaml
-        model_inputs_file: str = 'model_inputs.yaml',  # save inputs to yaml
+        inputs_file: str = 'inputs.yaml',  # save inputs to yaml
         test_data_file: str = 'test_data.pkl',  # if None, do not save test data (can be large)
         checkpoint_file: str = 'checkpoint.pytorch',  # pytorch save file; if None, do not save
         export_onnx: bool = False,  # export ONNX format
@@ -59,16 +62,15 @@ class _Trainer(object):
     ) -> None:
 
         # input data file and output directory
-        input_data_file = Path(input_data_file)
+        data_file = Path(data_file)
         output_dir = Path(output_dir)
         output_dir.mkdir(exist_ok=True, parents=True)
 
-        self.input_data_file = input_data_file
+        self.data_file = data_file
         self.output_dir = output_dir
         self.results_file = results_file
         self.log_file = log_file
-        self.trainer_inputs_file = trainer_inputs_file
-        self.model_inputs_file = model_inputs_file
+        self.inputs_file = inputs_file
         self.test_data_file = test_data_file
         self.checkpoint_file = checkpoint_file
         self.export_onnx = export_onnx
@@ -88,21 +90,79 @@ class _Trainer(object):
         self.batches_per_print = batches_per_print
         self.model_kwargs = model_kwargs
 
+        self.is_regression = None  # set in subclass
+
         # create logger (logs to file and terminal)
         self.logger = None
         self._create_logger()
 
-    def _validate_subclass_signature(self) -> None:
+    def _validate_subclass_inputs(self) -> None:
         """
         Ensure subclass call signature contains all parameters in
-        parent class call signature.
+        parent class signature and model class signature
         """
-        if self.__class__ is _Trainer: return
+        assert self.__class__ is not _Trainer_Base
         subclass_parameters = inspect.signature(self.__class__).parameters
-        parent_class_parameters = inspect.signature(_Trainer).parameters
-        for p_name in parent_class_parameters:
-            assert p_name in subclass_parameters, \
-                f"Subclass {self.__class__.__name__} missing parameter {p_name} from parent class"
+        for cls in [_Trainer_Base, Multi_Features_Model]:
+            class_parameters = inspect.signature(cls).parameters
+            for param_name in class_parameters:
+                if param_name in ['model_kwargs', 'logger', 'kwargs']:
+                    continue
+                assert param_name in subclass_parameters, \
+                    [f"Subclass {self.__class__.__name__} "
+                     f"missing parameter {param_name} from class {cls.__name__}."]
+
+    def _create_parent_class_inputs(self, locals_copy: dict = None) -> dict:
+        assert self.__class__ is not _Trainer_Base
+        kwargs_for_parent_class = {}
+        for cls in [_Trainer_Base, Multi_Features_Model]:
+            class_parameters = inspect.signature(cls).parameters
+            for parameter_name in class_parameters:
+                if parameter_name in locals_copy:
+                    kwargs_for_parent_class[parameter_name] = locals_copy[parameter_name]
+        return kwargs_for_parent_class
+
+    def _print_inputs(
+        self,
+        locals_copy: dict = None,
+        logger: logging.Logger = None,
+    ) -> None:
+        # print kwargs from __init__
+        logger.info(f"Class `{self.__class__.__name__}` parameters:")
+        class_parameters = inspect.signature(self.__class__).parameters
+        for p_name in class_parameters:
+            if p_name == 'logger': continue
+            local_value = locals_copy[p_name]
+            default_value = class_parameters[p_name].default
+            if isinstance(local_value, dict):
+                local_value = default_value = '<dict>'
+            if local_value == default_value:
+                logger.info(f"  {p_name:24s}:  {local_value}")
+            else:
+                logger.info(f"  {p_name:24s}:  {local_value}  (default {default_value})")
+
+    def _save_inputs_to_yaml(
+        self, 
+        locals_copy: dict = None,
+        filename: Union[str,Path] = None,
+    ) -> None:
+        """
+        Save locals from __init__() call to yaml.
+        """
+        filename = Path(filename)
+        parameters = inspect.signature(self.__class__).parameters
+        inputs = {}
+        for p_name in parameters:
+            if p_name == 'logger': continue
+            value = locals_copy[p_name]
+            inputs[p_name] = value if not isinstance(value, Path) else value.as_posix()
+        with filename.open('w') as parameters_file:
+            yaml.safe_dump(
+                inputs,
+                parameters_file,
+                default_flow_style=False,
+                sort_keys=False,
+            )
 
     def _create_logger(self) -> None:
         """
@@ -128,25 +188,59 @@ class _Trainer(object):
         """
         Set defaults for regression or classification tasks.
         """
-        if self.regression:
+        self.oversample_active_elm = None  # set by kwarg
+        self.prediction_horizon = None  # set with kwarg
+        self.threshold = None  # set with kwarg
+        self.inverse_weight_label = None  # not applicable for classification
+        self.log_time = None  # not applicable for classification
+        if self.is_regression:
             # regression model (e.g. time to ELM onset)
             self.loss_function = torch.nn.MSELoss(reduction="none")
             self.score_function = metrics.r2_score
-            self.oversample_active_elm = False  # not applicable for regression
-            self.prediction_horizon = 0  # not applicable for regression
-            self.threshold = None  # not applicable for regression
-            self.inverse_weight_label = None  # set in kwarg
-            self.log_time = None  # set in kwarg
         else:
             # classification model (e.g. active ELM prediction for `prediction_horizon` horizon
             self.loss_function = torch.nn.BCEWithLogitsLoss(reduction="none")
             self.score_function = metrics.f1_score
-            self.oversample_active_elm = None  # set by kwarg
-            self.prediction_horizon = None  # set with kwarg
-            self.threshold = None  # set with kwarg
-            self.inverse_weight_label = None  # not applicable for classification
-            self.log_time = None  # not applicable for classification
 
+    def make_model_and_device(self):
+        if self.device == 'auto':
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.device = torch.device(self.device)
+        self.logger.info(f"Device: {self.device}")
+
+        # make model
+        self.model = Multi_Features_Model(
+            logger=self.logger, 
+            signal_window_size=self.signal_window_size,
+            **self.model_kwargs,
+        )
+
+        self.model = self.model.to(self.device)
+
+        # if self.is_regression:
+        #     self._load_model_parameters()
+        self._load_model_parameters()
+                
+        self.input_size = None
+        self._print_model_summary()
+
+    def _load_model_parameters(
+        self,
+    ) -> None:
+        # checkpoint_file = self.output_dir / self.inputs['checkpoint_file']
+        if self.is_regression:
+            checkpoint_file = Path('model_reg_logNorm_v2') / 'checkpoint.pytorch'        
+        else:
+            # checkpoint_file = Path('model_class_org_v2') / 'checkpoint.pytorch' 
+            checkpoint_file = Path('model_class_org_v2_PreHor1ms') / 'checkpoint.pytorch' 
+        print("checkpoint_file",checkpoint_file)
+        assert checkpoint_file.exists(), f"{checkpoint_file} does not exist"
+        model_state_dict = torch.load(
+            checkpoint_file, 
+            map_location=self.device,
+        )
+        self.model.load_state_dict(model_state_dict)        
+        
     def _finish_subclass_initialization(self) -> None:
         """
         Finalize subclass initialization.
@@ -156,6 +250,10 @@ class _Trainer(object):
             self.inverse_weight_label = False
             self.logger.info("WARNING: setting `inverse_weight_time` to False; required for log_time==False")
 
+        self.optimizer = None
+        self.scheduler = None
+        self._make_optimizer_scheduler_loss()
+
         self.train_data = None
         self.validation_data = None
         self.test_data = None
@@ -164,33 +262,51 @@ class _Trainer(object):
         if self.test_data_file and self.fraction_test>0.0:
             self._save_test_data()
         
-        self.train_dataset = None
-        self.validation_dataset = None
-        self._make_datasets()
+        # make pytorch `dataset` for train and validation data
+        self.train_dataset = ELM_Dataset(
+            signals = self.train_data[0],
+            labels = self.train_data[1],
+            sample_indices = self.train_data[2],
+            window_start = self.train_data[3],
+            signal_window_size = self.signal_window_size,
+            prediction_horizon = self.prediction_horizon,
+        )
+        self.validation_dataset = ELM_Dataset(
+            signals = self.validation_data[0],
+            labels = self.validation_data[1],
+            sample_indices = self.validation_data[2],
+            window_start = self.validation_data[3],
+            signal_window_size = self.signal_window_size,
+            prediction_horizon = self.prediction_horizon,
+        )
 
-        self._setup_device()
+        # make pytorch `dataloader` for train and validation data
+        self.train_data_loader = elm_data_loader(
+            dataset = self.train_dataset,
+            batch_size = self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+            pin_memory=True,
+            drop_last=True,
+        )
+        self.validation_data_loader = elm_data_loader(
+            dataset = self.validation_dataset,
+            batch_size = self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True,
+            drop_last=True,
+        )
 
-        self.train_data_loader = None
-        self.validation_data_loader = None
-        self._make_data_loaders()
-
-        self.model = None
-        self.input_size = None
-        self._make_model()
-
-        self.optimizer = None
-        self.scheduler = None
-        self._make_optimizer_scheduler_loss()
-
-        self.results = None
+        self.results = {}
 
     def _get_data(self) -> None:
 
-        self.input_data_file = self.input_data_file.resolve()
-        assert self.input_data_file.exists(), f"{self.input_data_file} does not exist"
-        self.logger.info(f"Data file: {self.input_data_file}")
+        self.data_file = self.data_file.resolve()
+        assert self.data_file.exists(), f"{self.data_file} does not exist"
+        self.logger.info(f"Data file: {self.data_file}")
 
-        with h5py.File(self.input_data_file, "r") as data_file:
+        with h5py.File(self.data_file, "r") as data_file:
             elm_indices = np.array(
                 [int(key) for key in data_file], 
                 dtype=np.int32,
@@ -213,29 +329,43 @@ class _Trainer(object):
         )
 
         self.logger.info(f"Training ELM events: {training_elms.size}")
+        # self.train_data = self._preprocess_data(
+        #     training_elms,
+        #     shuffle_indices=True,
+        #     oversample_active_elm=self.oversample_active_elm,
+        # )
         self.train_data = self._preprocess_data(
             training_elms,
             shuffle_indices=True,
             oversample_active_elm=self.oversample_active_elm,
-        )
+        )        
 
         self.logger.info(f"Validation ELM events: {validation_elms.size}")
         self.validation_data = self._preprocess_data(
-            validation_elms,
+            training_elms,
             shuffle_indices=False,
             oversample_active_elm=False,
         )
 
         if self.fraction_test > 0.0:
-            self.logger.info(f"Test ELM events: {test_elms.size}")
+            self.logger.info(f"Test ELM events: {training_elms.size}")
             self.test_data = self._preprocess_data(
-                test_elms,
+                training_elms,
                 shuffle_indices=False,
                 oversample_active_elm=False,
             )
         else:
             self.logger.info("Skipping test data")
             self.test_data = None
+        # if self.fraction_test > 0.0:
+        #     self.logger.info(f"Test ELM events: {test_elms.size}")
+        #     self.test_data = self._preprocess_data(
+        #         test_elms,
+        #         shuffle_indices=False,
+        #         oversample_active_elm=False,
+        #     )
+        # else:
+        #     self.test_data = None        
 
     def _save_test_data(self) -> None:
         """
@@ -243,7 +373,7 @@ class _Trainer(object):
         """
         test_data_file = self.output_dir / self.test_data_file
         self.logger.info(f"Test data file: {test_data_file}")
-        with test_data_file.open('wb') as f:
+        with test_data_file.open('wb') as file:
             pickle.dump(
                 {
                     "signals": self.test_data[0],
@@ -252,7 +382,7 @@ class _Trainer(object):
                     "window_start": self.test_data[3],
                     "elm_indices": self.test_data[4],
                 },
-                f,
+                file,
             )
         self.logger.info(f"  File size: {test_data_file.stat().st_size/1e6:.1f} MB")
 
@@ -266,17 +396,21 @@ class _Trainer(object):
         packaged_window_start = None
         packaged_valid_t0 = []
         packaged_labels = []
-        with h5py.File(self.input_data_file, 'r') as h5_file:
+        with h5py.File(self.data_file, 'r') as h5_file:
             for elm_index in elm_indices:
                 elm_key = f"{elm_index:05d}"
                 elm_event = h5_file[elm_key]
                 signals = np.array(elm_event["signals"], dtype=np.float32)
                 # transpose so time dim. first
                 signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)
+                if self.is_regression:
+                    label_type = np.float32
+                else:
+                    label_type = np.int8
                 try:
-                    labels = np.array(elm_event["labels"], dtype=np.float32)
+                    labels = np.array(elm_event["labels"], dtype=label_type)
                 except KeyError:
-                    labels = np.array(elm_event["manual_labels"], dtype=np.float32)
+                    labels = np.array(elm_event["manual_labels"], dtype=label_type)
                 labels, signals, valid_t0 = self._get_valid_indices(labels, signals)
                 if packaged_signals is None:
                     packaged_window_start = np.array([0])
@@ -297,7 +431,7 @@ class _Trainer(object):
         packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype="int")
         packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
 
-        if not self.regression:
+        if not self.is_regression:
             packaged_valid_t0_indices = self._check_for_balanced_data(
                 packaged_labels=packaged_labels,
                 packaged_valid_t0_indices=packaged_valid_t0_indices,
@@ -332,55 +466,11 @@ class _Trainer(object):
         # must implement in subclass
         raise NotImplementedError
 
-    def _make_datasets(self) -> None:
-        self.train_dataset = ELM_Dataset(
-            *self.train_data[0:4], 
-            self.signal_window_size,
-            self.prediction_horizon,
-        )
-        self.validation_dataset = ELM_Dataset(
-            *self.validation_data[0:4], 
-            self.signal_window_size,
-            self.prediction_horizon,
-        )
-
     def _get_valid_indices(self) -> None:
         # must implement in subclass
         raise NotImplementedError
 
-    def _setup_device(self) -> None:
-        if self.device == 'auto':
-            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.device = torch.device(self.device)
-        self.logger.info(f"Device: {self.device}")
-
-    def _make_data_loaders(self) -> None:
-        self.train_data_loader = torch.utils.data.DataLoader(
-            self.train_dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers,
-            pin_memory=True,
-            drop_last=True,
-        )
-        self.validation_data_loader = torch.utils.data.DataLoader(
-            self.validation_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=True,
-            drop_last=True,
-    )
-
-    def _make_model(self) -> None:
-        self.model = Multi_Features_Model(
-            logger=self.logger, 
-            model_inputs_file=self.output_dir/self.model_inputs_file,
-            signal_window_size=self.signal_window_size,
-            **self.model_kwargs,
-        )
-        self.model = self.model.to(self.device)
-
+    def _print_model_summary(self) -> None:
         self.logger.info("MODEL SUMMARY")
 
         n_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
@@ -423,22 +513,22 @@ class _Trainer(object):
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
             mode="min",
-            factor=0.5,
-            patience=2,
+            factor=0.8,
+            patience=100,
             verbose=True,
         )
 
     def train(self) -> None:
+        assert 'scores_label' in self.results, \
+            f"Subclass must define self.results['scores_label']"
         best_score = -np.inf
-        self.results = {
-            'train_loss': np.empty(0),
-            'valid_loss': np.empty(0),
-            'scores': np.empty(0),
-        }
+        self.results['train_loss'] = []
+        self.results['valid_loss'] = []
+        self.results['scores'] = []
         checkpoint_file = self.output_dir / self.checkpoint_file
 
-        if not self.regression:
-            self.results['roc_scores'] = np.empty(0)
+        if not self.is_regression:
+            self.results['roc_scores'] = []
 
         # send model to device
         self.model = self.model.to(self.device)
@@ -452,53 +542,56 @@ class _Trainer(object):
 
             self.logger.info(f"Ep {i_epoch+1:03d}: begin")
             
-            train_loss = self._train_epoch()
-            if self.regression:
+            # train_loss = self._train_epoch()
+            train_loss = self._single_epoch_loop(
+                is_train=True,
+                data_loader=self.train_data_loader,
+            )
+            if self.is_regression:
                 train_loss = np.sqrt(train_loss)
 
-            self.results['train_loss'] = np.append(
-                self.results['train_loss'],
-                train_loss,
-            )
+            self.results['train_loss'].append(train_loss.item())
 
-            valid_loss, predictions, true_labels = self.evaluate()
-            if self.regression:
+            # valid_loss, predictions, true_labels = self._validation_epoch()
+            # valid_loss, predictions, true_labels = self._single_epoch_loop(
+            #     is_train=False,
+            #     data_loader=self.train_data_loader,
+            # )
+            valid_loss, predictions, true_labels = self._single_epoch_loop(
+                is_train=False,
+                data_loader=self.validation_data_loader,
+            )            
+            if self.is_regression:
+                # regression loss is MSE, so take sqrt to get units of time
                 valid_loss = np.sqrt(valid_loss)
 
-            self.results['valid_loss'] = np.append(
-                self.results['valid_loss'],
-                valid_loss,
-            )
+            self.results['valid_loss'].append(valid_loss.item())
 
             # apply learning rate scheduler
             self.scheduler.step(valid_loss)
 
-            if self.threshold:
+            if self.is_regression:
+                score = self.score_function(true_labels, predictions)
+            else:
+                prediction_labels = (predictions > self.threshold).astype(int)
                 score = self.score_function(
                     true_labels,
-                    (predictions > self.threshold).astype(int),
+                    prediction_labels,
                 )
-            else:
-                score = self.score_function(true_labels, predictions)
-            self.results['scores'] = np.append(
-                self.results['scores'],
-                score,
-            )
 
-            if not self.regression:
-                # ROC-AUC score
+            self.results['scores'].append(score.item())
+
+            if not self.is_regression:
+                # ROC-AUC score for classification
                 roc_score = metrics.roc_auc_score(
                     true_labels,
                     predictions,
                 )
-                self.results['roc_scores'] = np.append(
-                    self.results['roc_scores'],
-                    roc_score,
-                )
+                self.results['roc_scores'].append(roc_score.item())
 
             with (self.output_dir/self.results_file).open('w') as results_file:
                 yaml.dump(
-                    {key: self.results[key].tolist() for key in self.results},
+                    self.results,
                     results_file,
                     default_flow_style=False,
                 )
@@ -524,95 +617,94 @@ class _Trainer(object):
                     )
                     self.logger.info(f"  File size: {onnx_file.stat().st_size/1e3:.1f} kB")                
 
-            tmp =  f"Ep {i_epoch+1:03d}: "
-            tmp += f"train loss {train_loss:.3f}  "
-            tmp += f"val loss {valid_loss:.3f}  "
-            tmp += f"score {score:.3f}  "
-            if not self.regression:
-                tmp += f"roc {roc_score:.3f}  "
-            tmp += f"ep time {time.time()-t_start_epoch:.1f} s "
-            tmp += f"(total time {time.time()-t_start_training:.1f} s)"
-            self.logger.info(tmp)
+            prediction_labels =  f"Ep {i_epoch+1:03d}: "
+            prediction_labels += f"train loss {train_loss:.3f}  "
+            prediction_labels += f"val loss {valid_loss:.3f}  "
+            prediction_labels += f"score {score:.3f}  "
+            if not self.is_regression:
+                prediction_labels += f"roc {roc_score:.3f}  "
+            prediction_labels += f"ep time {time.time()-t_start_epoch:.1f} s "
+            prediction_labels += f"(total time {time.time()-t_start_training:.1f} s)"
+            self.logger.info(prediction_labels)
 
         self.logger.info(f"End training loop")
         self.logger.info(f"Elapsed time {time.time()-t_start_training:.1f} s")
 
-    def _train_epoch(self) -> float:
-        # train mode
-        self.model.train()
-        # accumulate batch-wise losses
-        losses = np.array(0)
-        # loop over batches
-        for i_batch, (signal_windows, labels) in enumerate(self.train_data_loader):
-            if (i_batch+1)%self.minibatch_interval == 0:
-                t_start_minibatch = time.time()
-            # reset gradients
-            self.optimizer.zero_grad()
-            # send data to device
-            signal_windows = signal_windows.to(self.device)
-            labels = labels.to(self.device)
-            # calc predictions
-            predictions = self.model(signal_windows)
-            # calc loss
-            loss = self.loss_function(
-                predictions.squeeze(),
-                labels.type_as(predictions),
-            )
-            if self.inverse_weight_label:
-                loss = torch.div(loss, labels)
-            # reduce losses
-            loss = loss.mean()  # batch loss
-            
-            # self.logger.info("losses=", losses)
-            # self.logger.info("loss=", loss)
-            # self.logger.info("loss.detach()=", loss.detach())
-            # self.logger.info("loss.detach().numpy()=", loss.detach().numpy())
-            
-            losses = np.append(losses, loss.detach().cpu().numpy())  # track batch losses
-            # backpropagate
-            loss.backward()
-            # update model with optimization step
-            self.optimizer.step()
-            if (i_batch+1)%self.minibatch_interval == 0:
-                tmp =  f"  Train batch {i_batch+1:05d}/{len(self.train_data_loader)}  "
-                tmp += f"batch loss {loss:.3f} (avg loss {losses.mean():.3f})  "
-                tmp += f"minibatch time {time.time()-t_start_minibatch:.3f} s"
-                self.logger.info(tmp)
-        return losses.mean()  # return avg. batch loss
-
-    def evaluate(self) -> Tuple:
-        # evaluate mode
+    def _single_epoch_loop(
+        self,
+        is_train: bool = True,  # True for train, False for evaluation/inference
+        data_loader: torch.utils.data.DataLoader = None,  # train or validation data loader
+    ) -> Union[np.ndarray, Tuple]:
         losses = np.array(0)
         all_predictions = []
         all_labels = []
-        for i_batch, (signal_windows, labels) in enumerate(self.validation_data_loader):
-            if (i_batch+1)%self.minibatch_interval == 0:
-                t_start_minibatch = time.time()
-            signal_windows = signal_windows.to(self.device)
-            labels = labels.to(self.device)
-            with torch.no_grad():
+        if is_train:
+            self.model.train()
+            context = contextlib.nullcontext()
+            mode = 'Train'
+        else:
+            self.model.eval()
+            context = torch.no_grad()
+            mode = 'Valid'
+        with context:
+            for i_batch, (signal_windows, labels) in enumerate(data_loader):
+                if (i_batch+1)%self.minibatch_interval == 0:
+                    t_start_minibatch = time.time()
+                if is_train:
+                    # reset grads
+                    self.optimizer.zero_grad()
+                signal_windows = signal_windows.to(self.device)
+                labels = labels.to(self.device)
                 predictions = self.model(signal_windows)
-            if not self.regression:
-                predictions = predictions.sigmoid()
-            loss = self.loss_function(
-                predictions.squeeze(),
-                labels.type_as(predictions),
+                # if not is_train and not self.is_regression:
+                #     # if evaluation/inference mode and classificaiton model,
+                #     # apply sigmoid to get [0,1] probability
+                #     predictions = predictions.sigmoid()
+                loss = self.loss_function(
+                    predictions.squeeze(),
+                    labels.type_as(predictions),
+                )
+
+#                 self.logger.info(f"signal_windows {signal_windows} s")
+#                 self.logger.info(f"prediction {predictions} s")
+                
+#                 self.logger.info(f"loss before div {loss} s")
+#                 self.logger.info(f"labels {labels} s")
+
+                
+                if self.is_regression and self.inverse_weight_label:   # 작동하지 않는 다는 사실 알게 됨.
+                    loss = torch.div(loss, labels)
+                
+                # self.logger.info(f"loss_div {loss} s")
+
+                
+                loss = loss.mean()  # batch loss
+                losses = np.append(losses, loss.detach().cpu().numpy())  # track batch losses
+                
+                if is_train:
+                    # backpropagate and take optimizer step
+                    loss.backward()
+                    self.optimizer.step()
+                else:
+                    all_labels.append(labels.cpu().numpy())
+                    all_predictions.append(predictions.cpu().numpy())
+                if (i_batch+1)%self.minibatch_interval == 0:
+                    tmp =  f"  {mode} batch {i_batch+1:05d}/{len(self.train_data_loader)}  "
+                    tmp += f"batch loss {loss:.3f} (avg loss {losses.mean():.3f})  "
+                    tmp += f"minibatch time {time.time()-t_start_minibatch:.3f} s"
+                    self.logger.info(tmp)
+        if is_train:
+            return_value = losses.mean()
+        else:
+            all_labels = np.concatenate(all_labels)
+            all_predictions = np.concatenate(all_predictions)
+            return_value = (
+                losses.mean(),
+                all_predictions,
+                all_labels,
             )
-            if self.inverse_weight_label:
-                loss = torch.div(loss, labels)
-            loss = loss.mean()
-            losses = np.append(losses, loss.detach().cpu().numpy())
-            all_labels.append(labels.cpu().numpy())
-            all_predictions.append(predictions.cpu().numpy())
-            if (i_batch+1)%self.minibatch_interval==0:
-                tmp =  f"  Valid batch {i_batch+1:05d}/{len(self.validation_data_loader)}  "
-                tmp += f"batch loss {loss:.3f} (avg loss {losses.mean():.3f})  "
-                tmp += f"minibatch time {time.time()-t_start_minibatch:.3f} s"
-                self.logger.info(tmp)
-        all_labels = np.concatenate(all_labels)
-        all_predictions = np.concatenate(all_predictions)
-        return losses.mean(), all_predictions, all_labels
+        return return_value
 
 
 if __name__=='__main__':
-    m = _Trainer()
+    m = _Trainer_Base()
