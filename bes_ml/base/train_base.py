@@ -41,8 +41,9 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
     results_file: str = 'results.yaml'  # output training results
     log_file: str = 'log.txt'  # output log file
     inputs_file: str = 'inputs.yaml'  # save inputs to yaml
-    test_data_file: str = 'test_data.pkl'  # if None, do not save test data (can be large)
+    # test_data_file: str = 'test_data.pkl'  # if None, do not save test data (can be large)
     checkpoint_file: str = 'checkpoint.pytorch'  # pytorch save file; if None, do not save
+    data_partition_file: str = 'data_partition.yaml'  # data partition for training, valid., and testing
     export_onnx: bool = False  # export ONNX format
     device: str = 'auto'  # auto (default), cpu, cuda, or cuda:X
     num_workers: int = 0  # number of subprocess workers for pytorch dataloader
@@ -62,6 +63,8 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
     logger: logging.Logger = None
     seed: int = None  # RNG seed for deterministic, reproducable shuffling (ELMs, sample indices, etc.)
     trial: Any = None  # optuna trial
+    normalize_signals: bool = True  # if True, normalize BES signals such that max ~= 1
+    normalize_labels: bool = False  # if True, normalize regression labels to min/max = +/- 1
 
     def __post_init__(self):
         self.data_location = Path(self.data_location).resolve()
@@ -120,8 +123,6 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
         for skip_key in ['logger', 'trial']:
             self_fields_dict.pop(skip_key)
         for key in self_fields_dict:
-            if key in ['logger', 'trial']:
-                self_fields_dict.pop(key)
             if isinstance(self_fields_dict[key], Path):
                 self_fields_dict[key] = self_fields_dict[key].as_posix()
         with filename.open('w') as parameters_file:
@@ -163,13 +164,13 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
         print()
         torchinfo.summary(self.model, input_size=self.input_shape, device=self.device)
         sys.stdout = sys.__stdout__
+        self.logger.info(tmp_io.getvalue())
         # print model summary
         n_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        test_input = torch.rand(*self.input_shape).to(self.device)
-        test_output = self.model(test_input)
-        self.logger.info(tmp_io.getvalue())
         self.logger.info(f"Model contains {n_params} trainable parameters")
+        test_input = torch.rand(*self.input_shape).to(self.device)
         self.logger.info(f'Batched input size: {test_input.shape}')
+        test_output = self.model(test_input)
         self.logger.info(f"Batched output size: {test_output.shape}")
 
     def finish_subclass_initialization(self) -> None:
@@ -223,28 +224,28 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
             if data_loader is None: continue
             assert isinstance(data_loader, torch.utils.data.DataLoader)
 
-        if self.test_data_file and self.fraction_test>0.0:
-            self._save_test_data()
+        # if self.test_data_file and self.fraction_test>0.0:
+        #     self._save_test_data()
 
-    def _save_test_data(self) -> None:
-        """
-        Save test data to pickle file.
-        """
-        test_data_file = self.output_dir / self.test_data_file
-        self.logger.info(f"Test data file: {test_data_file}")
-        with test_data_file.open('wb') as file:
-            pickle.dump(
-                {
-                    "signals": self.test_data[0],
-                    "labels": self.test_data[1],
-                    "sample_indices": self.test_data[2],
-                    "window_start": self.test_data[3],
-                    "elm_indices": self.test_data[4],
-                },
-                file,
-            )
-        assert test_data_file.exists(), f"{test_data_file} does not exist"
-        self.logger.info(f"  File size: {test_data_file.stat().st_size/1e6:.1f} MB")
+    # def _save_test_data(self) -> None:
+    #     """
+    #     Save test data to pickle file.
+    #     """
+    #     test_data_file = self.output_dir / self.test_data_file
+    #     self.logger.info(f"Test data file: {test_data_file}")
+    #     with test_data_file.open('wb') as file:
+    #         pickle.dump(
+    #             {
+    #                 "signals": self.test_data[0],
+    #                 "labels": self.test_data[1],
+    #                 "sample_indices": self.test_data[2],
+    #                 "window_start": self.test_data[3],
+    #                 "elm_indices": self.test_data[4],
+    #             },
+    #             file,
+    #         )
+    #     assert test_data_file.exists(), f"{test_data_file} does not exist"
+    #     self.logger.info(f"  File size: {test_data_file.stat().st_size/1e6:.1f} MB")
 
     def _get_data(self) -> None:
         self.data_location = self.data_location.resolve()
@@ -279,8 +280,25 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
             [n_test_elms, n_test_elms+n_validation_elms]
         )
 
+        with (self.output_dir/self.data_partition_file).open('w') as data_partition_file:
+            data_partition = {
+                'n_elms': elm_indices.size,
+                'data_location': self.data_location.as_posix(),
+                'training_elms': training_elms.tolist(),
+                'validation_elms': validation_elms.tolist(),
+                'test_elms': test_elms.tolist(),
+            }
+            yaml.safe_dump(
+                data_partition,
+                data_partition_file,
+                default_flow_style=False,
+                sort_keys=False,
+            )
+
         if not hasattr(self, 'oversample_active_elm'):  # TODO: remove `oversample_active_elm` from base class
             self.oversample_active_elm = False
+
+        self.raw_label_minmax = []
 
         self.logger.info(f"Training ELM events: {training_elms.size}")
         self.train_data = self._preprocess_data(
@@ -396,6 +414,20 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
                 oversample_active_elm=oversample_active_elm,
             )
 
+        if self.normalize_signals:
+            self.logger.info(f"  Normalizing signals to max ~= 1")
+            packaged_signals /= 10.4  # normalize to max ~= 1
+
+        if self.is_regression and self.normalize_labels:
+            if not self.raw_label_minmax:
+                self.raw_label_minmax = [
+                    packaged_labels.min().item(),
+                    packaged_labels.max().item(),
+                ]
+            self.logger.info(f"  Normalizing labels to min/max = -/+ 1 with raw min/max {self.raw_label_minmax[0]:.4e} {self.raw_label_minmax[1]:.4e}")
+            label_range = self.raw_label_minmax[1] - self.raw_label_minmax[0]
+            packaged_labels = ((packaged_labels - self.raw_label_minmax[0]) / label_range - 0.5) * 2
+
         if shuffle_indices:
             self.rng_generator.shuffle(packaged_valid_t0_indices)
 
@@ -489,16 +521,20 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
     def train(self) -> dict:
         best_score = -np.inf
         self.results = {
+            'lr': [],
             'train_loss': [],
             'valid_loss': [],
             'scores': [],
             'scores_label': self.score_function_name,
-            'lr': [],
+            'training_time': [],
         }
         checkpoint_file = self.output_dir / self.checkpoint_file
 
         if self.is_classification:
             self.results['roc_scores'] = []
+
+        if self.raw_label_minmax:
+            self.results['raw_label_minmax'] = self.raw_label_minmax
 
         # send model to device
         # self.model = self.model.to(self.device)
@@ -578,12 +614,15 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
                             roc_score = np.float32(0)
                     self.results['roc_scores'].append(roc_score.item())
 
+            self.results['training_time'].append(time.time()-t_start_training)
+
             # save results to yaml
             with (self.output_dir/self.results_file).open('w') as results_file:
                 yaml.dump(
                     self.results,
                     results_file,
                     default_flow_style=False,
+                    sort_keys=False,
                 )
 
             # best score and save model
