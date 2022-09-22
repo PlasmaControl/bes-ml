@@ -1,9 +1,9 @@
 from line_profiler import LineProfiler
 
 from bes_ml.elm_regression import Trainer
-from bes_ml.base.train_base import _Trainer_Base
+from bes_ml.base.train_base import _Base_Trainer
 from bes_ml.base.models import Multi_Features_Model, Dense_Features, _Base_Features
-from bes_ml.base.data import ELM_Dataset
+from bes_ml.base.elm_data import ELM_Dataset
 
 
 def profile_func():
@@ -21,9 +21,9 @@ def profile_func():
 if __name__=='__main__':
 
     lp = LineProfiler(
-        _Trainer_Base._single_epoch_loop,
+        _Base_Trainer._single_epoch_loop,
         ELM_Dataset.__getitem__,
-        _Trainer_Base.train,
+        _Base_Trainer.train,
         Multi_Features_Model.forward,
         Dense_Features.forward,
         # _Trainer_Base.__post_init__,

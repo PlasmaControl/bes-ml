@@ -1,7 +1,7 @@
 from memory_profiler import LineProfiler, memory_usage, show_results
 
 from bes_ml.elm_regression import Trainer
-from bes_ml.base.train_base import _Trainer_Base
+from bes_ml.base.train_base import _Base_Trainer
 from bes_ml.base.models import Multi_Features_Model, Dense_Features, _Base_Features
 
 
@@ -20,13 +20,13 @@ def profile_func():
 if __name__=='__main__':
 
     functions = [
-        _Trainer_Base.train,
-        _Trainer_Base._single_epoch_loop,
-        _Trainer_Base.__post_init__,
-        _Trainer_Base.finish_subclass_initialization,
-        _Trainer_Base._get_data,
-        _Trainer_Base._preprocess_data,
-        _Trainer_Base._make_data_loaders,
+        _Base_Trainer.train,
+        _Base_Trainer._single_epoch_loop,
+        _Base_Trainer.__post_init__,
+        _Base_Trainer.finish_subclass_initialization,
+        _Base_Trainer._get_data,
+        _Base_Trainer._preprocess_data,
+        _Base_Trainer._make_data_loaders,
         Trainer.__post_init__,
         Trainer._get_valid_indices,
         Trainer._make_datasets,

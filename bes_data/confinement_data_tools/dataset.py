@@ -11,7 +11,7 @@ import pandas as pd
 import torch
 
 from bes_data.confinement_data_tools.make_labels import make_labels
-from bes_ml.base.data import MultiSourceDataset
+from bes_ml.base.elm_data import MultiSourceDataset
 
 
 class ConfinementDataset(MultiSourceDataset):

@@ -11,11 +11,11 @@ import torch.utils.data
 
 try:
     from .models import Multi_Features_Model  #, _Multi_Features_Model_Dataclass
-    from .data import ELM_Dataset
+    from .elm_data import ELM_Dataset
     from .utilities import merge_pdfs
 except ImportError:
     from bes_ml.base.models import Multi_Features_Model  #, _Multi_Features_Model_Dataclass
-    from bes_ml.base.data import ELM_Dataset
+    from bes_ml.base.elm_data import ELM_Dataset
     from bes_ml.base.utilities import merge_pdfs
 
 

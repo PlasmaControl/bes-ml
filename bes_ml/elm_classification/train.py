@@ -4,15 +4,15 @@ import dataclasses
 import numpy as np
 
 try:
-    from ..base.train_base import _Trainer_Base
-    from ..base.data import ELM_Dataset
+    from ..base.train_base import _Base_Trainer
+    from ..base.elm_data import ELM_Dataset, _ELM_Data_Base
 except ImportError:
     from bes_ml.base.train_base import _Trainer_Base
-    from bes_ml.base.data import ELM_Dataset
+    from bes_ml.base.elm_data import ELM_Dataset, _ELM_Data_Base
 
 
 @dataclasses.dataclass(eq=False)
-class Trainer(_Trainer_Base):
+class Trainer(_ELM_Data_Base, _Base_Trainer):
     max_elms: int = None  # limit ELMs
     prediction_horizon: int = 200  # prediction horizon in time samples
     threshold: float = 0.5  # threshold for binary classification
@@ -24,7 +24,7 @@ class Trainer(_Trainer_Base):
         self.is_classification = True
         self.is_regression = not self.is_classification
 
-        self.make_model_and_set_device()
+        self._make_model()
 
         self.finish_subclass_initialization()
 
@@ -130,7 +130,7 @@ if __name__=='__main__':
         dense_num_kernels=8,
         batch_size=64,
         n_epochs=2,
-        minibatch_interval=50,
+        minibatch_print_interval=50,
         fraction_validation=0.2,
         fraction_test=0.2,
     )

@@ -8,17 +8,17 @@ from torch.utils.data import DataLoader, BatchSampler
 from bes_data.sample_data import sample_data_dir
 from bes_data.velocimetry_data_tools.dataset import VelocimetryDataset
 try:
-    from ..base.data import MultiSourceDataset
-    from ..base.train_base import _Trainer_Base
+    from ..base.elm_data import MultiSourceDataset
+    from ..base.train_base import _Base_Trainer
     from ..base.sampler import RandomBatchSampler
 except ImportError:
-    from bes_ml.base.data import MultiSourceDataset
+    from bes_ml.base.elm_data import MultiSourceDataset
     from bes_ml.base.train_base import _Trainer_Base
     from bes_ml.base.sampler import RandomBatchSampler
 
 
 @dataclasses.dataclass(eq=False)
-class Trainer(_Trainer_Base):
+class Trainer(_Base_Trainer):
     data_location: Union[Path,str] = sample_data_dir / 'velocimetry_data' #location of stored data
     dataset_to_ram: bool = True # Load datasets to ram
 
@@ -32,7 +32,7 @@ class Trainer(_Trainer_Base):
         self.is_regression = True
         self.is_classification = not self.is_regression
         self.velocimetry_dataset = None
-        self.make_model_and_set_device()
+        self._make_model()
         self.finish_subclass_initialization()
 
     def _get_valid_indices(self, *args, **kwargs) -> None:
@@ -84,7 +84,7 @@ class Trainer(_Trainer_Base):
         )
 
     def _create_data_class_inputs(self, locals_copy: dict = None) -> dict:
-        assert self.__class__ is not _Trainer_Base
+        assert self.__class__ is not _Base_Trainer
         kwargs_for_data_class = {}
         for cls in [VelocimetryDataset, MultiSourceDataset]:
             class_parameters = inspect.signature(cls).parameters
@@ -107,7 +107,7 @@ if __name__=='__main__':
         dense_num_kernels=8,
         batch_size=64,
         n_epochs=2,
-        minibatch_interval=50,
+        minibatch_print_interval=50,
         fraction_validation=0.2,
         fraction_test=0.2,
     )

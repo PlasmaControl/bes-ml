@@ -6,7 +6,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from bes_ml.base.data import MultiSourceDataset
+from bes_ml.base.elm_data import MultiSourceDataset
 
 
 class VelocimetryDataset(MultiSourceDataset):

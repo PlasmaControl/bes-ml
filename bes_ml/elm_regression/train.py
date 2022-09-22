@@ -1,31 +1,38 @@
-from typing import Tuple, Union
+from typing import Tuple
 import dataclasses
 
 import numpy as np
+import torch
 
 try:
-    from ..base.train_base import _Trainer_Base
-    from ..base.data import ELM_Dataset
+    from ..base.elm_data import _ELM_Data_Base
+    from ..base.models import _Multi_Features_Model_Dataclass
+    from ..base.train_base import _Base_Trainer
 except ImportError:
-    from bes_ml.base.train_base import _Trainer_Base
-    from bes_ml.base.data import ELM_Dataset
+    from bes_ml.base.elm_data import _ELM_Data_Base
+    from bes_ml.base.models import _Multi_Features_Model_Dataclass
+    from bes_ml.base.train_base import _Base_Trainer
 
 
 @dataclasses.dataclass(eq=False)
-class Trainer(_Trainer_Base):
-    max_elms: int = None  # limit ELMs
-    log_time: bool = False  # if True, use log(time_to_elm_onset)
-    inverse_weight_label: bool = False  # must be False if log_time is False
+class Trainer(
+    _ELM_Data_Base,  # ELM data
+    _Multi_Features_Model_Dataclass,  # NN model
+    _Base_Trainer,  # training and output
+):
+    # parameters for ELM regression task
+    log_time: bool = False  # if True, use label = log(time_to_elm_onset)
+    inverse_weight_label: bool = False  # if True, weight losses by 1/label
+    normalize_labels: bool = False  # if True, normalize labels to min/max = +/- 1
 
     def __post_init__(self):
-        super().__post_init__()
 
         self.is_regression = True
         self.is_classification = not self.is_regression
 
-        self.make_model_and_set_device()
+        self.raw_label_minmax = None
 
-        self.finish_subclass_initialization()
+        super().__post_init__()  # _Base_Trainer.__post_init__()
 
     def _get_valid_indices(
         self,
@@ -41,24 +48,26 @@ class Trainer(_Trainer_Base):
         labels = np.arange(active_elm_start_index, 1, -1, dtype=np.float32)
         signals = signals[:active_elm_start_index-1, :, :]
         if self.log_time:
-            if np.any(labels == 0):
-                assert False
+            assert np.all(labels > 0)
             labels = np.log10(labels)
         return labels, signals, valid_t0
 
-    def _check_for_balanced_data(self, *args, **kwargs):
-        pass
+    def _apply_loss_weight(self, losses: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        if self.inverse_weight_label:
+            return torch.div(losses, labels)
+        else:
+            return losses
 
-    def _make_datasets(self) -> None:
-        self.train_dataset = ELM_Dataset(
-            *self.train_data[0:4], 
-            signal_window_size = self.signal_window_size,
-        )
-        if self.validation_data:
-            self.validation_dataset = ELM_Dataset(
-                *self.validation_data[0:4], 
-                signal_window_size = self.signal_window_size,
-            )
+    def _apply_label_normalization(self, labels: torch.Tensor = None) -> torch.Tensor:
+        if self.normalize_labels:
+            if self.raw_label_minmax is None:
+                self.raw_label_minmax = [labels.min().item(), labels.max().item()]
+                self.results['raw_label_minmax'] = self.raw_label_minmax
+            self.logger.info(f"  Normalizing labels to min/max = -/+ 1 with raw min/max {self.raw_label_minmax[0]:.4e} {self.raw_label_minmax[1]:.4e}")
+            label_range = self.raw_label_minmax[1] - self.raw_label_minmax[0]
+            labels = ((labels - self.raw_label_minmax[0]) / label_range - 0.5) * 2
+        return labels
+
 
 
 if __name__=='__main__':

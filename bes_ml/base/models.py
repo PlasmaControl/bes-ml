@@ -1,10 +1,15 @@
+import io
 import logging
+from pathlib import Path
+import sys
+from typing import Union
 import inspect
 import dataclasses
 
 import numpy as np
 import torch
 import torch.nn as nn
+import torchinfo
 import pywt
 from pytorch_wavelets.dwt.transform1d import DWT1DForward
 
@@ -562,17 +567,30 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
             feature_kwargs = get_feature_class_parameters(CNN_Features)
             self.cnn_features = CNN_Features(**feature_kwargs)
 
-        self.total_features = 0
-        for features in [
-            self.dense_features,
-            self.fft_features,
-            self.dwt_features,
-            self.dct_features,
-            self.cnn_features,
-        ]:
-            if features is None:
-                continue
-            self.total_features += features.num_kernels * features.subwindow_nbins
+        # self.total_features = 0
+        # for features in [
+        #     self.dense_features,
+        #     self.fft_features,
+        #     self.dwt_features,
+        #     self.dct_features,
+        #     self.cnn_features,
+        # ]:
+        #     if features is None:
+        #         continue
+        #     self.total_features += features.num_kernels * features.subwindow_nbins
+        self.total_features = sum(
+            [
+                features.num_kernels * features.subwindow_nbins
+                for features in [
+                    self.dense_features,
+                    self.fft_features,
+                    self.dwt_features,
+                    self.dct_features,
+                    self.cnn_features,
+                ]
+                if features is not None
+            ]
+        )
         self.logger.info(f"Total features: {self.total_features}")
 
         self.mlp_layer1 = nn.Linear(in_features=self.total_features, out_features=self.mlp_layer1_size)
@@ -605,6 +623,43 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
         x = self.mlp_layer3(x)
 
         return x
+
+    def save_pytorch_model(self, filename: Union[Path,str] = None) -> None:
+        filename = Path(filename)
+        torch.save(self.state_dict(), filename.as_posix())
+        self.logger.info(f"  Saved model: {filename}  file size: {filename.stat().st_size/1e3:.1f} kB")
+
+    def save_onnx_model(self, filename: Union[Path,str] = None) -> None:
+        filename = Path(filename)
+        torch.onnx.export(
+            model=self, 
+            args=torch.rand(1, 1, self.signal_window_size, 8, 8),
+            f=filename.as_posix(),
+            input_names=['signal_window'],
+            output_names=['prediction'],
+            opset_version=11,
+        )
+        self.logger.info(f"  Saved ONNX model: {filename}  file size: {filename.stat().st_size/1e3:.1f} kB")
+
+    def print_model_summary(self) -> None:
+        self.logger.info("MODEL SUMMARY")
+        input_shape = (1, 1, self.signal_window_size, 8, 8)
+
+        # catpure torchinfo.summary() output
+        tmp_io = io.StringIO()
+        sys.stdout = tmp_io
+        print()
+        torchinfo.summary(self, input_size=input_shape, device=torch.device('cpu'))
+        sys.stdout = sys.__stdout__
+        self.logger.info(tmp_io.getvalue())
+        # print model summary
+        n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        self.logger.info(f"Model contains {n_params} trainable parameters")
+        test_input = torch.rand(*input_shape).to(torch.device('cpu'))
+        self.logger.info(f'Single input size: {test_input.shape}')
+        test_output = self(test_input)
+        self.logger.info(f"Single output size: {test_output.shape}")
+
 
 
 if __name__=='__main__':
