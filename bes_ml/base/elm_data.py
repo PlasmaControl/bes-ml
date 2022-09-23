@@ -1,7 +1,6 @@
 from pathlib import Path
 import dataclasses
 from typing import Iterable, Union
-import logging
 
 import numpy as np
 import torch
@@ -236,20 +235,28 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
         return labels
 
     def _make_datasets(self) -> None:
+        if hasattr(self, 'prediction_horizon'):
+            prediction_horizon = self.prediction_horizon
+        else:
+            prediction_horizon = 0
+
         self.train_dataset = ELM_Dataset(
-            *self.train_data[0:4], 
+            *self.train_data[0:3], 
             signal_window_size = self.signal_window_size,
+            prediction_horizon=prediction_horizon,
         )
+
         if self.validation_data:
             self.validation_dataset = ELM_Dataset(
-                *self.validation_data[0:4], 
+                *self.validation_data[0:3], 
                 signal_window_size = self.signal_window_size,
+                prediction_horizon=prediction_horizon,
             )
         else:
             self.validation_dataset = None
 
     def _check_for_balanced_data(self) -> None:
-        # must implement in subclass (ELM classification only)
+        # if classification, must implement in subclass
         raise NotImplementedError
 
     def _get_valid_indices(self) -> None:
@@ -285,9 +292,8 @@ class ELM_Dataset(torch.utils.data.Dataset):
         signals: np.ndarray = None, 
         labels: np.ndarray = None, 
         sample_indices: np.ndarray = None, 
-        window_start: np.ndarray = None,  # TODO: refactor to remove `window_start` parameter
         signal_window_size: int = None,
-        prediction_horizon: int = None,  # =0 for time-to-ELM regression; >=0 for classification prediction
+        prediction_horizon: int = 0,  # =0 for time-to-ELM regression; >=0 for classification prediction
     ) -> None:
         self.signals = torch.unsqueeze(torch.from_numpy(signals), 0)
         assert (
@@ -300,9 +306,8 @@ class ELM_Dataset(torch.utils.data.Dataset):
         assert self.labels.ndim == 1, "Labels have incorrect shape"
         assert self.labels.shape[0] == self.signals.shape[1], "Labels and signals have different time dimensions"
         self.sample_indices = sample_indices
-        # self.window_start = window_start
         self.signal_window_size = signal_window_size
-        self.prediction_horizon = prediction_horizon if prediction_horizon is not None else 0
+        self.prediction_horizon = prediction_horizon
 
     def __len__(self):
         return self.sample_indices.size
@@ -313,5 +318,4 @@ class ELM_Dataset(torch.utils.data.Dataset):
         signal_window = self.signals[:, time_idx : time_idx + self.signal_window_size, :, :]
         # label for signal window
         label = self.labels[ time_idx + self.signal_window_size + self.prediction_horizon - 1 ]
-
         return signal_window, label

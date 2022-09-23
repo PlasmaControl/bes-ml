@@ -34,7 +34,7 @@ class _Base_Features_Dataclass():
 class _Base_Features(nn.Module, _Base_Features_Dataclass):
 
     def __post_init__(self):
-        super().__init__()
+        super().__init__()  # nn.Module.__init__()
 
         if self.logger is None:
             self.logger = logging.getLogger(__name__)
@@ -516,7 +516,7 @@ class _Multi_Features_Model_Dataclass(
 class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
 
     def __post_init__(self):
-        super().__init__()
+        super().__init__()  # nn.Module.__init__()
 
         assert (
             self.dense_num_kernels == 0 and
@@ -567,17 +567,6 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
             feature_kwargs = get_feature_class_parameters(CNN_Features)
             self.cnn_features = CNN_Features(**feature_kwargs)
 
-        # self.total_features = 0
-        # for features in [
-        #     self.dense_features,
-        #     self.fft_features,
-        #     self.dwt_features,
-        #     self.dct_features,
-        #     self.cnn_features,
-        # ]:
-        #     if features is None:
-        #         continue
-        #     self.total_features += features.num_kernels * features.subwindow_nbins
         self.total_features = sum(
             [
                 features.num_kernels * features.subwindow_nbins

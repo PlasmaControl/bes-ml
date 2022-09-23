@@ -2,31 +2,33 @@ from typing import Tuple
 import dataclasses
 
 import numpy as np
+import torch
 
 try:
+    from ..base.elm_data import _ELM_Data_Base
+    from ..base.models import _Multi_Features_Model_Dataclass
     from ..base.train_base import _Base_Trainer
-    from ..base.elm_data import ELM_Dataset, _ELM_Data_Base
 except ImportError:
-    from bes_ml.base.train_base import _Trainer_Base
-    from bes_ml.base.elm_data import ELM_Dataset, _ELM_Data_Base
+    from bes_ml.base.elm_data import _ELM_Data_Base
+    from bes_ml.base.models import _Multi_Features_Model_Dataclass
+    from bes_ml.base.train_base import _Base_Trainer
 
 
 @dataclasses.dataclass(eq=False)
-class Trainer(_ELM_Data_Base, _Base_Trainer):
-    max_elms: int = None  # limit ELMs
+class Trainer(
+    _ELM_Data_Base,  # ELM data
+    _Multi_Features_Model_Dataclass,  # NN model
+    _Base_Trainer,  # training and output
+):
     prediction_horizon: int = 200  # prediction horizon in time samples
     threshold: float = 0.5  # threshold for binary classification
     oversample_active_elm: bool = True  # if True, oversample active ELMs to balance data
 
     def __post_init__(self):
-        super().__post_init__()
-
         self.is_classification = True
         self.is_regression = not self.is_classification
 
-        self._make_model()
-
-        self.finish_subclass_initialization()
+        super().__post_init__()  # _Base_Trainer.__post_init__()
 
     def _get_valid_indices(
         self,
@@ -79,7 +81,7 @@ class Trainer(_ELM_Data_Base, _Base_Trainer):
         self.logger.info(f"  Count of inactive ELM labels: {n_inactive_elm}")
         self.logger.info(f"  Count of active ELM labels: {n_active_elm}")
         self.logger.info(f"  % active: {active_elm_fraction*1e2:.1f} %")
-        min_active_elm_fraction = 0.2
+        min_active_elm_fraction = 0.25
         if oversample_active_elm and active_elm_fraction < min_active_elm_fraction:
             oversample_factor = int(min_active_elm_fraction * n_inactive_elm / (n_active_elm*(1-min_active_elm_fraction)))+1
             self.logger.info(f"  Oversample active ELM factor: {oversample_factor}")
@@ -111,27 +113,14 @@ class Trainer(_ELM_Data_Base, _Base_Trainer):
             self.logger.info(f"  New % active: {active_elm_fraction*1e2:.1f} %")
         return packaged_valid_t0_indices
 
-    def _make_datasets(self) -> None:
-        self.train_dataset = ELM_Dataset(
-            *self.train_data[0:4], 
-            signal_window_size = self.signal_window_size,
-            prediction_horizon = self.prediction_horizon,
-        )
-        if self.validation_data:
-            self.validation_dataset = ELM_Dataset(
-                *self.validation_data[0:4], 
-                signal_window_size = self.signal_window_size,
-                prediction_horizon = self.prediction_horizon,
-            )
-
 
 if __name__=='__main__':
     model = Trainer(
         dense_num_kernels=8,
         batch_size=64,
         n_epochs=2,
-        minibatch_print_interval=50,
         fraction_validation=0.2,
         fraction_test=0.2,
+        prediction_horizon=400,
     )
     model.train()
