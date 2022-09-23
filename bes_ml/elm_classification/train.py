@@ -2,7 +2,6 @@ from typing import Tuple
 import dataclasses
 
 import numpy as np
-import torch
 
 try:
     from ..base.elm_data import _ELM_Data_Base

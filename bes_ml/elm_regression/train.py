@@ -63,7 +63,10 @@ class Trainer(
             if self.raw_label_minmax is None:
                 self.raw_label_minmax = [labels.min().item(), labels.max().item()]
                 self.results['raw_label_minmax'] = self.raw_label_minmax
-            self.logger.info(f"  Normalizing labels to min/max = -/+ 1 with raw min/max {self.raw_label_minmax[0]:.4e} {self.raw_label_minmax[1]:.4e}")
+            self.logger.info([
+                f"  Normalizing labels to min/max = -/+ 1 ",
+                f"with raw min/max {self.raw_label_minmax[0]:.4e} {self.raw_label_minmax[1]:.4e}"
+            ])
             label_range = self.raw_label_minmax[1] - self.raw_label_minmax[0]
             labels = ((labels - self.raw_label_minmax[0]) / label_range - 0.5) * 2
         return labels

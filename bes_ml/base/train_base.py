@@ -72,12 +72,12 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
 
         self.results = {
             'train_loss': [],
-            'valid_loss': [],
             'loss_function_name': '',
-            'scores': [],
-            'score_function_name': '',
             'training_time': [],
             'lr': [],
+            # 'valid_loss': [],
+            # 'scores': [],
+            # 'score_function_name': '',
         }
 
         # subclass must set is_regression XOR is_classification
@@ -178,8 +178,6 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                 self.loss_function_name = 'CrossEntropyLoss'
 
         self.loss_function = getattr(torch.nn, self.loss_function_name)(reduction="none")
-
-        self.results['score_function_name'] = self.score_function_name
         self.results['loss_function_name'] = self.loss_function_name
 
     def _make_optimizer_scheduler(self) -> None:
@@ -219,10 +217,6 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
     def train(self) -> dict:
         best_score = -np.inf
 
-        # TODO: move to ELM classification
-        if self.is_classification:
-            self.results['roc_scores'] = []
-
         self.logger.info(f"Batches per epoch {len(self.train_data_loader)}")
         self.logger.info(f"Begin training loop over {self.n_epochs} epochs")
         t_start_training = time.time()
@@ -241,6 +235,13 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                 score = None
                 valid_loss = None
             else:
+                if 'valid_loss' not in self.results or 'scores' not in self.results:
+                    # initialize valid_loss and scores (and roc if classification)
+                    self.results['valid_loss'] = []
+                    self.results['scores'] = []
+                    self.results['score_function_name'] = self.score_function_name
+                    if self.is_classification:
+                        self.results['roc_scores'] = []
                 valid_loss, predictions, true_labels = self._single_epoch_loop(
                     is_train=False,
                     data_loader=self.validation_data_loader,

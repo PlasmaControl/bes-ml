@@ -1,6 +1,6 @@
 from pathlib import Path
 import dataclasses
-from typing import Iterable, Union
+from typing import Iterable, Tuple
 
 import numpy as np
 import torch
@@ -241,14 +241,18 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
             prediction_horizon = 0
 
         self.train_dataset = ELM_Dataset(
-            *self.train_data[0:3], 
+            signals=self.train_data[0],
+            labels=self.train_data[1],
+            sample_indices=self.train_data[2],
             signal_window_size = self.signal_window_size,
             prediction_horizon=prediction_horizon,
         )
 
         if self.validation_data:
             self.validation_dataset = ELM_Dataset(
-                *self.validation_data[0:3], 
+                signals=self.validation_data[0],
+                labels=self.validation_data[1],
+                sample_indices=self.validation_data[2],
                 signal_window_size = self.signal_window_size,
                 prediction_horizon=prediction_horizon,
             )
@@ -265,7 +269,7 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
 
     def _make_data_loaders(self) -> None:
         self.train_data_loader = torch.utils.data.DataLoader(
-                self.train_dataset,
+                dataset=self.train_dataset,
                 batch_size=self.batch_size,
                 shuffle=True if self.seed is None else False,
                 num_workers=self.num_workers,
@@ -274,14 +278,13 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
             )
         if self.validation_dataset:
             self.validation_data_loader = torch.utils.data.DataLoader(
-                    self.validation_dataset,
+                    dataset=self.validation_dataset,
                     batch_size=self.batch_size,
                     shuffle=False,
                     num_workers=self.num_workers,
                     pin_memory=True,
                     drop_last=True,
                 )
-
 
 
 # TODO: make dataclass
@@ -312,7 +315,7 @@ class ELM_Dataset(torch.utils.data.Dataset):
     def __len__(self):
         return self.sample_indices.size
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         time_idx = self.sample_indices[idx]
         # BES signal window data
         signal_window = self.signals[:, time_idx : time_idx + self.signal_window_size, :, :]
