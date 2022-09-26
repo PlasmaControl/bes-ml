@@ -45,6 +45,8 @@ class _Base_Trainer_Dataclass:
     sgd_dampening: float = 0.0  # dampening for SGD optimizer
     learning_rate: float = 1e-3  # optimizer learning rate
     lr_scheduler_patience: int = 4  # epochs to wait before triggering lr scheduler
+    lr_scheduler_factor: float = 0.5  # reduction factor for lr scheduler
+    lr_scheduler_threshold: float = 1e-3  # lr scheduler will trigger if loss does not decrease below 1-threshold
     weight_decay: float = 5e-3  # optimizer L2 regularization factor
     # optuna integration
     optuna_trial: Any = None  # optuna trial
@@ -72,12 +74,10 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
 
         self.results = {
             'train_loss': [],
+            'train_score': [],
             'loss_function_name': '',
-            'training_time': [],
+            'epoch_time': [],
             'lr': [],
-            # 'valid_loss': [],
-            # 'scores': [],
-            # 'score_function_name': '',
         }
 
         # subclass must set is_regression XOR is_classification
@@ -203,8 +203,8 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         )
         self.lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
-            factor=0.5,
-            threshold=1e-3,
+            factor=self.lr_scheduler_factor,
+            threshold=self.lr_scheduler_threshold,
             patience=self.lr_scheduler_patience,
             verbose=True,
         )
@@ -220,65 +220,67 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         self.logger.info(f"Batches per epoch {len(self.train_data_loader)}")
         self.logger.info(f"Begin training loop over {self.n_epochs} epochs")
         t_start_training = time.time()
+        valid_loss = valid_score = valid_roc = None
         # loop over epochs
         for i_epoch in range(self.n_epochs):
             t_start_epoch = time.time()
             self.logger.info(f"Ep {i_epoch+1:03d}: begin")
-            train_loss = self._single_epoch_loop(
-                is_train=True,
-                data_loader=self.train_data_loader,
-            )
-            self.results['train_loss'].append(train_loss.item())
             self.results['lr'].append(self.optimizer.param_groups[0]['lr'])
-
-            if self.validation_data_loader is None:
-                score = None
-                valid_loss = None
-            else:
-                if 'valid_loss' not in self.results or 'scores' not in self.results:
-                    # initialize valid_loss and scores (and roc if classification)
-                    self.results['valid_loss'] = []
-                    self.results['scores'] = []
-                    self.results['score_function_name'] = self.score_function_name
-                    if self.is_classification:
-                        self.results['roc_scores'] = []
-                valid_loss, predictions, true_labels = self._single_epoch_loop(
-                    is_train=False,
-                    data_loader=self.validation_data_loader,
+            for is_train, data_loader in zip(
+                [True, False],
+                [self.train_data_loader, self.validation_data_loader],
+            ):
+                if not data_loader:
+                    continue  # skip if validation data is empty
+                loss, predictions, labels = self._single_epoch_loop(
+                    is_train=is_train,
+                    data_loader=data_loader,
                 )
-                self.results['valid_loss'].append(valid_loss.item())  # log validation score
-                self.lr_scheduler.step(valid_loss)  # appy learning rate scheduler
+                # F1/R2 score
                 if self.is_regression:
-                    score = metrics.r2_score(true_labels, predictions)
+                    if 'score_function_name' not in self.results: self.results['score_function_name'] = 'R2'
+                    score = metrics.r2_score(labels, predictions)
                 elif self.is_classification:
+                    if 'score_function_name' not in self.results: self.results['score_function_name'] = 'F1'
                     if self.model.mlp_output_size == 1:
                         modified_predictions = (predictions > self.threshold).astype(int)
-                        score = metrics.f1_score(true_labels, modified_predictions, average='binary')
+                        score = metrics.f1_score(labels, modified_predictions, average='binary')
                     else:
                         modified_predictions = predictions.argmax(axis=1)
-                        score = metrics.f1_score(true_labels, modified_predictions, average='weighted')
-                self.results['scores'].append(score.item())
-
-                # ROC-AUC score for classification
+                        score = metrics.f1_score(labels, modified_predictions, average='weighted')
+                # ROC score if classification
                 if self.is_classification:
                     if self.model.mlp_output_size == 1:
-                        roc_score = metrics.roc_auc_score(true_labels, predictions)
+                        roc = metrics.roc_auc_score(labels, predictions)
                     else:
-                        # TODO: clarify
-                        one_hot = np.zeros_like(predictions)
-                        for i, j in zip(one_hot, true_labels):
+                        # TODO: clarify this block
+                        one_hot_labels = np.zeros_like(predictions)
+                        for i, j in zip(one_hot_labels, labels):
                             i[j] = 1
-                        roc_score = metrics.roc_auc_score(
-                            one_hot,
+                        roc = metrics.roc_auc_score(
+                            one_hot_labels,
                             predictions,
                             multi_class='ovo', 
                             average='macro', 
                             labels=[0, 1, 2, 3],
                         )
-                    self.results['roc_scores'].append(roc_score.item())
+                if is_train:
+                    self.results['train_loss'].append(loss := (train_loss := loss.item()))
+                    self.results['train_score'].append(score := (train_score := score.item()))
+                    if self.is_classification:
+                        if 'train_roc' not in self.results: self.results['train_roc'] = []
+                        self.results['train_roc'].append(train_roc:=roc.item())
+                else:
+                    if 'valid_loss' not in self.results: self.results['valid_loss'] = []
+                    if 'valid_score' not in self.results: self.results['valid_score'] = []
+                    self.results['valid_loss'].append(loss := (valid_loss := loss.item()))
+                    self.results['valid_score'].append(score := (valid_score := score.item()))
+                    if self.is_classification:
+                        if 'valid_roc' not in self.results: self.results['valid_roc'] = []
+                        self.results['valid_roc'].append(valid_roc:=roc.item())
 
             # log training time
-            self.results['training_time'].append(time.time()-t_start_training)
+            self.results['epoch_time'].append(time.time()-t_start_epoch)
 
             # save results to yaml
             with (self.output_dir/self.results_file).open('w') as results_file:
@@ -290,37 +292,36 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                 )
 
             # best score and save model
-            if score is None or score > best_score:
-                if score is not None:
-                    best_score = score
-                    self.logger.info(f"  Best {self.score_function_name}: {best_score:.3f}")
+            if score > best_score:
+                best_score = score
+                self.logger.info(f"  Best {self.score_function_name}: {best_score:.3f}")
                 self.model.save_pytorch_model(filename=self.output_dir/self.checkpoint_file)
                 if self.save_onnx_model:
                     self.model.save_onnx_model(filename=self.output_dir/self.onnx_checkpoint_file)
 
             # print epoch summary
-            modified_predictions =  f"Ep {i_epoch+1:03d}: "
-            modified_predictions += f"train loss {train_loss:.3f}  "
-            if score is not None and valid_loss is not None:
-                modified_predictions += f"val loss {valid_loss:.3f}  "
-                modified_predictions += f"{self.score_function_name} {score:.3f}  "
+            status =  f"Ep {i_epoch+1:03d}: "
+            status += f"train loss {train_loss:.3f}  "
+            status += f"train {self.results['score_function_name']} {train_score:.3f}  "
+            if self.is_classification:
+                status += f"train ROC {train_roc:.3f}  "
+            if valid_loss:
+                status += f"val loss {valid_loss:.3f}  "
+                status += f"val {self.results['score_function_name']} {valid_score:.3f}  "
                 if self.is_classification:
-                    modified_predictions += f"ROC {roc_score:.3f}  "
-            modified_predictions += f"ep time {time.time()-t_start_epoch:.1f} s "
-            modified_predictions += f"(total time {time.time()-t_start_training:.1f} s)"
-            self.logger.info(modified_predictions)
+                    status += f"val ROC {valid_roc:.3f}  "
+            status += f"ep time {time.time()-t_start_epoch:.1f} s "
+            status += f"(total time {time.time()-t_start_training:.1f} s)"
+            self.logger.info(status)
 
             # optuna integration; report epoch result to optuna
             do_prune = False
             if optuna is not None and self.optuna_trial is not None:
                 maximize_score = self.optuna_trial.user_attrs['maximize_score']
                 if maximize_score is True:
-                    assert np.isfinite(score)
                     self.optuna_trial.report(score, i_epoch)
                 else:
-                    if not np.isfinite(train_loss) or np.isnan(train_loss):
-                        train_loss = 1
-                    self.optuna_trial.report(train_loss, i_epoch)
+                    self.optuna_trial.report(loss, i_epoch)
                 # save results dict in trial user attributes
                 for key in self.results:
                     self.optuna_trial.set_user_attr(key, self.results[key])
@@ -365,7 +366,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                     self.optimizer.zero_grad()
                 predictions = self.model(signal_windows)
                 if self.is_classification and self.mlp_output_size > 1:
-                    labels = labels.type(torch.long)  # must be torch.long for CrossEntropy() loss (why?)
+                    labels = labels.type(torch.long)  # must be torch.long for CrossEntropy() (why?)
                 else:
                     labels = labels.type_as(predictions)
                 sample_losses = self.loss_function(
@@ -374,35 +375,26 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                 )
                 sample_losses = self._apply_loss_weight(sample_losses, labels)
                 batch_loss = sample_losses.mean()  # batch loss
-                batch_losses.append(batch_loss.item())  # accumulate batch losses for this epoch
                 if is_train:
-                    # for training, backpropagate and step optimizer
                     batch_loss.backward()
                     self.optimizer.step()
-                else:
-                    # for validation, accumulate labels and predictions
-                    all_labels.append(labels.cpu().numpy())
-                    all_predictions.append(predictions.cpu().numpy())
+
+                batch_losses.append(batch_loss.item())  # accumulate batch losses
+                all_labels.append(labels.cpu().numpy())
+                all_predictions.append(predictions.detach().cpu().numpy())
 
                 # minibatch status
-                if (i_batch+1)%self.minibatch_print_interval == 0:
+                if (i_batch+1) % self.minibatch_print_interval == 0:
                     epoch_loss = np.mean(batch_losses)
-                    status =  f"  {mode} batch {i_batch+1:05d}/{len(self.train_data_loader)}  "
+                    status =  f"  {mode} batch {i_batch+1:05d}/{len(data_loader)}  "
                     status += f"batch loss {batch_loss:.3f} (avg loss {epoch_loss:.3f})  "
                     status += f"minibatch time {time.time()-t_start_minibatch:.3f} s"
                     self.logger.info(status)
+
         epoch_loss = np.mean(batch_losses)
-        if is_train:
-            return_value = epoch_loss
-        else:
-            all_labels = np.concatenate(all_labels)
-            all_predictions = np.concatenate(all_predictions)
-            return_value = (
-                epoch_loss,
-                all_predictions,
-                all_labels,
-            )
-        return return_value
+        all_predictions = np.concatenate(all_predictions)
+        all_labels = np.concatenate(all_labels)
+        return epoch_loss, all_predictions, all_labels
 
     def _apply_loss_weight(self, losses: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         return losses
