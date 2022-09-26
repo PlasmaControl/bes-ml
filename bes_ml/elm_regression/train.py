@@ -56,6 +56,7 @@ class Trainer(
             if first_signal_window_start_index < 0:
                 first_signal_window_start_index = 0
             valid_t0[0:first_signal_window_start_index + 1 - 1] = 0
+            # valid_t0 = valid_t0[first_signal_window_start_index:]
             assert valid_t0[first_signal_window_start_index] == 1
             assert valid_t0[first_signal_window_start_index - 1] == 0
             n_valid_t0 = np.min([last_signal_window_start_index+1, self.pre_elm_size])
@@ -79,17 +80,27 @@ class Trainer(
         else:
             return losses
 
-    def _apply_label_normalization(self, labels: torch.Tensor = None) -> torch.Tensor:
+    def _apply_label_normalization(
+        self, 
+        labels: torch.Tensor = None,
+        valid_t0: torch.Tensor = None,
+    ) -> torch.Tensor:
         if self.normalize_labels:
             if self.raw_label_minmax is None:
-                self.raw_label_minmax = [labels.min().item(), labels.max().item()]
+                initialize = True
+                self.raw_label_minmax = [labels[valid_t0].min().item(), labels[valid_t0].max().item()]
                 self.results['raw_label_minmax'] = self.raw_label_minmax
+            else:
+                initialize = False
             self.logger.info(
-                f"  Normalizing labels to min/max = -/+ 1 " +
+                f"  Normalizing labels[valid_t0] to min/max = -/+ 1 " +
                 f"with raw min/max {self.raw_label_minmax[0]:.4e} {self.raw_label_minmax[1]:.4e}"
             )
             label_range = self.raw_label_minmax[1] - self.raw_label_minmax[0]
             labels = ((labels - self.raw_label_minmax[0]) / label_range - 0.5) * 2
+            if initialize:
+                assert labels[valid_t0].min() == -1
+                assert labels[valid_t0].max() == 1
         return labels
 
 
@@ -101,8 +112,6 @@ if __name__=='__main__':
         fraction_validation=0.2,
         fraction_test=0.2,
         normalize_labels=True,
-        normalize_signals=True,
-        pre_elm_size=2000,
-        log_time=True,
+        pre_elm_size=100,
     )
     model.train()

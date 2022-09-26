@@ -186,23 +186,25 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
             output = self.output_dir / f'{save_filename}.pdf'
             merge_pdfs(pdf_files, output, delete_inputs=True)
         
+        # normalize signals to max ~= 1
+        if self.normalize_signals:
+            self.logger.info(f"  Normalizing signals to max ~= 1")
+            packaged_signals /= 10.4  # normalize to max ~= 1
+
         # valid indices for data sampling
         packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype="int")
         packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
 
-        # TODO: move to ELM classificaiton task
         if self.is_classification:
+            # assess data balance for active ELM/inactive ELM classification
             packaged_valid_t0_indices = self._check_for_balanced_data(
                 packaged_labels=packaged_labels,
                 packaged_valid_t0_indices=packaged_valid_t0_indices,
                 oversample_active_elm=oversample_active_elm,
             )
-
-        if self.normalize_signals:
-            self.logger.info(f"  Normalizing signals to max ~= 1")
-            packaged_signals /= 10.4  # normalize to max ~= 1
-
-        self._apply_label_normalization(packaged_labels)
+        elif self.is_regression:
+            # assess label normalization for time-to-ELM regression
+            self._apply_label_normalization(packaged_labels, packaged_valid_t0)
 
         if shuffle_indices:
             self.rng_generator.shuffle(packaged_valid_t0_indices)
