@@ -2,7 +2,7 @@ import io
 import logging
 from pathlib import Path
 import sys
-from typing import Union
+from typing import Union, Iterable
 import inspect
 import dataclasses
 
@@ -512,8 +512,9 @@ class _Multi_Features_Model_Dataclass(
     _DCT_Features_Dataclass,
     _DWT_Features_Dataclass,
 ):
-    mlp_layer1_size: int = 32  # multi-layer perceptron (mlp)
-    mlp_layer2_size: int = 16
+    # mlp_layer1_size: int = 32  # multi-layer perceptron (mlp)
+    # mlp_layer2_size: int = 16
+    mlp_hidden_layers: Iterable = (32, 16)  # size and number of MLP hidden layers
     mlp_output_size: int = 1
 
 
@@ -587,12 +588,24 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
         )
         self.logger.info(f"Total features: {self.total_features}")
 
-        self.mlp_layer1 = nn.Linear(in_features=self.total_features, out_features=self.mlp_layer1_size)
-        self.mlp_layer2 = nn.Linear(in_features=self.mlp_layer1_size, out_features=self.mlp_layer2_size)
-        self.mlp_layer3 = nn.Linear(in_features=self.mlp_layer2_size, out_features=self.mlp_output_size)
-        self.logger.info(f"MLP layer 1 size: {self.mlp_layer1_size}")
-        self.logger.info(f"MLP layer 2 size: {self.mlp_layer2_size}")
+        self.hidden_layers = []
+        in_features = self.total_features  #  features are input layer to MLP
+        for i_layer, layer_size in enumerate(self.mlp_hidden_layers):
+            self.hidden_layers.append(
+                nn.Linear(in_features=in_features, out_features=layer_size)
+            )
+            in_features = layer_size
+            self.logger.info(f"MLP layer {i_layer+1} size: {layer_size}")
+
+        self.output_layer = nn.Linear(in_features=in_features, out_features=self.mlp_output_size)
         self.logger.info(f"MLP output size: {self.mlp_output_size}")
+
+        # self.mlp_layer1 = nn.Linear(in_features=self.total_features, out_features=self.mlp_layer1_size)
+        # self.mlp_layer2 = nn.Linear(in_features=self.mlp_layer1_size, out_features=self.mlp_layer2_size)
+        # self.mlp_layer3 = nn.Linear(in_features=self.mlp_layer2_size, out_features=self.mlp_output_size)
+        # self.logger.info(f"MLP layer 1 size: {self.mlp_layer1_size}")
+        # self.logger.info(f"MLP layer 2 size: {self.mlp_layer2_size}")
+        # self.logger.info(f"MLP output size: {self.mlp_output_size}")
 
         self.activation_function = getattr(nn, self.activation_name)
         if self.activation_name == 'LeakyReLu':
@@ -615,10 +628,9 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
         ]
 
         x = torch.cat(all_features, dim=1)
-
-        x = self.activation(self.dropout(self.mlp_layer1(x)))
-        x = self.activation(self.dropout(self.mlp_layer2(x)))
-        x = self.mlp_layer3(x)
+        for hidden_layer in self.hidden_layers:
+            x = self.activation(self.dropout(hidden_layer(x)))
+        x = self.output_layer(x)
 
         return x
 
