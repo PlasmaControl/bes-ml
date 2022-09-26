@@ -24,6 +24,7 @@ class Trainer(
     log_time: bool = False  # if True, use label = log(time_to_elm_onset)
     inverse_weight_label: bool = False  # if True, weight losses by 1/label
     normalize_labels: bool = False  # if True, normalize labels to min/max = +/- 1
+    pre_elm_size: int = None  # maximum pre-ELM size
 
     def __post_init__(self):
 
@@ -39,17 +40,37 @@ class Trainer(
         labels: np.ndarray = None,
         signals: np.ndarray = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        # indices for active elm times in each elm event
         active_elm_indices = np.nonzero(labels == 1)[0]
-        active_elm_start_index = active_elm_indices[0]
-        # concat on axis 0 (time dimension)
-        valid_t0 = np.ones(active_elm_start_index-1, dtype=np.int32)
-        valid_t0[-self.signal_window_size + 1:] = 0
-        labels = np.arange(active_elm_start_index, 1, -1, dtype=np.float32)
-        signals = signals[:active_elm_start_index-1, :, :]
+        active_elm_start_index = active_elm_indices[0]  # first active ELM index
+        n_pre_elm_phase = active_elm_start_index  # length of pre-ELM phase
+        assert labels[n_pre_elm_phase-1] == 0  # last pre-ELM element
+        assert labels[n_pre_elm_phase] == 1  # first active ELM element
+        valid_t0 = np.ones(n_pre_elm_phase, dtype=np.int32)  # size = n_pre_elm_phase
+        assert valid_t0.size == n_pre_elm_phase  # valid_t0 is length of pre-ELM phase
+        last_signal_window_start_index = n_pre_elm_phase - self.signal_window_size - 1
+        valid_t0[last_signal_window_start_index+1:] = 0
+        assert valid_t0[last_signal_window_start_index] == 1  # last signal window start with pre-ELM label
+        assert valid_t0[last_signal_window_start_index+1] == 0  # first invalid signal window start with active ELM label
+        if self.pre_elm_size:
+            first_signal_window_start_index = last_signal_window_start_index - self.pre_elm_size + 1
+            if first_signal_window_start_index < 0:
+                first_signal_window_start_index = 0
+            valid_t0[0:first_signal_window_start_index + 1 - 1] = 0
+            assert valid_t0[first_signal_window_start_index] == 1
+            assert valid_t0[first_signal_window_start_index - 1] == 0
+            n_valid_t0 = np.min([last_signal_window_start_index+1, self.pre_elm_size])
+            assert np.count_nonzero(valid_t0) == n_valid_t0
+        labels = np.arange(n_pre_elm_phase, 0, -1, dtype=np.float32)
+        assert labels.size == n_pre_elm_phase
+        assert labels.min() == 1
+        assert labels.max() == n_pre_elm_phase
+        assert np.all(labels>0)
+        signals = signals[0:n_pre_elm_phase, :, :]
+        assert signals.shape[0] == labels.size
+        assert signals.shape[0] == valid_t0.size
         if self.log_time:
-            assert np.all(labels > 0)
             labels = np.log10(labels)
+            assert labels.min() == 0
         return labels, signals, valid_t0
 
     def _apply_loss_weight(self, losses: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
@@ -81,5 +102,7 @@ if __name__=='__main__':
         fraction_test=0.2,
         normalize_labels=True,
         normalize_signals=True,
+        pre_elm_size=2000,
+        log_time=True,
     )
     model.train()
