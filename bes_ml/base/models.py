@@ -588,24 +588,18 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
         )
         self.logger.info(f"Total features: {self.total_features}")
 
-        self.hidden_layers = []
+        hidden_layers = []
         in_features = self.total_features  #  features are input layer to MLP
         for i_layer, layer_size in enumerate(self.mlp_hidden_layers):
-            self.hidden_layers.append(
+            hidden_layers.append(
                 nn.Linear(in_features=in_features, out_features=layer_size)
             )
             in_features = layer_size
             self.logger.info(f"MLP layer {i_layer+1} size: {layer_size}")
+        self.hidden_layers = nn.ModuleList(hidden_layers)
 
         self.output_layer = nn.Linear(in_features=in_features, out_features=self.mlp_output_size)
         self.logger.info(f"MLP output size: {self.mlp_output_size}")
-
-        # self.mlp_layer1 = nn.Linear(in_features=self.total_features, out_features=self.mlp_layer1_size)
-        # self.mlp_layer2 = nn.Linear(in_features=self.mlp_layer1_size, out_features=self.mlp_layer2_size)
-        # self.mlp_layer3 = nn.Linear(in_features=self.mlp_layer2_size, out_features=self.mlp_output_size)
-        # self.logger.info(f"MLP layer 1 size: {self.mlp_layer1_size}")
-        # self.logger.info(f"MLP layer 2 size: {self.mlp_layer2_size}")
-        # self.logger.info(f"MLP output size: {self.mlp_output_size}")
 
         self.activation_function = getattr(nn, self.activation_name)
         if self.activation_name == 'LeakyReLu':
