@@ -25,7 +25,8 @@ class _Base_Features_Dataclass():
     spatial_maxpool_size: int = 1  # 1 (default, no spatial maxpool), 2, or 4
     time_interval: int = 1  # time domain slice interval (i.e. time[::interval])
     subwindow_size: int = -1  # power of 2, or -1 (default) for full signal window
-    negative_slope: float = 1e-3  # relu negative slope; ~1e-3
+    activation_name: str = 'LeakyReLU'  # activation function in torch.nn like `LeakyReLu` or `SiLu`
+    leakyrelu_negative_slope: float = 1e-3  # leaky relu negative slope; ~1e-3
     dropout_rate: float = 0.1  # ~0.1
     logger: logging.Logger = None
 
@@ -65,7 +66,11 @@ class _Base_Features(nn.Module, _Base_Features_Dataclass):
         self.subwindow_nbins = self.time_points // self.subwindow_size
         assert self.subwindow_nbins >= 1
         
-        self.relu = nn.LeakyReLU(negative_slope=self.negative_slope)
+        self.activation_function = getattr(nn, self.activation_name)
+        if self.activation_name == 'LeakyReLu':
+            self.activation = self.activation_function(negative_slope=self.leakyrelu_negative_slope)
+        else:
+            self.activation = self.activation_function()
         self.dropout = nn.Dropout3d(p=self.dropout_rate)
 
         self.num_kernels = None  # set in subclass
@@ -79,7 +84,7 @@ class _Base_Features(nn.Module, _Base_Features_Dataclass):
         return x
 
     def _dropout_relu_flatten(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.flatten(self.relu(self.dropout(x)), 1)
+        return torch.flatten(self.activation(self.dropout(x)), 1)
 
 
 @dataclasses.dataclass(eq=False)
@@ -253,9 +258,9 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
 
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.relu(self.dropout(self.layer1_conv(x)))
+        x = self.activation(self.dropout(self.layer1_conv(x)))
         x = self.layer1_maxpool(x)
-        x = self.relu(self.dropout(self.layer2_conv(x)))
+        x = self.activation(self.dropout(self.layer2_conv(x)))
         x = self.layer2_maxpool(x)
         return torch.flatten(x, 1)
 
@@ -589,8 +594,12 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
         self.logger.info(f"MLP layer 2 size: {self.mlp_layer2_size}")
         self.logger.info(f"MLP output size: {self.mlp_output_size}")
 
+        self.activation_function = getattr(nn, self.activation_name)
+        if self.activation_name == 'LeakyReLu':
+            self.activation = self.activation_function(negative_slope=self.leakyrelu_negative_slope)
+        else:
+            self.activation = self.activation_function()
         self.dropout = nn.Dropout(p=self.dropout_rate)
-        self.relu = nn.LeakyReLU(negative_slope=self.negative_slope)
 
     def forward(self, x):
         dense_features = self.dense_features(x) if self.dense_features else None
@@ -607,8 +616,8 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
 
         x = torch.cat(all_features, dim=1)
 
-        x = self.relu(self.dropout(self.mlp_layer1(x)))
-        x = self.relu(self.dropout(self.mlp_layer2(x)))
+        x = self.activation(self.dropout(self.mlp_layer1(x)))
+        x = self.activation(self.dropout(self.mlp_layer2(x)))
         x = self.mlp_layer3(x)
 
         return x
