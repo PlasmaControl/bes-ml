@@ -22,10 +22,14 @@ class Trainer(
     prediction_horizon: int = 200  # prediction horizon in time samples
     threshold: float = 0.5  # threshold for binary classification
     oversample_active_elm: bool = True  # if True, oversample active ELMs to balance data
+    one_hot_encoding: bool = True  # if True, use 2-output, one-hot encoding; if False, 1-output, binary
 
     def __post_init__(self):
         self.is_classification = True
         self.is_regression = not self.is_classification
+
+        if self.one_hot_encoding:
+            self.mlp_output_size = 2
 
         super().__post_init__()  # _Base_Trainer.__post_init__()
 
