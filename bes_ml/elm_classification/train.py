@@ -21,8 +21,8 @@ class Trainer(
 ):
     prediction_horizon: int = 200  # prediction horizon in time samples
     threshold: float = 0.5  # threshold for binary classification
-    oversample_active_elm: bool = True  # if True, oversample active ELMs to balance data
-    one_hot_encoding: bool = True  # if True, use 2-output, one-hot encoding; if False, 1-output, binary
+    oversample_active_elm: bool = False  # if True, oversample active ELMs to balance data
+    one_hot_encoding: bool = False  # if True, use 2-output, one-hot encoding
 
     def __post_init__(self):
         self.is_classification = True
@@ -120,10 +120,5 @@ class Trainer(
 if __name__=='__main__':
     model = Trainer(
         dense_num_kernels=8,
-        batch_size=64,
-        n_epochs=2,
-        fraction_validation=0.2,
-        fraction_test=0.2,
-        prediction_horizon=400,
     )
     model.train()

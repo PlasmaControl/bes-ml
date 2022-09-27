@@ -23,8 +23,8 @@ class Trainer(
     # parameters for ELM regression task
     log_time: bool = False  # if True, use label = log(time_to_elm_onset)
     inverse_weight_label: bool = False  # if True, weight losses by 1/label
-    normalize_labels: bool = False  # if True, normalize labels to min/max = +/- 1
-    pre_elm_size: int = None  # maximum pre-ELM size
+    normalize_labels: bool = True  # if True, normalize labels to min/max = +/- 1
+    pre_elm_size: int = None  # maximum pre-ELM window in time frames
 
     def __post_init__(self):
 
@@ -108,10 +108,5 @@ class Trainer(
 if __name__=='__main__':
     model = Trainer(
         dense_num_kernels=8,
-        n_epochs=2,
-        fraction_validation=0.2,
-        fraction_test=0.2,
-        normalize_labels=True,
-        pre_elm_size=100,
     )
     model.train()

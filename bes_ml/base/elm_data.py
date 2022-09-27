@@ -22,13 +22,14 @@ except ImportError:
 class _ELM_Data_Base(_Base_Trainer_Dataclass):
     data_location: Path = sample_elm_data_file  # path to data; dir or file depending on task
     batch_size: int = 64  # power of 2, like 16-128
-    fraction_validation: float = 0.1  # fraction of dataset for validation
-    fraction_test: float = 0.15  # fraction of dataset for testing
+    fraction_validation: float = 0.2  # fraction of dataset for validation
+    fraction_test: float = 0.2  # fraction of dataset for testing
     normalize_signals: bool = True  # if True, normalize BES signals such that max ~= 1
     seed: int = None  # RNG seed for deterministic, reproducable shuffling (ELMs, sample indices, etc.)
     data_partition_file: str = 'data_partition.yaml'  # data partition for training, valid., and testing
     max_elms: int = None
     num_workers: int = 0  # number of subprocess workers for pytorch dataloader
+    label_type: np.dtype = dataclasses.field(default=None, init=False)
 
     def _prepare_data(self) -> None:
 
@@ -36,6 +37,13 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
         assert self.data_location.exists(), f"{self.data_location} does not exist"
 
         self.rng_generator = np.random.default_rng(seed=self.seed)
+
+        if self.is_regression:
+            # float labels for regression
+            self.label_type = np.float32
+        elif self.is_classification:
+            # int labels for classification
+            self.label_type = np.int8
 
         self._get_data()
         self._make_datasets()

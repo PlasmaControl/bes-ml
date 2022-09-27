@@ -57,7 +57,6 @@ class _Base_Trainer_Dataclass:
     train_data_loader: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
     validation_data_loader: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
     results: dict = dataclasses.field(default=None, init=False)
-    label_type: np.dtype = dataclasses.field(default=None, init=False)
 
 
 @dataclasses.dataclass(eq=False)
@@ -75,7 +74,6 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         self.results = {
             'train_loss': [],
             'train_score': [],
-            'loss_function_name': '',
             'epoch_time': [],
             'lr': [],
         }
@@ -86,7 +84,6 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         self._make_model()
         self._set_device()
         self.model = self.model.to(self.device)
-        self._set_regression_classification()
         self._make_optimizer_scheduler()
         self._prepare_data()
 
@@ -159,27 +156,6 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         self.device = torch.device(self.device)
         self.logger.info(f"Device: {self.device}")
 
-    def _set_regression_classification(self) -> None:
-
-        if self.is_regression:
-            # regression model (e.g. time to ELM onset, velocimetry surrogate model)
-            self.label_type = np.float32
-            self.score_function_name = 'R2'
-            self.loss_function_name = 'MSELoss'
-        elif self.is_classification:
-            self.label_type = np.int8
-            self.score_function_name = 'F1'
-            if self.model.mlp_output_size == 1:
-                # binary classification (e.g. active/inactive ELM)
-                self.loss_function_name = 'BCEWithLogitsLoss'
-                assert hasattr(self, 'threshold')  # binary classification must specify threshold
-            else:
-                # multi-class classification (e.g. confinement mode)
-                self.loss_function_name = 'CrossEntropyLoss'
-
-        self.loss_function = getattr(torch.nn, self.loss_function_name)(reduction="none")
-        self.results['loss_function_name'] = self.loss_function_name
-
     def _make_optimizer_scheduler(self) -> None:
         assert self.optimizer_type in ['adam', 'sgd']
         if self.optimizer_type == 'adam':
@@ -215,6 +191,20 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         raise NotImplementedError
 
     def train(self) -> dict:
+
+        if self.is_regression:
+            self.results['loss_function_name'] = 'MSELoss'
+            self.loss_function = torch.nn.MSELoss(reduction="none")
+        elif self.is_classification:
+            if self.model.mlp_output_size == 1:
+                assert hasattr(self, 'threshold')  # binary classification must specify threshold
+                self.results['loss_function_name'] = 'BCEWithLogitsLoss'
+                # labels are binary [0,1]; predictions are logits [-inf,inf]
+                self.loss_function = torch.nn.BCEWithLogitsLoss(reduction="none")
+            else:
+                self.results['loss_function_name'] = 'CrossEntropyLoss'
+                # labels are true class C; predictions are scores for all classes
+                self.loss_function = torch.nn.CrossEntropyLoss(reduction="none")
         best_score = -np.inf
 
         self.logger.info(f"Batches per epoch {len(self.train_data_loader)}")
@@ -232,21 +222,24 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             ):
                 if not data_loader:
                     continue  # skip if validation data is empty
+                # calculate loss and predictions
                 loss, predictions, labels = self._single_epoch_loop(
                     is_train=is_train,
                     data_loader=data_loader,
                 )
                 # F1/R2 score
                 if self.is_regression:
-                    if 'score_function_name' not in self.results: self.results['score_function_name'] = 'R2'
+                    if 'score_function_name' not in self.results: 
+                        self.results['score_function_name'] = 'R2'
                     score = metrics.r2_score(labels, predictions)
                 elif self.is_classification:
-                    if 'score_function_name' not in self.results: self.results['score_function_name'] = 'F1'
+                    if 'score_function_name' not in self.results: 
+                        self.results['score_function_name'] = 'F1'
                     if self.model.mlp_output_size == 1:
                         modified_predictions = (predictions > self.threshold).astype(int)
                         score = metrics.f1_score(labels, modified_predictions, average='binary')
                     else:
-                        modified_predictions = predictions.argmax(axis=1)
+                        modified_predictions = predictions.argmax(axis=1)  # select class with highest score
                         score = metrics.f1_score(labels, modified_predictions, average='weighted')
                 # ROC score if classification
                 if self.is_classification:
@@ -269,15 +262,15 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                     self.results['train_score'].append(score := (train_score := score.item()))
                     if self.is_classification:
                         if 'train_roc' not in self.results: self.results['train_roc'] = []
-                        self.results['train_roc'].append(train_roc:=roc.item())
+                        self.results['train_roc'].append(train_roc := roc.item())
                 else:
                     if 'valid_loss' not in self.results: self.results['valid_loss'] = []
-                    if 'valid_score' not in self.results: self.results['valid_score'] = []
                     self.results['valid_loss'].append(loss := (valid_loss := loss.item()))
+                    if 'valid_score' not in self.results: self.results['valid_score'] = []
                     self.results['valid_score'].append(score := (valid_score := score.item()))
                     if self.is_classification:
                         if 'valid_roc' not in self.results: self.results['valid_roc'] = []
-                        self.results['valid_roc'].append(valid_roc:=roc.item())
+                        self.results['valid_roc'].append(valid_roc := roc.item())
 
             # log training time
             self.results['epoch_time'].append(time.time()-t_start_epoch)
@@ -294,7 +287,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             # best score and save model
             if score > best_score:
                 best_score = score
-                self.logger.info(f"  Best {self.score_function_name}: {best_score:.3f}")
+                self.logger.info(f"  Best score: {best_score:.3f}")
                 self.model.save_pytorch_model(filename=self.output_dir/self.checkpoint_file)
                 if self.save_onnx_model:
                     self.model.save_onnx_model(filename=self.output_dir/self.onnx_checkpoint_file)
@@ -340,7 +333,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         if do_prune:
             optuna.TrialPruned()
 
-        return self.results.copy()
+        return self.results
 
     def _single_epoch_loop(
         self,
@@ -364,11 +357,15 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                     t_start_minibatch = time.time()
                 if is_train:
                     self.optimizer.zero_grad()
+                # predictions are floats: regression scalars or classification logits
                 predictions = self.model(signal_windows)
-                if self.is_classification and self.mlp_output_size > 1:
-                    labels = labels.type(torch.long)  # must be torch.long for CrossEntropy() (why?)
-                else:
+                if self.is_regression:
                     labels = labels.type_as(predictions)
+                elif self.is_classification:
+                    if self.model.mlp_output_size == 1:
+                        labels = labels.type_as(predictions)
+                    else:
+                        labels = labels.type(torch.int64)
                 sample_losses = self.loss_function(
                     predictions.squeeze(),
                     labels,
