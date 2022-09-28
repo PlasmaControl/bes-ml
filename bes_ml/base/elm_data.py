@@ -156,6 +156,7 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
                 except KeyError:
                     labels = np.array(elm_event["manual_labels"], dtype=self.label_type)
                 labels, signals, valid_t0 = self._get_valid_indices(labels, signals)
+                assert labels.size == valid_t0.size
                 if save_filename:
                     plt.sca(axes.flat[i_elm%12])
                     plt.plot(signals[:,2,3]/10, label='BES 20')
@@ -186,7 +187,9 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
                     )
                     packaged_valid_t0 = np.concatenate([packaged_valid_t0, valid_t0])
                     packaged_signals = np.concatenate([packaged_signals, signals], axis=0)
-                    packaged_labels = np.concatenate([packaged_labels, labels], axis=0)                
+                    packaged_labels = np.concatenate([packaged_labels, labels], axis=0)
+
+        assert packaged_labels.size == packaged_valid_t0.size
 
         if save_filename:
             plt.close()
@@ -200,7 +203,7 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
             packaged_signals /= 10.4  # normalize to max ~= 1
 
         # valid indices for data sampling
-        packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype="int")
+        packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
         packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
 
         if self.is_classification:
@@ -211,8 +214,8 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
                 oversample_active_elm=oversample_active_elm,
             )
         elif self.is_regression:
-            # assess label normalization for time-to-ELM regression
-            self._apply_label_normalization(packaged_labels, packaged_valid_t0)
+            # if specified, normalize time-to-ELM labels to min/max = -/+ 1
+            packaged_labels = self._apply_label_normalization(packaged_labels, packaged_valid_t0_indices)
 
         if shuffle_indices:
             self.rng_generator.shuffle(packaged_valid_t0_indices)
@@ -241,7 +244,7 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
 
         return return_tuple
 
-    def _apply_label_normalization(self, labels: torch.Tensor = None) -> torch.Tensor:
+    def _apply_label_normalization(self, labels: torch.Tensor = None, *args, **kwargs) -> torch.Tensor:
         return labels
 
     def _make_datasets(self) -> None:

@@ -31,6 +31,9 @@ class Trainer(
         self.is_regression = True
         self.is_classification = not self.is_regression
 
+        if self.inverse_weight_label and self.normalize_labels:
+            assert False, "Invalid options"
+
         self.raw_label_minmax = None
 
         super().__post_init__()  # _Base_Trainer.__post_init__()
@@ -83,13 +86,20 @@ class Trainer(
     def _apply_label_normalization(
         self, 
         labels: torch.Tensor = None,
-        valid_t0: torch.Tensor = None,
+        valid_indices: torch.Tensor = None,
     ) -> torch.Tensor:
         if self.normalize_labels:
             if self.raw_label_minmax is None:
                 initialize = True
-                self.raw_label_minmax = [labels[valid_t0].min().item(), labels[valid_t0].max().item()]
+                self.raw_label_minmax = [
+                    labels[valid_indices+self.signal_window_size].min().item(), 
+                    labels[valid_indices+self.signal_window_size].max().item(),
+                ]
                 self.results['raw_label_minmax'] = self.raw_label_minmax
+                if self.log_time:
+                    assert self.raw_label_minmax[0] == 0
+                else:
+                    assert self.raw_label_minmax[0] == 1
             else:
                 initialize = False
             self.logger.info(
@@ -99,8 +109,8 @@ class Trainer(
             label_range = self.raw_label_minmax[1] - self.raw_label_minmax[0]
             labels = ((labels - self.raw_label_minmax[0]) / label_range - 0.5) * 2
             if initialize:
-                assert labels[valid_t0].min() == -1
-                assert labels[valid_t0].max() == 1
+                assert labels[valid_indices+self.signal_window_size].min() == -1
+                assert labels[valid_indices+self.signal_window_size].max() == 1
         return labels
 
 
