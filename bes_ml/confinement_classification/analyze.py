@@ -114,7 +114,7 @@ class Analyzer(_Analyzer_Base):
 
         ax1.text(-1.3, 0.5,
                  f'{cr}\n'
-                 f'ROC: {np.max(self.scores):0.2f} (epoch {np.argmax(self.scores)})    '
+                 f'ROC: {np.max(self.train_score):0.2f} (epoch {np.argmax(self.train_score)})    '
                  f'Best Loss: {np.max(self.valid_loss):0.2f} (epoch {np.argmax(self.valid_loss)})',
                  transform=ax1.transAxes,
                  ha='right', va='center', ma='left',
@@ -128,7 +128,7 @@ class Analyzer(_Analyzer_Base):
         ax2.legend()
 
         ax3 = ax2.twinx()
-        ax3.plot(self.scores, label='ROC-AUC score', color='r')
+        ax3.plot(self.train_score, label='ROC-AUC score', color='r')
         ax3.set_ylabel('ROC-AUC Score')
         ax3.legend()
 

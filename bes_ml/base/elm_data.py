@@ -1,6 +1,7 @@
 from pathlib import Path
 import dataclasses
 from typing import Iterable, Tuple
+import pickle
 
 import numpy as np
 import torch
@@ -24,6 +25,7 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
     batch_size: int = 64  # power of 2, like 16-128
     fraction_validation: float = 0.2  # fraction of dataset for validation
     fraction_test: float = 0.2  # fraction of dataset for testing
+    test_data_file: str = 'test_data.pkl'
     normalize_signals: bool = True  # if True, normalize BES signals such that max ~= 1
     seed: int = None  # RNG seed for deterministic, reproducable shuffling (ELMs, sample indices, etc.)
     data_partition_file: str = 'data_partition.yaml'  # data partition for training, valid., and testing
@@ -122,6 +124,21 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
                 elm_indices=test_elms,
                 save_filename='test_elms',
             )
+            test_data_file = self.output_dir / self.test_data_file
+            self.logger.info(f"Test data file: {test_data_file}")
+            with test_data_file.open('wb') as file:
+                pickle.dump(
+                    {
+                        "signals": self.test_data[0],
+                        "labels": self.test_data[1],
+                        "sample_indices": self.test_data[2],
+                        "window_start": self.test_data[3],
+                        "elm_indices": self.test_data[4],
+                    },
+                    file,
+                )
+            assert test_data_file.exists(), f"{test_data_file} does not exist"
+            self.logger.info(f"  File size: {test_data_file.stat().st_size/1e6:.1f} MB")
         else:
             self.logger.info("Skipping test data")
 

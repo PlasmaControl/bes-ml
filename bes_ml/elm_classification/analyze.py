@@ -21,11 +21,11 @@ class Analyzer(_Analyzer_Base):
 
     def _load_training_results(self):
         super()._load_training_results()
-        self.roc_scores = np.array(self.results['roc_scores'])
+        # self.roc_scores = np.array(self.results['roc_scores'])
 
 
 if __name__=='__main__':
     analyzer = Analyzer()
     analyzer.plot_training(save=True)
-    analyzer.plot_inference(save=True)
+    # analyzer.plot_inference(save=True)
     analyzer.show()

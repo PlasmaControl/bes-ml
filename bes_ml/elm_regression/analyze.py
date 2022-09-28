@@ -19,5 +19,5 @@ class Analyzer(_Analyzer_Base):
 if __name__=='__main__':
     analyzer = Analyzer()
     analyzer.plot_training(save=True)
-    analyzer.plot_inference(save=True)
+    # analyzer.plot_inference(save=True)
     analyzer.show()

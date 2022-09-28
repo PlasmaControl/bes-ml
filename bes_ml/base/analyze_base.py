@@ -8,6 +8,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch
 import torch.utils.data
+import h5py
 
 try:
     from .models import Multi_Features_Model  #, _Multi_Features_Model_Dataclass
@@ -28,7 +29,7 @@ class _Analyzer_Base(
     device: str = 'auto'  # auto (default), cpu, cuda, or cuda:X
 
     def __post_init__(self):
-        self.output_dir = Path(self.output_dir)
+        self.output_dir = Path(self.output_dir).resolve()
         assert self.output_dir.exists(), f"{self.output_dir} does not exist."
 
         self.inputs_file = self.output_dir / self.inputs_file
@@ -38,7 +39,7 @@ class _Analyzer_Base(
         self.inputs = {}
         with self.inputs_file.open('r') as inputs_file:
             self.inputs.update(yaml.safe_load(inputs_file))
-        print("Inputs from inputs file")
+        print(f"Inputs from inputs file {self.inputs_file}")
         for key in self.inputs:
             print(f"  {key}: {self.inputs[key]}")
 
@@ -68,7 +69,7 @@ class _Analyzer_Base(
         self.all_signals = None
 
         self.results = None
-        self.scores = None
+        self.train_score = None
         self.train_loss = None
         self.valid_loss = None
 
@@ -77,10 +78,25 @@ class _Analyzer_Base(
 
     def _load_test_data(self) -> None:
         # restore test data
+        # data_partition_file = self.output_dir / 'data_partition.yaml'
+        # with data_partition_file.open('r') as file:
+        #     data_partition = yaml.safe_load(file)
+        # test_elms = data_partition['test_elms']
+        # with h5py.File(self.inputs['data_location'], 'r') as h5_file:
+        #     for elm_index in test_elms:
+        #         elm_key = f"{elm_index:05d}"
+        #         elm_event = h5_file[elm_key]
+        #         signals = np.array(elm_event["signals"], dtype=np.float32)  # (64, <time>)
+        #         signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (<time>, 8, 8)
+        #         labels = np.array(elm_event["labels"])
+        #         # labels, signals, valid_t0 = self._get_valid_indices(labels, signals)
+        #         # assert labels.size == valid_t0.size
+        # return
         test_data_file = self.output_dir / self.inputs['test_data_file']
         assert test_data_file.exists(), f"{test_data_file} does not exist."
         with test_data_file.open('rb') as file:
             self.test_data = pickle.load(file)
+        return
 
     def _load_model_parameters(self) -> None:
         checkpoint_file = self.output_dir / self.inputs['checkpoint_file']
@@ -153,10 +169,16 @@ class _Analyzer_Base(
         assert results_file.exists, f"{results_file} does not exist"
         with results_file.open('r') as f:
             self.results = yaml.safe_load(f)
-        self.train_loss = self.results['train_loss']
-        self.valid_loss = self.results['valid_loss']
-        self.scores = self.results['scores']
-        self.scores_label = self.results['scores_label']
+        self.train_loss = self.results.get('train_loss')
+        self.loss_function_name = self.results.get('loss_function_name')
+        self.train_score = self.results.get('train_score')
+        self.score_function_name = self.results.get('score_function_name')
+        self.lr = self.results.get('lr')
+        self.epoch_time = self.results.get('epoch_time')
+        self.train_roc = self.results.get('train_roc', None)
+        self.valid_loss = self.results.get('valid_loss', None)
+        self.valid_score = self.results.get('valid_score', None)
+        self.valid_roc = self.results.get('valid_roc', None)
 
     def plot_training(
         self,
@@ -165,26 +187,43 @@ class _Analyzer_Base(
         self._load_training_results()
         n_epochs = len(self.train_loss)
         epochs = np.arange(n_epochs) + 1
-        _, axes = plt.subplots(ncols=2, nrows=1, figsize=(8,3))
-        plt.suptitle(f"{self.output_dir.resolve()}")
+        _, axes = plt.subplots(ncols=2, nrows=2, figsize=(8,6))
+        plt.suptitle(f"{self.output_dir}")
+        # loss
         plt.sca(axes.flat[0])
-        plt.plot(epochs, self.train_loss, label='Training loss')
+        plt.plot(epochs, self.train_loss, label='Train loss', c='C0')
         if self.valid_loss:
-            plt.plot(epochs, self.valid_loss, label='Valid. loss')
-        plt.title('Training/validation loss')
+            plt.plot(epochs, self.valid_loss, label='Valid. loss', c='C1')
+        plt.yscale('log')
+        plt.title(f'{self.loss_function_name} loss')
         plt.ylabel('Loss')
+        plt.legend()
+        # scores
         plt.sca(axes.flat[1])
-        if self.scores:
-            plt.plot(epochs, self.scores, label=self.scores_label)
-            if self.is_classification and hasattr(self, 'roc_scores'):
-                plt.plot(epochs, self.roc_scores, label='ROC-AUC')
-        plt.title('Validation scores')
+        plt.plot(epochs, self.train_score, label=f'Train {self.score_function_name}', c='C0')
+        if self.valid_score:
+            plt.plot(epochs, self.valid_score, label=f'Valid. {self.score_function_name}', c='C1')
+        if self.train_roc:
+            plt.plot(epochs, self.train_roc, label='Train ROC', c='C0', ls='--')
+        if self.valid_roc:
+            plt.plot(epochs, self.valid_roc, label='Valid. ROC', c='C1', ls='--')
+        plt.title(f'Scores')
         plt.ylabel('Score')
+        plt.legend()
+        # lr
+        plt.sca(axes.flat[2])
+        plt.semilogy(epochs, self.lr)
+        plt.title('Learning rate')
+        plt.ylabel('Learning rate')
+        # epoch time
+        plt.sca(axes.flat[3])
+        plt.plot(epochs, self.epoch_time)
+        plt.title('Epoch time')
+        plt.ylabel('Epoch time (s)')
         for axis in axes.flat:
             plt.sca(axis)
             plt.xlabel('Epoch')
             plt.xlim([0,None])
-            plt.legend()
         plt.tight_layout()
         if save:
             filepath = self.output_dir / "training.pdf"
