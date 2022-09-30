@@ -48,7 +48,7 @@ class SquareNet(nn.Module):
         x = torch.cat([x2, x1], dim=1)
 
         x = self.outc(x)
-        x = self.fc(x.flatten())
+        x = self.fc(torch.flatten(x, start_dim=1))
 
         return x
 
