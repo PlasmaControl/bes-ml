@@ -21,12 +21,13 @@ except ImportError:
 class Trainer(_Trainer_Base):
     data_location: Union[Path,str] = sample_data_dir / 'velocimetry_data' #location of stored data
     dataset_to_ram: bool = True # Load datasets to ram
-    sinterp: int = 1
+    sinterp: int = 1 # interpolation factor of BES signals
+
     # __init__ must have exact copy of all kwargs from parent class
     def __post_init__(self):
 
         self.mlp_output_size = 128
-
+        assert isinstance(self.sinterp, int), f"sinterp must be type int. Got type {type(self.sinterp)}"
         super().__post_init__()
 
         self.is_regression = True
@@ -103,12 +104,22 @@ class Trainer(_Trainer_Base):
 
 
 if __name__=='__main__':
+    n_epochs = 50
+    t_size = 2
+    s_size = 3
+    sws = 2
+    dense_num = 0
+    cnn_l1_num = 512
     model = Trainer(
-        dense_num_kernels=8,
+        data_location='/home/jazimmerman/PycharmProjects/bes-edgeml-models/bes-edgeml-work/velocimetry/data/',
+        output_dir=f'/home/jazimmerman/PycharmProjects/bes-edgeml-models/bes-edgeml-work/velocimetry/'
+                   f'cnn{cnn_l1_num}_spatial{s_size}_time{t_size}_dense{dense_num}_sws{sws}_epochs{n_epochs}',
+        sinterp=5,
+        fraction_test=0.1,
+        fraction_validation=0.1,
+        minibatch_interval=1000,
+        dense_num_kernels=dense_num,
         batch_size=64,
         n_epochs=2,
-        minibatch_interval=50,
-        fraction_validation=0.2,
-        fraction_test=0.2,
     )
     model.train()

@@ -1,7 +1,5 @@
 import logging
-import pickle
-import re
-from pathlib import Path
+from torch.nn import functional as F
 
 import h5py
 import numpy as np
@@ -13,19 +11,23 @@ class VelocimetryDataset(MultiSourceDataset):
     def __init__(self,
                  signal_window_size=128,
                  batch_size=64,
+                 sinterp: int = 1,
                  logger: logging.Logger | None = None,
                  **kwargs):
         """PyTorch dataset class to get the ELM data and corresponding velocimetry calculations.
         The signals are grouped by `signal_window_size` which stacks the time data points
-        and return a data chunk of size: (`signal_window_sizex8x8`). The dataset also returns the label which
+        and return a data chunk of size: (`signal_window_size x 8 * self.sinterp x 8 * self.sinterp`). The dataset also returns the label which
         corresponds to the label of the last time step of the chunk. Implements weak shuffling,
         i.e. each batch is sampled randomly, however, the data points within a batch are contiguous.
 
         :param data_location: Directory where velocimetry data is stored.
         :param signal_window_size: Signal window size.
         :param batch_size: Batch size.
+        :param sinterp: Spatial interpolation factor.
         :param logger: Logger object to log the dataset creation process.
         """
+
+        self.sinterp = 1 if not sinterp else sinterp
 
         if not logger:
             logger = logging.getLogger('__main__')
@@ -38,11 +40,23 @@ class VelocimetryDataset(MultiSourceDataset):
         if not self.dataset_to_ram:
             # used for __getitem__ when reading from HDF5
             self.hf2np_signals = np.empty((64, self.batch_size + self.signal_window_size - 1))
-            self.hf2np_vZ = np.empty((self.batch_size, 8, 8))
-            self.hf2np_vR = np.empty((self.batch_size, 8, 8))
+            self.hf2np_vZ = np.empty((self.batch_size, 8 * self.sinterp, 8 * self.sinterp))
+            self.hf2np_vR = np.empty((self.batch_size, 8 * self.sinterp, 8 * self.sinterp))
 
     def _get_from_hdf5(self, index):
         raise NotImplementedError('Can not get from hdf5.')
+
+    def _get_from_ram(self, index):
+        signals, labels = super(VelocimetryDataset, self)._get_from_ram(index)
+
+        s_shape = np.array(signals.shape)
+        s_shape[-2:] = s_shape[-2:] * self.sinterp
+        if self.sinterp:
+            signals = F.interpolate(signals.squeeze(), mode='bicubic', scale_factor=(self.sinterp, self.sinterp))
+            # signals = signals.clamp(min=0.0, max=10.0)
+            signals = signals.reshape(*s_shape)
+
+        return signals, labels
 
     def _get_f_lengths(self):
         """
