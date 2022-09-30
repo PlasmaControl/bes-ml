@@ -12,15 +12,21 @@ from bes_data.confinement_data_tools.dataset import ConfinementDataset
 try:
     from ..base.train_base import _Base_Trainer
     from ..base.sampler import RandomBatchSampler
-    from ..base.elm_data import MultiSourceDataset
+    from ..base.models import _Multi_Features_Model_Dataclass
+    from ..base.multisource_data import MultiSourceDataset, _MultiSource_Data_Base
 except ImportError:
-    from bes_ml.base.train_base import _Trainer_Base
+    from bes_ml.base.train_base import _Base_Trainer
     from bes_ml.base.sampler import RandomBatchSampler
-    from bes_ml.base.elm_data import MultiSourceDataset
+    from bes_ml.base.models import _Multi_Features_Model_Dataclass
+    from bes_ml.base.multisource_data import MultiSourceDataset, _MultiSource_Data_Base
 
 
 @dataclasses.dataclass(eq=False)
-class Trainer(_Base_Trainer):
+class Trainer(
+    _MultiSource_Data_Base,  # multi-source data
+    _Multi_Features_Model_Dataclass,  # NN model
+    _Base_Trainer,  # training and output
+):
     dataset_to_ram: bool = True # Load datasets to ram
     data_location: str = sample_data_dir / 'turbulence_data' #location of stored data
 
@@ -101,7 +107,6 @@ if __name__=='__main__':
     model = Trainer(
         batch_size=32,
         dense_num_kernels=8,
-        minibatch_print_interval=50,
         fraction_validation=0.2,
         fraction_test=0.2,
     )

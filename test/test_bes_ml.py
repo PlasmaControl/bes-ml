@@ -213,9 +213,9 @@ def test_elm_regression_cnn_features():
 def _common_analysis(analyzer: _Analyzer_Base):
     analyzer.plot_training(save=True)
     assert (analyzer.output_dir/'training.pdf').exists()
-    # analyzer.plot_inference(save=True)
-    # if analyzer.test_data is not None:
-    #     assert (analyzer.output_dir/'inference.pdf').exists()
+    analyzer.plot_inference(save=True)
+    if analyzer.test_data is not None:
+        assert (analyzer.output_dir/'inference.pdf').exists()
 
 
 if __name__=="__main__":

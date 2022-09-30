@@ -5,12 +5,26 @@ from pathlib import Path
 import logging
 import traceback
 from typing import Union
+import dataclasses
 
 import h5py
 import numpy as np
 import torch
 import torch.utils.data
 
+from bes_data.sample_data import sample_elm_data_file
+try:
+    from .train_base import _Base_Trainer_Dataclass
+    from .utilities import merge_pdfs
+except ImportError:
+    from bes_ml.base.train_base import _Base_Trainer_Dataclass
+    from bes_ml.base.utilities import merge_pdfs
+
+@dataclasses.dataclass(eq=False)
+class _MultiSource_Data_Base(_Base_Trainer_Dataclass):
+    batch_size: int = 64  # power of 2, like 16-128
+    fraction_validation: float = 0.2  # fraction of dataset for validation
+    fraction_test: float = 0.2  # fraction of dataset for testing
 
 class MultiSourceDataset(torch.utils.data.Dataset):
 
@@ -259,21 +273,3 @@ class MultiSourceDataset(torch.utils.data.Dataset):
 
     def _get_f_lengths(self):
         raise NotImplementedError
-
-# def elm_data_loader(
-#     dataset: ELM_Dataset = None,
-#     batch_size: int = 64,
-#     shuffle: bool = False,
-#     num_workers: int = 0,
-#     drop_last: bool = True,
-#     pin_memory: bool = True,
-# ) -> torch.utils.data.DataLoader:
-#     data_loader = torch.utils.data.DataLoader(
-#         dataset,
-#         batch_size=batch_size,
-#         shuffle=shuffle,
-#         num_workers=num_workers,
-#         pin_memory=pin_memory,
-#         drop_last=drop_last,
-#     )
-#     return data_loader

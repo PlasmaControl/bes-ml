@@ -258,8 +258,8 @@ class _Analyzer_Base(
                 _, axes = plt.subplots(ncols=3, nrows=2, figsize=(12, 6))
             plt.suptitle(f"{self.output_dir.resolve()}")
             plt.sca(axes.flat[i_elm % 6])
-            if self.is_classification:
-                signals = signals / np.max(signals)
+            # if self.is_classification:
+            #     signals = signals / np.max(signals)
             plt.plot(elm_time, signals, label="BES")
             plt.plot(elm_time, labels, label="Label")
             plt.plot(
