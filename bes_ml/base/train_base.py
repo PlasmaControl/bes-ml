@@ -116,11 +116,8 @@ class _Trainer_Base(_Multi_Features_Model_Dataclass):
     def _save_inputs_to_yaml(self):
         filename = Path(self.output_dir / self.inputs_file)
         self_fields_dict = dataclasses.asdict(self)
-        for skip_key in ['logger', 'trial']:
-            self_fields_dict.pop(skip_key)
+        self_fields_dict.pop('logger')
         for key in self_fields_dict:
-            if key in ['logger', 'trial']:
-                self_fields_dict.pop(key)
             if isinstance(self_fields_dict[key], Path):
                 self_fields_dict[key] = self_fields_dict[key].as_posix()
         with filename.open('w') as parameters_file:

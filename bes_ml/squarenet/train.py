@@ -7,6 +7,8 @@ from torch.utils.data import DataLoader, BatchSampler
 
 from bes_data.sample_data import sample_data_dir
 from bes_data.velocimetry_data_tools.dataset import VelocimetryDataset
+from .models.squarenet import SquareNet
+
 try:
     from ..base.data import MultiSourceDataset
     from ..base.train_base import _Trainer_Base
@@ -21,18 +23,20 @@ except ImportError:
 class Trainer(_Trainer_Base):
     data_location: Union[Path,str] = sample_data_dir / 'velocimetry_data' #location of stored data
     dataset_to_ram: bool = True # Load datasets to ram
-    sinterp: int = 1
+    sinterp: int = 5
+
     # __init__ must have exact copy of all kwargs from parent class
     def __post_init__(self):
 
         self.mlp_output_size = 128
+        self.signal_window_size = 2
 
         super().__post_init__()
 
         self.is_regression = True
         self.is_classification = not self.is_regression
         self.velocimetry_dataset = None
-        self.make_model_and_set_device()
+        self.model = SquareNet()
         self.finish_subclass_initialization()
 
     def _get_valid_indices(self, *args, **kwargs) -> None:
@@ -104,6 +108,10 @@ class Trainer(_Trainer_Base):
 
 if __name__=='__main__':
     model = Trainer(
+        data_location='/home/jazimmerman/PycharmProjects/bes-edgeml-models/bes-edgeml-work/velocimetry/data',
+        output_dir='/home/jazimmerman/PycharmProjects/bes-edgeml-models/bes-edgeml-work/velocimetry/squarenet_test',
+        device='cuda',
+        sinterp=5,
         dense_num_kernels=8,
         batch_size=64,
         n_epochs=2,
