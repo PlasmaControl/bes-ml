@@ -276,6 +276,7 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
             sample_indices=self.train_data[2],
             signal_window_size = self.signal_window_size,
             prediction_horizon=prediction_horizon,
+            device=self.device,
         )
 
         if self.validation_data:
@@ -285,6 +286,7 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
                 sample_indices=self.validation_data[2],
                 signal_window_size = self.signal_window_size,
                 prediction_horizon=prediction_horizon,
+                device=self.device,
             )
         else:
             self.validation_dataset = None
@@ -303,7 +305,7 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
                 batch_size=self.batch_size,
                 shuffle=True if self.seed is None else False,
                 num_workers=self.num_workers,
-                pin_memory=True,
+                pin_memory=True if 'cpu' in self.device.type else False,
                 drop_last=True,
             )
         if self.validation_dataset:
@@ -312,7 +314,7 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
                     batch_size=self.batch_size,
                     shuffle=False,
                     num_workers=self.num_workers,
-                    pin_memory=True,
+                    pin_memory=True if 'cpu' in self.device.type else False,
                     drop_last=True,
                 )
 
@@ -327,23 +329,24 @@ class ELM_Dataset(torch.utils.data.Dataset):
         sample_indices: np.ndarray = None, 
         signal_window_size: int = None,
         prediction_horizon: int = 0,  # =0 for time-to-ELM regression; >=0 for classification prediction
+        device: torch.device = None,
     ) -> None:
-        self.signals = torch.unsqueeze(torch.from_numpy(signals), 0)
+        self.signals = torch.unsqueeze(torch.from_numpy(signals), 0).to(device)
         assert (
             self.signals.ndim == 4 and 
             self.signals.shape[0] == 1 and 
             self.signals.shape[2] == 8 and 
             self.signals.shape[3] == 8
         ), "Signals have incorrect shape"
-        self.labels = torch.from_numpy(labels)
+        self.labels = torch.from_numpy(labels).to(device)
         assert self.labels.ndim == 1, "Labels have incorrect shape"
         assert self.labels.shape[0] == self.signals.shape[1], "Labels and signals have different time dimensions"
-        self.sample_indices = sample_indices
-        self.signal_window_size = signal_window_size
-        self.prediction_horizon = prediction_horizon
+        self.sample_indices = torch.from_numpy(sample_indices).to(device)
+        self.signal_window_size = torch.tensor(signal_window_size, dtype=torch.int).to(device)
+        self.prediction_horizon = torch.tensor(prediction_horizon, dtype=torch.int).to(device)
 
-    def __len__(self):
-        return self.sample_indices.size
+    def __len__(self) -> int:
+        return self.sample_indices.size(dim=0)
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         time_idx = self.sample_indices[idx]
