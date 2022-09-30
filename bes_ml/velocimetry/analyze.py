@@ -212,7 +212,7 @@ class Analyzer(_Analyzer_Base):
 
 
 if __name__ == '__main__':
-    output_dir = 'cnn2048_spatial3_time2_dense1024_sws4_epochs100'
+    output_dir = 'cnn2048_spatial3_time2_dense0_sws4_epochs250'
     analyzer = Analyzer(
         output_dir=f'/home/jazimmerman/PycharmProjects/bes-edgeml-models/bes-edgeml-work/velocimetry/{output_dir}')
     analyzer.plot_training(save=True)

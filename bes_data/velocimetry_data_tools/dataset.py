@@ -11,7 +11,7 @@ class VelocimetryDataset(MultiSourceDataset):
     def __init__(self,
                  signal_window_size=128,
                  batch_size=64,
-                 sinterp: int = 0,
+                 sinterp: int = 1,
                  logger: logging.Logger | None = None,
                  **kwargs):
         """PyTorch dataset class to get the ELM data and corresponding velocimetry calculations.
@@ -27,7 +27,7 @@ class VelocimetryDataset(MultiSourceDataset):
         :param logger: Logger object to log the dataset creation process.
         """
 
-        self.sinterp = sinterp
+        self.sinterp = 1 if not sinterp else sinterp
 
         if not logger:
             logger = logging.getLogger('__main__')

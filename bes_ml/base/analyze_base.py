@@ -52,7 +52,7 @@ class _Analyzer_Base(
         for i_field, field_name in enumerate([field.name for field in fields]):
             if field_name == 'logger':
                 fields.pop(i_field)
-        model_kwargs = {field.name: self.inputs[field.name] for field in fields}
+        model_kwargs = {field.name: self.inputs.get(field.name, None) for field in fields}
         self.model = Multi_Features_Model(**model_kwargs)
         self.model = self.model.to(self.device)
         self._load_model_parameters()

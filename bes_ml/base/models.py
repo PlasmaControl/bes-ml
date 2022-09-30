@@ -73,6 +73,7 @@ class _Base_Features(nn.Module, _Base_Features_Dataclass):
 
         self.num_kernels = None  # set in subclass
         self.conv = None  # set in subclass
+        self.sinterp = 1 if not self.sinterp else self.sinterp
 
     def _time_interval_and_maxpool(self, x: torch.Tensor) -> torch.Tensor:
         if self.time_interval > 1:

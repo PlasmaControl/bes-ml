@@ -104,10 +104,10 @@ class Trainer(_Trainer_Base):
 
 
 if __name__=='__main__':
-    n_epochs = 250
-    t_size = 3
+    n_epochs = 50
+    t_size = 2
     s_size = 3
-    sws = 4
+    sws = 2
     dense_num = 0
     cnn_l1_num = 512
     model = Trainer(
