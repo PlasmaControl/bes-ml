@@ -32,6 +32,7 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
     max_elms: int = None
     num_workers: int = 0  # number of subprocess workers for pytorch dataloader
     label_type: np.dtype = dataclasses.field(default=None, init=False)
+    bad_elm_indices: Iterable = None  # iterable of ELM indices to skip when reading data
 
     def _prepare_data(self) -> None:
 
@@ -55,11 +56,19 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
         self.logger.info(f"Data file: {self.data_location}")
 
         with h5py.File(self.data_location, "r") as data_file:
+            if not self.bad_elm_indices:
+                self.bad_elm_indices = []
+            good_keys = []
+            for key in data_file:
+                if int(key) not in self.bad_elm_indices:
+                    good_keys.append(key)
+                else:
+                    self.logger.info(f"  Skipping bad ELM index {int(key)}")
             elm_indices = np.array(
-                [int(key) for key in data_file], 
+                [int(key) for key in good_keys],
                 dtype=int,
             )
-            time_frames = sum([data_file[key]['time'].shape[0] for key in data_file])
+            time_frames = sum([data_file[key]['time'].shape[0] for key in good_keys])
         self.logger.info(f"ELM events in data file: {elm_indices.size}")
         self.logger.info(f"Total time frames: {time_frames:,}")
 
