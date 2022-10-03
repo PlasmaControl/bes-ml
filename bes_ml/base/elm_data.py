@@ -1,6 +1,6 @@
 from pathlib import Path
 import dataclasses
-from typing import Iterable, Tuple
+from typing import Union,Iterable, Tuple
 import pickle
 
 import numpy as np
@@ -21,7 +21,7 @@ except ImportError:
 
 @dataclasses.dataclass(eq=False)
 class _ELM_Data_Base(_Base_Trainer_Dataclass):
-    data_location: Path = sample_elm_data_file  # path to data; dir or file depending on task
+    data_location: Union[Path,str] = sample_elm_data_file  # path to data; dir or file depending on task
     batch_size: int = 64  # power of 2, like 16-128
     fraction_validation: float = 0.2  # fraction of dataset for validation
     fraction_test: float = 0.2  # fraction of dataset for testing

@@ -207,7 +207,9 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                 self.loss_function = torch.nn.CrossEntropyLoss(reduction="none")
         best_score = -np.inf
 
-        self.logger.info(f"Batches per epoch {len(self.train_data_loader)}")
+        self.logger.info(f"Training batches per epoch {len(self.train_data_loader)}")
+        if self.validation_data_loader:
+            self.logger.info(f"Validation batches per epoch {len(self.validation_data_loader)}")
         self.logger.info(f"Begin training loop over {self.n_epochs} epochs")
         t_start_training = time.time()
         valid_loss = valid_score = valid_roc = None
@@ -353,7 +355,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             mode = 'Valid'
         with context:
             for i_batch, (signal_windows, labels) in enumerate(data_loader):
-                if (i_batch+1) % self.minibatch_print_interval == 0:
+                if i_batch % self.minibatch_print_interval == 0:
                     t_start_minibatch = time.time()
                 if is_train:
                     self.optimizer.zero_grad()
