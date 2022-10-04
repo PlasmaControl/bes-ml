@@ -10,17 +10,23 @@ from bes_data.sample_data import sample_data_dir
 from bes_data.confinement_data_tools.dataset import ConfinementDataset
 
 try:
-    from ..base.train_base import _Trainer_Base
+    from ..base.train_base import _Base_Trainer
     from ..base.sampler import RandomBatchSampler
-    from ..base.data import MultiSourceDataset
+    from ..base.models import _Multi_Features_Model_Dataclass
+    from ..base.multisource_data import MultiSourceDataset, _MultiSource_Data_Base
 except ImportError:
-    from bes_ml.base.train_base import _Trainer_Base
+    from bes_ml.base.train_base import _Base_Trainer
     from bes_ml.base.sampler import RandomBatchSampler
-    from bes_ml.base.data import MultiSourceDataset
+    from bes_ml.base.models import _Multi_Features_Model_Dataclass
+    from bes_ml.base.multisource_data import MultiSourceDataset, _MultiSource_Data_Base
 
 
 @dataclasses.dataclass(eq=False)
-class Trainer(_Trainer_Base):
+class Trainer(
+    _MultiSource_Data_Base,  # multi-source data
+    _Multi_Features_Model_Dataclass,  # NN model
+    _Base_Trainer,  # training and output
+):
     dataset_to_ram: bool = True # Load datasets to ram
     data_location: str = sample_data_dir / 'turbulence_data' #location of stored data
 
@@ -35,7 +41,7 @@ class Trainer(_Trainer_Base):
         self.is_classification = not self.is_regression
         self.turbulence_dataset = None
 
-        self.make_model_and_set_device()
+        self._make_model()
         self.finish_subclass_initialization()
 
 
@@ -74,7 +80,7 @@ class Trainer(_Trainer_Base):
 
 
     def _create_data_class_inputs(self, locals_copy: dict = None) -> dict:
-        assert self.__class__ is not _Trainer_Base
+        assert self.__class__ is not _Base_Trainer
         kwargs_for_data_class = {}
         for cls in [ConfinementDataset, MultiSourceDataset]:
             class_parameters = inspect.signature(cls).parameters
@@ -101,7 +107,6 @@ if __name__=='__main__':
     model = Trainer(
         batch_size=32,
         dense_num_kernels=8,
-        minibatch_interval=50,
         fraction_validation=0.2,
         fraction_test=0.2,
     )

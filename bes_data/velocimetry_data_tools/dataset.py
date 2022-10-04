@@ -6,14 +6,14 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from bes_ml.base.data import MultiSourceDataset
+from bes_ml.base.elm_data import MultiSourceDataset
 
 
 class VelocimetryDataset(MultiSourceDataset):
     def __init__(self,
                  signal_window_size=128,
                  batch_size=64,
-                 logger: logging.Logger | None = None,
+                 logger: logging.Logger = None,
                  **kwargs):
         """PyTorch dataset class to get the ELM data and corresponding velocimetry calculations.
         The signals are grouped by `signal_window_size` which stacks the time data points

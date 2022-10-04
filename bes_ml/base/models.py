@@ -1,10 +1,15 @@
+import io
 import logging
+from pathlib import Path
+import sys
+from typing import Union, Iterable
 import inspect
 import dataclasses
 
 import numpy as np
 import torch
 import torch.nn as nn
+import torchinfo
 import pywt
 from pytorch_wavelets.dwt.transform1d import DWT1DForward
 
@@ -20,7 +25,8 @@ class _Base_Features_Dataclass():
     spatial_maxpool_size: int = 1  # 1 (default, no spatial maxpool), 2, or 4
     time_interval: int = 1  # time domain slice interval (i.e. time[::interval])
     subwindow_size: int = -1  # power of 2, or -1 (default) for full signal window
-    negative_slope: float = 1e-3  # relu negative slope; ~1e-3
+    activation_name: str = 'LeakyReLU'  # activation function in torch.nn like `LeakyReLu` or `SiLu`
+    leakyrelu_negative_slope: float = 1e-3  # leaky relu negative slope; ~1e-3
     dropout_rate: float = 0.1  # ~0.1
     logger: logging.Logger = None
 
@@ -29,7 +35,7 @@ class _Base_Features_Dataclass():
 class _Base_Features(nn.Module, _Base_Features_Dataclass):
 
     def __post_init__(self):
-        super().__init__()
+        super().__init__()  # nn.Module.__init__()
 
         if self.logger is None:
             self.logger = logging.getLogger(__name__)
@@ -60,7 +66,11 @@ class _Base_Features(nn.Module, _Base_Features_Dataclass):
         self.subwindow_nbins = self.time_points // self.subwindow_size
         assert self.subwindow_nbins >= 1
         
-        self.relu = nn.LeakyReLU(negative_slope=self.negative_slope)
+        self.activation_function = getattr(nn, self.activation_name)
+        if self.activation_name == 'LeakyReLu':
+            self.activation = self.activation_function(negative_slope=self.leakyrelu_negative_slope)
+        else:
+            self.activation = self.activation_function()
         self.dropout = nn.Dropout3d(p=self.dropout_rate)
 
         self.num_kernels = None  # set in subclass
@@ -74,7 +84,7 @@ class _Base_Features(nn.Module, _Base_Features_Dataclass):
         return x
 
     def _dropout_relu_flatten(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.flatten(self.relu(self.dropout(x)), 1)
+        return torch.flatten(self.activation(self.dropout(x)), 1)
 
 
 @dataclasses.dataclass(eq=False)
@@ -109,22 +119,25 @@ class Dense_Features(_Dense_Features_Dataclass, _Base_Features):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self._time_interval_and_maxpool(x)
-        x_new_size = [
-            x.shape[0],
-            self.dense_num_kernels,
-            self.subwindow_nbins,
-            1,
-            1,
-        ]
-        x_new = torch.empty(size=x_new_size, dtype=x.dtype, device=x.device)
-        for i_bin in range(self.subwindow_nbins):
-            i_start = i_bin * self.subwindow_size
-            i_stop = (i_bin+1) * self.subwindow_size
-            if torch.any(torch.isnan(self.conv[i_bin].weight)) or torch.any(torch.isnan(self.conv[i_bin].bias)):
-                assert False
-            x_new[:, :, i_bin:i_bin+1, :, :] = self.conv[i_bin](
-                x[:, :, i_start:i_stop, :, :]
-            )
+        if self.subwindow_nbins == 1:
+            x_new = self.conv[0](x)
+        else:
+            x_new_size = [
+                x.shape[0],
+                self.dense_num_kernels,
+                self.subwindow_nbins,
+                1,
+                1,
+            ]
+            x_new = torch.empty(size=x_new_size, dtype=x.dtype, device=x.device)
+            for i_bin in range(self.subwindow_nbins):
+                i_start = i_bin * self.subwindow_size
+                i_stop = (i_bin+1) * self.subwindow_size
+                # if torch.any(torch.isnan(self.conv[i_bin].weight)) or torch.any(torch.isnan(self.conv[i_bin].bias)):
+                #     assert False
+                x_new[:, :, i_bin:i_bin+1, :, :] = self.conv[i_bin](
+                    x[:, :, i_start:i_stop, :, :]
+                )
         x = self._dropout_relu_flatten(x_new)
         return x
 
@@ -245,9 +258,9 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
 
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.relu(self.dropout(self.layer1_conv(x)))
+        x = self.activation(self.dropout(self.layer1_conv(x)))
         x = self.layer1_maxpool(x)
-        x = self.relu(self.dropout(self.layer2_conv(x)))
+        x = self.activation(self.dropout(self.layer2_conv(x)))
         x = self.layer2_maxpool(x)
         return torch.flatten(x, 1)
 
@@ -499,8 +512,9 @@ class _Multi_Features_Model_Dataclass(
     _DCT_Features_Dataclass,
     _DWT_Features_Dataclass,
 ):
-    mlp_layer1_size: int = 32  # multi-layer perceptron (mlp)
-    mlp_layer2_size: int = 16
+    # mlp_layer1_size: int = 32  # multi-layer perceptron (mlp)
+    # mlp_layer2_size: int = 16
+    mlp_hidden_layers: Iterable = (32, 16)  # size and number of MLP hidden layers
     mlp_output_size: int = 1
 
 
@@ -508,7 +522,7 @@ class _Multi_Features_Model_Dataclass(
 class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
 
     def __post_init__(self):
-        super().__init__()
+        super().__init__()  # nn.Module.__init__()
 
         assert (
             self.dense_num_kernels == 0 and
@@ -559,28 +573,40 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
             feature_kwargs = get_feature_class_parameters(CNN_Features)
             self.cnn_features = CNN_Features(**feature_kwargs)
 
-        self.total_features = 0
-        for features in [
-            self.dense_features,
-            self.fft_features,
-            self.dwt_features,
-            self.dct_features,
-            self.cnn_features,
-        ]:
-            if features is None:
-                continue
-            self.total_features += features.num_kernels * features.subwindow_nbins
+        self.total_features = sum(
+            [
+                features.num_kernels * features.subwindow_nbins
+                for features in [
+                    self.dense_features,
+                    self.fft_features,
+                    self.dwt_features,
+                    self.dct_features,
+                    self.cnn_features,
+                ]
+                if features is not None
+            ]
+        )
         self.logger.info(f"Total features: {self.total_features}")
 
-        self.mlp_layer1 = nn.Linear(in_features=self.total_features, out_features=self.mlp_layer1_size)
-        self.mlp_layer2 = nn.Linear(in_features=self.mlp_layer1_size, out_features=self.mlp_layer2_size)
-        self.mlp_layer3 = nn.Linear(in_features=self.mlp_layer2_size, out_features=self.mlp_output_size)
-        self.logger.info(f"MLP layer 1 size: {self.mlp_layer1_size}")
-        self.logger.info(f"MLP layer 2 size: {self.mlp_layer2_size}")
+        hidden_layers = []
+        in_features = self.total_features  #  features are input layer to MLP
+        for i_layer, layer_size in enumerate(self.mlp_hidden_layers):
+            hidden_layers.append(
+                nn.Linear(in_features=in_features, out_features=layer_size)
+            )
+            in_features = layer_size
+            self.logger.info(f"MLP layer {i_layer+1} size: {layer_size}")
+        self.hidden_layers = nn.ModuleList(hidden_layers)
+
+        self.output_layer = nn.Linear(in_features=in_features, out_features=self.mlp_output_size)
         self.logger.info(f"MLP output size: {self.mlp_output_size}")
 
+        self.activation_function = getattr(nn, self.activation_name)
+        if self.activation_name == 'LeakyReLu':
+            self.activation = self.activation_function(negative_slope=self.leakyrelu_negative_slope)
+        else:
+            self.activation = self.activation_function()
         self.dropout = nn.Dropout(p=self.dropout_rate)
-        self.relu = nn.LeakyReLU(negative_slope=self.negative_slope)
 
     def forward(self, x):
         dense_features = self.dense_features(x) if self.dense_features else None
@@ -596,12 +622,48 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
         ]
 
         x = torch.cat(all_features, dim=1)
-
-        x = self.relu(self.dropout(self.mlp_layer1(x)))
-        x = self.relu(self.dropout(self.mlp_layer2(x)))
-        x = self.mlp_layer3(x)
+        for hidden_layer in self.hidden_layers:
+            x = self.activation(self.dropout(hidden_layer(x)))
+        x = self.output_layer(x)
 
         return x
+
+    def save_pytorch_model(self, filename: Union[Path,str] = None) -> None:
+        filename = Path(filename)
+        torch.save(self.state_dict(), filename.as_posix())
+        self.logger.info(f"  Saved model: {filename}  file size: {filename.stat().st_size/1e3:.1f} kB")
+
+    def save_onnx_model(self, filename: Union[Path,str] = None) -> None:
+        filename = Path(filename)
+        torch.onnx.export(
+            model=self, 
+            args=torch.rand(1, 1, self.signal_window_size, 8, 8),
+            f=filename.as_posix(),
+            input_names=['signal_window'],
+            output_names=['prediction'],
+            opset_version=11,
+        )
+        self.logger.info(f"  Saved ONNX model: {filename}  file size: {filename.stat().st_size/1e3:.1f} kB")
+
+    def print_model_summary(self) -> None:
+        self.logger.info("MODEL SUMMARY")
+        input_shape = (1, 1, self.signal_window_size, 8, 8)
+
+        # catpure torchinfo.summary() output
+        tmp_io = io.StringIO()
+        sys.stdout = tmp_io
+        print()
+        torchinfo.summary(self, input_size=input_shape, device=torch.device('cpu'))
+        sys.stdout = sys.__stdout__
+        self.logger.info(tmp_io.getvalue())
+        # print model summary
+        n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        self.logger.info(f"Model contains {n_params} trainable parameters")
+        test_input = torch.rand(*input_shape).to(torch.device('cpu'))
+        self.logger.info(f'Single input size: {test_input.shape}')
+        test_output = self(test_input)
+        self.logger.info(f"Single output size: {test_output.shape}")
+
 
 
 if __name__=='__main__':
