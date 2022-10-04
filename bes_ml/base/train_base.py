@@ -40,7 +40,7 @@ class _Base_Trainer_Dataclass:
     device: str = 'auto'  # auto (default), cpu, cuda, or cuda:X
     n_epochs: int = 2  # training epochs
     minibatch_print_interval: int = 2000  # print minibatch info
-    optimizer_type: str = 'adam'  # adam (default) or sgd
+    optimizer_type: str = 'sgd'  # adam (default) or sgd
     sgd_momentum: float = 0.0  # momentum for SGD optimizer
     sgd_dampening: float = 0.0  # dampening for SGD optimizer
     learning_rate: float = 1e-3  # optimizer learning rate
