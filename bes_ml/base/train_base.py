@@ -44,7 +44,7 @@ class _Base_Trainer_Dataclass:
     sgd_momentum: float = 0.0  # momentum for SGD optimizer
     sgd_dampening: float = 0.0  # dampening for SGD optimizer
     learning_rate: float = 1e-3  # optimizer learning rate
-    lr_scheduler_patience: int = 4  # epochs to wait before triggering lr scheduler
+    lr_scheduler_patience: int = 100  # epochs to wait before triggering lr scheduler
     lr_scheduler_factor: float = 0.5  # reduction factor for lr scheduler
     lr_scheduler_threshold: float = 1e-3  # lr scheduler will trigger if loss does not decrease below 1-threshold
     weight_decay: float = 5e-3  # optimizer L2 regularization factor

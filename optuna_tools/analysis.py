@@ -70,9 +70,10 @@ def merge_pdfs(
 
 def plot_study(
         study_dir: Union[Path, str],  # study dir. or db file
-        # plot_top_trials=False,
-        save=False,
-        use_train_loss = False,
+        save: bool = False,
+        metric: str = 'train_loss',
+        use_last: bool = True,  # use last metric, not extremum
+        quantile: float = None,
 ):
     study_dir = Path(study_dir).resolve()
     study = open_study(study_dir)
@@ -83,43 +84,46 @@ def plot_study(
             optuna.trial.TrialState.PRUNED,
         ),
     )
-
-    if use_train_loss:
-        attr_name = 'train_loss'
-        attr_dir = np.min
-    else:
-        attr_name = 'scores'
-        attr_dir = np.max
-
-    # if not trials[0].user_attrs['scores']:
-    #     for i_trial in range(len(trials)):
-    #         trials[i_trial].user_attrs['scores'] = -1 * np.array(trials[i_trial].user_attrs['train_loss'])
-
-    # sort trials by max score during training
-    trials = sorted(
-        trials,
-        key=lambda trial: attr_dir(trial.user_attrs[attr_name]),
-    )
-    if attr_name == 'scores':
-        trials.reverse()
-    values = np.array([attr_dir(trial.user_attrs[attr_name]) for trial in trials])
     print(f'Completed trials: {len(trials)}')
 
-    # subset of top trials
-    top_quantile = np.quantile(values, 0.0)
-    top_trials = [trial for i_trial, trial in enumerate(trials) if values[i_trial] >= top_quantile]
-    top_values = np.array([values[i_trial] for i_trial in range(len(top_trials))])
-    # top_values = np.array([np.max(trial.user_attrs['scores']) for trial in top_trials])
-    # print(f'Trials with max score >= {top_quantile:.2f}: {len(top_trials)}')
-    #
-    # for i_trial, trial in enumerate(top_trials[:10]):
-    #     print(f"  Trial {trial.number}  Max value: {top_values[i_trial]:.4f}"
-    #           f"  Epochs: {len(trial.user_attrs['scores'])}  State {trial.state}")
+    if use_last:
+        key = lambda trial: trial.user_attrs[metric][-1]
+    else:
+        if 'score' in metric:
+            key = lambda trial: np.max(trial.user_attrs[metric])
+        else:
+            key = lambda trial: np.min(trial.user_attrs[metric])
 
-    top_trial = top_trials[0]
-    top_value = top_values[0]
-    top_trial_dir = (study_dir / f'trial_{top_trial.number:04d}').resolve()
-    print(f'Top trial {top_trial.number}  Max value: {top_value:.4f}  Dir: {top_trial_dir}')
+    # sort trials by key
+    trials = sorted(trials, key=key)
+    if 'score' in metric:
+        trials.reverse()
+
+    values = np.array([key(trial) for trial in trials])
+
+    if quantile is not None:
+        if 'loss' in metric:
+            quantile = 1-quantile
+        quantile = np.quantile(values, quantile)
+        if 'score' in metric:
+            trials = [trial for trial, value in zip(trials, values) if value >= quantile]
+        else:
+            trials = [trial for trial, value in zip(trials, values) if value <= quantile]
+        values = np.array([key(trial) for trial in trials])
+
+    # subset of top trials
+    # top_quantile = np.quantile(values, 0.0)
+    # trials = [trial for i_trial, trial in enumerate(trials) if values[i_trial] >= top_quantile]
+    # values = np.array([values[i_trial] for i_trial in range(len(trials))])
+
+    print("Top trials")
+    for i_trial, trial in enumerate(trials[0:10]):
+        print(f"  Trial {trial.number}  {metric} {values[i_trial]:.4g}")
+
+    # top_trial = trials[0]
+    # top_value = values[0]
+    # top_trial_dir = (study_dir / f'trial_{top_trial.number:04d}').resolve()
+    # print(f'Top trial {top_trial.number}  Max value: {top_value:.4f}  Dir: {top_trial_dir}')
 
     params = tuple(trials[-1].params.keys())
     n_params = len(params)
@@ -129,17 +133,17 @@ def plot_study(
     _, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(ncols * 3.125, nrows * 2))
 
     for i_param, param in enumerate(params):
-        param_values = np.array([(trial.params[param] if param in trial.distributions else 0) for trial in top_trials])
+        param_values = np.array([(trial.params[param] if param in trial.distributions else 0) for trial in trials])
         plt.sca(axes.flat[i_param])
         sns.violinplot(
             x=param_values,
-            y=top_values,
+            y=values,
             inner='stick',
             scale='count',
-            bw=0.5,
+            bw=0.2,
         )
         plt.xlabel(param)
-    plt.suptitle(f"{study_dir.as_posix()} | {len(trials)} trials | Max score {top_value:.3f}")
+    plt.suptitle(f"{study_dir.as_posix()} | {len(trials)} trials | Best {metric} {values[0]:.3f}")
     plt.tight_layout()
 
     if save:
@@ -195,9 +199,9 @@ def summarize_study(
             optuna.trial.TrialState.PRUNED,
         ]:
             tmp += f"  ep {len(trial.user_attrs['train_loss'])}"
-            tmp += f"  loss {trial.user_attrs['train_loss'][-1]:.4f}"
-            if trial.user_attrs['scores']:
-                tmp += f"  score {trial.user_attrs['scores'][-1]:.4f}"
+            tmp += f"  train_loss {trial.user_attrs['train_loss'][-1]:.4f}"
+            if trial.user_attrs['valid_score']:
+                tmp += f"  valid_score {trial.user_attrs['valid_score'][-1]:.4f}"
         print(tmp)
 
     print(f"Total trials: {len(trials)}")
@@ -225,11 +229,11 @@ def summarize_study(
 if __name__ == '__main__':
     plt.close('all')
 
-    study_dir = Path.home() / 'edgeml/scratch/study_logreg_cnn_v02'
+    study_dir = Path.home() / 'edgeml/scratch/study_reg_cnn_v03'
 
-    summarize_study(study_dir)
+    # summarize_study(study_dir)
 
-    plot_study(study_dir, use_train_loss=True)
+    plot_study(study_dir, metric='valid_loss', quantile=0.8)
 
     # plot_top_trials(study_dir, use_train_loss=True, n_trials=4)
 

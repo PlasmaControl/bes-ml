@@ -47,15 +47,16 @@ def run_optuna(
         db_name: str,
         n_gpus: int,
         n_workers_per_gpu: int,
-        n_trials_per_worker: int,
-        n_epochs: int,
         objective_func: Callable,
         trainer_class: Callable,
-        sampler_startup_trials: int,  # random startup trials before activating sampler
-        pruner_startup_trials: int,  # startup trials before pruning
-        pruner_warmup_epochs: int,  # initial epochs before pruning
-        pruner_minimum_trials_at_epoch: int,  # minimum trials at each epoch before pruning
-        pruner_patience: int,  # epochs to wait for improvement before pruning
+        analyzer_class: Callable = None,
+        n_epochs: int = 10,
+        n_trials_per_worker: int = 1000,
+        sampler_startup_trials: int = 1000,  # random startup trials before activating sampler
+        pruner_startup_trials: int = 1000,  # startup trials before pruning
+        pruner_warmup_epochs: int = 10,  # initial epochs before pruning
+        pruner_minimum_trials_at_epoch: int = 20,  # minimum trials at each epoch before pruning
+        pruner_patience: int = 10,  # epochs to wait for improvement before pruning
         run_on_cpu: bool = False,  # if True, run on CPUs with multiprocessing
         maximize_score: bool = True,  #  True (default) to maximize validation score; False to minimize training loss
         fail_stale_trials: bool = False,  # if True, fail any stale trials
@@ -106,6 +107,7 @@ def run_optuna(
         'n_epochs': n_epochs,
         'objective_func': objective_func,
         'trainer_class': trainer_class,
+        'analyzer_class': analyzer_class,
         'sampler_startup_trials': sampler_startup_trials,
         'pruner_startup_trials': pruner_startup_trials,
         'pruner_warmup_epochs': pruner_warmup_epochs,
@@ -154,6 +156,7 @@ def subprocess_worker(
     n_epochs: int,
     objective_func: Callable,
     trainer_class: Callable,
+    analyzer_class: Callable,
     sampler_startup_trials: int,
     pruner_startup_trials: int,
     pruner_warmup_epochs: int,
@@ -195,6 +198,7 @@ def subprocess_worker(
             n_epochs=n_epochs,
             objective_func=objective_func,
             trainer_class=trainer_class,
+            analyzer_class=analyzer_class,
             maximize_score=maximize_score,
         )
 
@@ -213,6 +217,7 @@ def launch_trial(
         n_epochs: int,
         objective_func: Callable,
         trainer_class: Callable,
+        analyzer_class: Callable,
         maximize_score: bool,
 ) -> float:
 
@@ -238,7 +243,7 @@ def launch_trial(
             print(f'  Model input: {key}, value: {value}')
 
         trainer = trainer_class(
-            trial=trial,
+            optuna_trial=trial,
             **input_kwargs,
         )
 
@@ -247,10 +252,14 @@ def launch_trial(
     sys.stdout = sys.__stdout__
     sys.stderr = sys.__stderr__
 
+    if analyzer_class is not None:
+        analysis = analyzer_class(output_dir=input_kwargs['output_dir'])
+        analysis.plot_training(save=True)
+
     if maximize_score:
-        result = np.max(outputs['scores'])
+        result = outputs['valid_score'][-1]
     else:
-        result = np.min(outputs['train_loss'])
+        result = outputs['train_loss'][-1]
 
     return result
 
@@ -261,9 +270,8 @@ def study_test(
     input_kwargs = {
         'fraction_test': 0.0,
         'fraction_validation': 0.0,
-        'max_elms':5,
-        'log_time': True,
-        'inverse_weight_label': True,
+        'log_time': False,
+        'inverse_weight_label': False,
         'learning_rate': 10 ** trial.suggest_int('lr_exp', -6, -2),
         'cnn_layer1_num_kernels': 10 * trial.suggest_int('cnn_layer1_num_kernels_factor_10', 1, 8),
         'cnn_layer2_num_kernels': 5 * trial.suggest_int('cnn_layer2_num_kernels_factor_5', 1, 8),
@@ -275,10 +283,10 @@ if __name__ == '__main__':
 
     run_optuna(
         db_name=study_test.__name__,
-        n_gpus=1,  # <=2 for head node, <=4 for compute node, ==1 if run_on_cpu
+        n_gpus=2,  # <=2 for head node, <=4 for compute node, ==1 if run_on_cpu
         n_workers_per_gpu=2,  # max 3 for V100
-        n_trials_per_worker=3,
-        n_epochs=4,
+        n_trials_per_worker=5,
+        n_epochs=8,
         objective_func=study_test,
         trainer_class=elm_regression.Trainer,
         sampler_startup_trials=60,
@@ -286,7 +294,7 @@ if __name__ == '__main__':
         pruner_warmup_epochs=6,
         pruner_minimum_trials_at_epoch=20,
         pruner_patience=4,
-        run_on_cpu=True,
+        run_on_cpu=False,
         maximize_score=False,
         constant_liar=True,
     )
