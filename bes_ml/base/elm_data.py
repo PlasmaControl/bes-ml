@@ -11,6 +11,7 @@ import yaml
 import matplotlib.pyplot as plt
 
 from bes_data.sample_data import sample_elm_data_file
+from bes_data.elm_data_tools import bad_elm_indices_csv
 try:
     from .train_base import _Base_Trainer_Dataclass
     from .utilities import merge_pdfs
@@ -33,6 +34,7 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
     num_workers: int = 0  # number of subprocess workers for pytorch dataloader
     label_type: np.dtype = dataclasses.field(default=None, init=False)
     bad_elm_indices: Iterable = None  # iterable of ELM indices to skip when reading data
+    bad_elm_indices_csv: str = None  # CSV file to read bad ELM indices
 
     def _prepare_data(self) -> None:
 
@@ -56,8 +58,14 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
         self.logger.info(f"Data file: {self.data_location}")
 
         with h5py.File(self.data_location, "r") as data_file:
-            if not self.bad_elm_indices:
+            if self.bad_elm_indices is None:
                 self.bad_elm_indices = []
+            if self.bad_elm_indices_csv is True:
+                self.bad_elm_indices_csv = bad_elm_indices_csv
+            if self.bad_elm_indices_csv:
+                print(f"Reading bad ELM indices from {self.bad_elm_indices_csv}")
+                with Path(self.bad_elm_indices_csv).open() as file:
+                    self.bad_elm_indices = [int(line) for line in file]
             good_keys = []
             for key in data_file:
                 if int(key) not in self.bad_elm_indices:

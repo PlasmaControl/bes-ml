@@ -118,6 +118,5 @@ class Trainer(
 if __name__=='__main__':
     model = Trainer(
         dense_num_kernels=8,
-        # bad_elm_indices=[77, 2405, 5296, 7495, 3261, 3637],
     )
     model.train()
