@@ -229,11 +229,11 @@ def summarize_study(
 if __name__ == '__main__':
     plt.close('all')
 
-    study_dir = Path.home() / 'edgeml/scratch/study_reg_cnn_v03'
+    study_dir = Path.home() / 'edgeml/scratch/study_reg_cnn_v07'
 
-    # summarize_study(study_dir)
+    summarize_study(study_dir)
 
-    plot_study(study_dir, metric='valid_loss', quantile=0.8)
+    plot_study(study_dir, metric='valid_loss', quantile=0.0, use_last=False, save=True)
 
     # plot_top_trials(study_dir, use_train_loss=True, n_trials=4)
 

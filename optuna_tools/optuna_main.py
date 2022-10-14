@@ -47,11 +47,11 @@ def run_optuna(
         db_name: str,
         n_gpus: int,
         n_workers_per_gpu: int,
+        n_epochs: int,
+        n_trials_per_worker: int,
         objective_func: Callable,
         trainer_class: Callable,
         analyzer_class: Callable = None,
-        n_epochs: int = 10,
-        n_trials_per_worker: int = 1000,
         sampler_startup_trials: int = 1000,  # random startup trials before activating sampler
         pruner_startup_trials: int = 1000,  # startup trials before pruning
         pruner_warmup_epochs: int = 10,  # initial epochs before pruning
@@ -130,7 +130,7 @@ def run_optuna(
                     **subprocess_kwargs,
                 )
                 futures.append(future)
-                time.sleep(4)
+                time.sleep(5)
             concurrent.futures.wait(futures)
             for i_future, future in enumerate(futures):
                 if future.exception() is None:
@@ -242,24 +242,26 @@ def launch_trial(
         for key, value in input_kwargs.items():
             print(f'  Model input: {key}, value: {value}')
 
-        trainer = trainer_class(
-            optuna_trial=trial,
-            **input_kwargs,
-        )
-
-        outputs = trainer.train()
+        try:
+            trainer = trainer_class(
+                optuna_trial=trial,
+                **input_kwargs,
+            )
+            outputs = trainer.train()
+        except:
+            result = np.NAN
+        else:
+            assert isinstance(outputs, dict) and 'train_loss' in outputs
+            if maximize_score:
+                result = outputs['valid_score'][-1]
+            else:
+                result = outputs['train_loss'][-1]
+            if analyzer_class is not None:
+                analysis = analyzer_class(output_dir=input_kwargs['output_dir'])
+                analysis.plot_training(save=True)
 
     sys.stdout = sys.__stdout__
     sys.stderr = sys.__stderr__
-
-    if analyzer_class is not None:
-        analysis = analyzer_class(output_dir=input_kwargs['output_dir'])
-        analysis.plot_training(save=True)
-
-    if maximize_score:
-        result = outputs['valid_score'][-1]
-    else:
-        result = outputs['train_loss'][-1]
 
     return result
 

@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from typing import Union, Tuple, Any
 import dataclasses
+import time
 
 # 3rd-party imports
 import numpy as np
@@ -41,13 +42,13 @@ class _Base_Trainer_Dataclass:
     n_epochs: int = 2  # training epochs
     minibatch_print_interval: int = 2000  # print minibatch info
     optimizer_type: str = 'sgd'  # adam (default) or sgd
-    sgd_momentum: float = 0.0  # momentum for SGD optimizer
-    sgd_dampening: float = 0.0  # dampening for SGD optimizer
+    sgd_momentum: float = 0.0  # momentum for SGD optimizer, 0-1
+    sgd_dampening: float = 0.0  # dampening for SGD optimizer, 0-1
     learning_rate: float = 1e-3  # optimizer learning rate
-    lr_scheduler_patience: int = 100  # epochs to wait before triggering lr scheduler
+    lr_scheduler_patience: int = 10  # epochs to wait before triggering lr scheduler
     lr_scheduler_factor: float = 0.5  # reduction factor for lr scheduler
-    lr_scheduler_threshold: float = 1e-3  # lr scheduler will trigger if loss does not decrease below 1-threshold
-    weight_decay: float = 5e-3  # optimizer L2 regularization factor
+    lr_scheduler_threshold: float = 1e-3  # threshold for *relative* decrease in loss to *not* trigger LR scheduler
+    weight_decay: float = 1e-3  # optimizer L2 regularization factor
     # optuna integration
     optuna_trial: Any = None  # optuna trial
     # global parameters
@@ -182,6 +183,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             factor=self.lr_scheduler_factor,
             threshold=self.lr_scheduler_threshold,
             patience=self.lr_scheduler_patience,
+            mode='min',
             verbose=True,
         )
 
@@ -206,6 +208,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                 # labels are true class C; predictions are scores for all classes
                 self.loss_function = torch.nn.CrossEntropyLoss(reduction="none")
         best_score = -np.inf
+        best_epoch = 0
 
         self.logger.info(f"Training batches per epoch {len(self.train_data_loader)}")
         if self.validation_data_loader:
@@ -274,6 +277,9 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                         if 'valid_roc' not in self.results: self.results['valid_roc'] = []
                         self.results['valid_roc'].append(valid_roc := roc.item())
 
+            # step LR scheduler
+            self.lr_scheduler.step(loss)
+
             # log training time
             self.results['epoch_time'].append(time.time()-t_start_epoch)
 
@@ -289,6 +295,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             # best score and save model
             if score > best_score:
                 best_score = score
+                best_epoch = i_epoch
                 self.logger.info(f"  Best score: {best_score:.3f}")
                 self.model.save_pytorch_model(filename=self.output_dir/self.checkpoint_file)
                 if self.save_onnx_model:
@@ -310,20 +317,39 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             self.logger.info(status)
 
             # optuna integration; report epoch result to optuna
-            do_prune = False
+            do_optuna_prune = False
             if optuna is not None and self.optuna_trial is not None:
-                maximize_score = self.optuna_trial.user_attrs['maximize_score']
-                if maximize_score is True:
-                    self.optuna_trial.report(score, i_epoch)
-                else:
-                    self.optuna_trial.report(loss, i_epoch)
                 # save results dict in trial user attributes
                 for key in self.results:
                     self.optuna_trial.set_user_attr(key, self.results[key])
+                if self.optuna_trial.user_attrs['maximize_score']:
+                    report_value = score
+                else:
+                    report_value = loss
+                assert np.isfinite(report_value)
+                report_successful = False
+                tries = 0
+                while report_successful is False and tries < 5:
+                    try:
+                        self.optuna_trial.report(report_value, i_epoch)
+                    except:
+                        self.logger.info("Failed optuna report, trying again...")
+                        time.sleep(3)
+                        tries += 1
+                    else:
+                        report_successful = True
+                if report_successful is False:
+                    self.logger.info("==> Failed Optuna report, exiting training loop")
+                    break
                 if self.optuna_trial.should_prune():
-                    do_prune = True
+                    do_optuna_prune = True
                     self.logger.info("==> Pruning trial with Optuna")
                     break  # exit epoch training loop
+
+            # break loop if score stops improving
+            if (i_epoch > 40) and (i_epoch > best_epoch+20) and (score < 0.9 * best_score):
+                self.logger.info("==> Score is < 90% best score; breaking")
+                break
 
         self.logger.info(f"End training loop")
         self.logger.info(f"Elapsed time {time.time()-t_start_training:.1f} s")
@@ -332,7 +358,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             handler.close()
             self.logger.removeHandler(handler)
 
-        if do_prune:
+        if do_optuna_prune:
             optuna.TrialPruned()
 
         return self.results
