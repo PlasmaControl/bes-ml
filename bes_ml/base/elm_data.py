@@ -15,13 +15,18 @@ from bes_data.elm_data_tools import bad_elm_indices_csv
 try:
     from .train_base import _Base_Trainer_Dataclass
     from .utilities import merge_pdfs
+    from .models import _Base_Features_Dataclass
 except ImportError:
     from bes_ml.base.train_base import _Base_Trainer_Dataclass
     from bes_ml.base.utilities import merge_pdfs
+    from bes_ml.base.models import _Base_Features_Dataclass
 
 
 @dataclasses.dataclass(eq=False)
-class _ELM_Data_Base(_Base_Trainer_Dataclass):
+class _ELM_Data_Base(
+    _Base_Trainer_Dataclass,
+    _Base_Features_Dataclass,
+):
     data_location: Union[Path,str] = sample_elm_data_file  # path to data; dir or file depending on task
     batch_size: int = 64  # power of 2, like 16-128
     fraction_validation: float = 0.2  # fraction of dataset for validation
@@ -34,7 +39,7 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
     num_workers: int = 0  # number of subprocess workers for pytorch dataloader
     bad_elm_indices: Iterable = None  # iterable of ELM indices to skip when reading data
     bad_elm_indices_csv: str | bool = None  # CSV file to read bad ELM indices
-    label_type: np.dtype = dataclasses.field(default=None, init=False)
+    label_type: np.int8 | np.float32 = dataclasses.field(default=None, init=False)
 
     def _prepare_data(self) -> None:
 
@@ -50,18 +55,8 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
             # int labels for classification
             self.label_type = np.int8
 
-        if self.device.type == 'cpu':
-            # if device is cpu, then no device to send data to
-            self.all_data_to_device = False
-        else:
-            if self.all_data_to_device:
-                # if all data on device, then data loader must be main process
-                self.num_workers = 0
-
-        if self.device.type.startswith('cuda') and self.all_data_to_device:
-            # if cuda/gpu and all data on device, then data loader must be main process
-            self.num_workers = 0
-        
+        if self.device.type == 'cuda':
+            self.num_workers = 2
 
         self._get_data()
         self._make_datasets()
@@ -306,8 +301,6 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
             sample_indices=self.train_data[2],
             signal_window_size = self.signal_window_size,
             prediction_horizon=prediction_horizon,
-            device=self.device,
-            all_data_to_device=self.all_data_to_device,
         )
 
         if self.validation_data:
@@ -317,8 +310,6 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
                 sample_indices=self.validation_data[2],
                 signal_window_size = self.signal_window_size,
                 prediction_horizon=prediction_horizon,
-                device=self.device,
-                all_data_to_device=self.all_data_to_device,
             )
         else:
             self.validation_dataset = None
@@ -361,8 +352,6 @@ class ELM_Dataset(torch.utils.data.Dataset):
         sample_indices: np.ndarray = None, 
         signal_window_size: int = None,
         prediction_horizon: int = 0,  # =0 for time-to-ELM regression; >=0 for classification prediction
-        device: torch.device = None,
-        all_data_to_device: bool = False  # if True, send dataset to device; if False (default) send only batches
     ) -> None:
         self.signals = torch.unsqueeze(torch.from_numpy(signals), 0)
         assert (
@@ -377,12 +366,6 @@ class ELM_Dataset(torch.utils.data.Dataset):
         self.sample_indices = torch.from_numpy(sample_indices)
         self.signal_window_size = torch.tensor(signal_window_size, dtype=torch.int)
         self.prediction_horizon = torch.tensor(prediction_horizon, dtype=torch.int)
-        if all_data_to_device:
-            self.labels = self.labels.to(device)
-            self.signals = self.signals.to(device)
-            self.sample_indices = self.sample_indices.to(device)
-            self.signal_window_size = self.signal_window_size.to(device)
-            self.prediction_horizon = self.prediction_horizon.to(device)
 
     def __len__(self) -> int:
         return self.sample_indices.size(dim=0)

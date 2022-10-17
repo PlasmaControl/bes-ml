@@ -29,7 +29,7 @@ except ImportError:
 @dataclasses.dataclass(eq=False)
 class _Base_Trainer_Dataclass:
     # output parameters
-    output_dir: Path = Path('run_dir')  # path to output dir.
+    output_dir: Path | str = Path('run_dir')  # path to output dir.
     results_file: str = 'results.yaml'  # output training results
     log_file: str = 'log.txt'  # output log file
     inputs_file: str = 'inputs.yaml'  # save inputs to yaml
@@ -39,8 +39,7 @@ class _Base_Trainer_Dataclass:
     logger: logging.Logger = None
     terminal_output: bool = True  # terminal output if True
     # training parameters
-    device: str = 'auto'  # auto (default), cpu, cuda, or cuda:X
-    all_data_to_device: bool = False  # if True, send full dataset to device; if False (default) only send batches to device
+    device: str | torch.device = 'auto'  # auto (default), cpu, cuda, or cuda:X
     n_epochs: int = 2  # training epochs
     minibatch_print_interval: int = 2000  # print minibatch info
     optimizer_type: str = 'sgd'  # adam (default) or sgd
@@ -384,10 +383,8 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             mode = 'Valid'
         with context:
             for i_batch, (signal_windows, labels) in enumerate(data_loader):
-                if not self.all_data_to_device:
-                    # send batches to device
-                    signal_windows = signal_windows.to(self.device)
-                    labels = labels.to(self.device)
+                signal_windows = signal_windows.to(self.device)
+                labels = labels.to(self.device)
                 if i_batch % self.minibatch_print_interval == 0:
                     t_start_minibatch = time.time()
                 if is_train:
@@ -417,9 +414,9 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
 
                 # minibatch status
                 if (i_batch+1) % self.minibatch_print_interval == 0:
-                    epoch_loss = np.mean(batch_losses)
-                    status =  f"  {mode} batch {i_batch+1:05d}/{len(data_loader)}  "
-                    status += f"batch loss {batch_loss:.3f} (avg loss {epoch_loss:.3f})  "
+                    status =  f"  {mode} batch {i_batch+1:05d}/{len(data_loader):05d}  "
+                    status += f"batch loss {batch_loss:.3f} "
+                    status += f"(ep loss {np.mean(batch_losses):.3f})  "
                     status += f"minibatch time {time.time()-t_start_minibatch:.3f} s"
                     self.logger.info(status)
 
