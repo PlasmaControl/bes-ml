@@ -35,6 +35,7 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
     label_type: np.dtype = dataclasses.field(default=None, init=False)
     bad_elm_indices: Iterable = None  # iterable of ELM indices to skip when reading data
     bad_elm_indices_csv: str | bool = None  # CSV file to read bad ELM indices
+    all_data_to_device: bool = False  # if True, send full dataset to device; if False (default) only send batches to device
 
     def _prepare_data(self) -> None:
 
@@ -49,6 +50,19 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
         elif self.is_classification:
             # int labels for classification
             self.label_type = np.int8
+
+        if self.device.type == 'cpu':
+            # if device is cpu, then no device to send data to
+            self.all_data_to_device = False
+        else:
+            if self.all_data_to_device:
+                # if all data on device, then data loader must be main process
+                self.num_workers = 0
+
+        if self.device.type.startswith('cuda') and self.all_data_to_device:
+            # if cuda/gpu and all data on device, then data loader must be main process
+            self.num_workers = 0
+        
 
         self._get_data()
         self._make_datasets()
@@ -294,6 +308,7 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
             signal_window_size = self.signal_window_size,
             prediction_horizon=prediction_horizon,
             device=self.device,
+            all_data_to_device=self.all_data_to_device,
         )
 
         if self.validation_data:
@@ -304,6 +319,7 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
                 signal_window_size = self.signal_window_size,
                 prediction_horizon=prediction_horizon,
                 device=self.device,
+                all_data_to_device=self.all_data_to_device,
             )
         else:
             self.validation_dataset = None
@@ -322,7 +338,7 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
                 batch_size=self.batch_size,
                 shuffle=True if self.seed is None else False,
                 num_workers=self.num_workers,
-                pin_memory=True if 'cpu' in self.device.type else False,
+                pin_memory=(self.device.type == 'cpu'),
                 drop_last=True,
             )
         if self.validation_dataset:
@@ -331,7 +347,7 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
                     batch_size=self.batch_size,
                     shuffle=False,
                     num_workers=self.num_workers,
-                    pin_memory=True if 'cpu' in self.device.type else False,
+                    pin_memory=(self.device.type == 'cpu'),
                     drop_last=True,
                 )
 
@@ -347,20 +363,30 @@ class ELM_Dataset(torch.utils.data.Dataset):
         signal_window_size: int = None,
         prediction_horizon: int = 0,  # =0 for time-to-ELM regression; >=0 for classification prediction
         device: torch.device = None,
+        all_data_to_device: bool = False  # if True, send dataset to device; if False (default) send only batches
     ) -> None:
-        self.signals = torch.unsqueeze(torch.from_numpy(signals), 0).to(device)
+        self.signals = torch.unsqueeze(torch.from_numpy(signals), 0)
         assert (
             self.signals.ndim == 4 and 
             self.signals.shape[0] == 1 and 
             self.signals.shape[2] == 8 and 
             self.signals.shape[3] == 8
         ), "Signals have incorrect shape"
-        self.labels = torch.from_numpy(labels).to(device)
+        self.labels = torch.from_numpy(labels)
         assert self.labels.ndim == 1, "Labels have incorrect shape"
         assert self.labels.shape[0] == self.signals.shape[1], "Labels and signals have different time dimensions"
-        self.sample_indices = torch.from_numpy(sample_indices).to(device)
-        self.signal_window_size = torch.tensor(signal_window_size, dtype=torch.int).to(device)
-        self.prediction_horizon = torch.tensor(prediction_horizon, dtype=torch.int).to(device)
+        self.sample_indices = torch.from_numpy(sample_indices)
+        self.signal_window_size = torch.tensor(signal_window_size, dtype=torch.int)
+        self.prediction_horizon = torch.tensor(prediction_horizon, dtype=torch.int)
+        self.all_data_to_device = all_data_to_device
+        self.device = device
+        if self.all_data_to_device:
+            # send all data to device
+            self.labels = self.labels.to(self.device)
+            self.signals = self.signals.to(self.device)
+            self.sample_indices = self.sample_indices.to(self.device)
+            self.signal_window_size = self.signal_window_size.to(self.device)
+            self.prediction_horizon = self.prediction_horizon.to(self.device)
 
     def __len__(self) -> int:
         return self.sample_indices.size(dim=0)
@@ -371,4 +397,8 @@ class ELM_Dataset(torch.utils.data.Dataset):
         signal_window = self.signals[:, time_idx : time_idx + self.signal_window_size, :, :]
         # label for signal window
         label = self.labels[ time_idx + self.signal_window_size + self.prediction_horizon - 1 ]
+        if not self.all_data_to_device:
+            # send batches to device
+            signal_window = signal_window.to(self.device)
+            label = label.to(self.device)
         return signal_window, label

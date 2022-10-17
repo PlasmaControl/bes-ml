@@ -119,23 +119,10 @@ if __name__=='__main__':
     model = Trainer(
         # model parameters
         dense_num_kernels=8,
-        signal_window_size=32,
-        activation_name='SiLU',
-        dropout_rate=0.1,
         # ELM dataset parameters
-        normalize_signals=True,
-        batch_size=128,
-        fraction_validation=0.0,
-        fraction_test=0.0,
         max_elms=5,
         bad_elm_indices_csv=True,  # read bad ELMs from CSV in bes_data.elm_data_tools
         # _Base_Trainer parameters
-        n_epochs=4,
-        optimizer_type='sgd',
-        sgd_momentum=0.5,
-        learning_rate=1e-3,
-        lr_scheduler_patience=3,
-        weight_decay=1e-3,
         # ELM regression parameters,
         normalize_labels=True,
         pre_elm_size=2000,
