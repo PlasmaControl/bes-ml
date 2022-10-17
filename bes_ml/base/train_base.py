@@ -37,6 +37,7 @@ class _Base_Trainer_Dataclass:
     save_onnx_model: bool = False  # export ONNX format
     onnx_checkpoint_file: str = 'checkpoint.onnx'  # onnx save file
     logger: logging.Logger = None
+    terminal_output: bool = True  # terminal output if True
     # training parameters
     device: str = 'auto'  # auto (default), cpu, cuda, or cuda:X
     n_epochs: int = 2  # training epochs
@@ -110,8 +111,9 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         self.logger.addHandler(f_handler)
 
         # logs to console
-        s_handler = logging.StreamHandler()
-        self.logger.addHandler(s_handler)
+        if self.terminal_output:
+            s_handler = logging.StreamHandler()
+            self.logger.addHandler(s_handler)
 
     def _print_inputs(self):
         cls = self.__class__

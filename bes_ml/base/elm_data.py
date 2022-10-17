@@ -34,7 +34,7 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
     num_workers: int = 0  # number of subprocess workers for pytorch dataloader
     label_type: np.dtype = dataclasses.field(default=None, init=False)
     bad_elm_indices: Iterable = None  # iterable of ELM indices to skip when reading data
-    bad_elm_indices_csv: str = None  # CSV file to read bad ELM indices
+    bad_elm_indices_csv: str | bool = None  # CSV file to read bad ELM indices
 
     def _prepare_data(self) -> None:
 
@@ -63,7 +63,7 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
             if self.bad_elm_indices_csv is True:
                 self.bad_elm_indices_csv = bad_elm_indices_csv
             if self.bad_elm_indices_csv:
-                print(f"Reading bad ELM indices from {self.bad_elm_indices_csv}")
+                self.logger.info(f"Reading bad ELM indices from {self.bad_elm_indices_csv}")
                 with Path(self.bad_elm_indices_csv).open() as file:
                     self.bad_elm_indices = [int(line) for line in file]
             good_keys = []
