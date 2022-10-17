@@ -40,6 +40,7 @@ class _Base_Trainer_Dataclass:
     terminal_output: bool = True  # terminal output if True
     # training parameters
     device: str = 'auto'  # auto (default), cpu, cuda, or cuda:X
+    all_data_to_device: bool = False  # if True, send full dataset to device; if False (default) only send batches to device
     n_epochs: int = 2  # training epochs
     minibatch_print_interval: int = 2000  # print minibatch info
     optimizer_type: str = 'sgd'  # adam (default) or sgd
@@ -383,6 +384,10 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             mode = 'Valid'
         with context:
             for i_batch, (signal_windows, labels) in enumerate(data_loader):
+                if not self.all_data_to_device:
+                    # send batches to device
+                    signal_windows = signal_windows.to(self.device)
+                    labels = labels.to(self.device)
                 if i_batch % self.minibatch_print_interval == 0:
                     t_start_minibatch = time.time()
                 if is_train:

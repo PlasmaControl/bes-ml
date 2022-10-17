@@ -124,7 +124,6 @@ if __name__=='__main__':
         bad_elm_indices_csv=True,  # read bad ELMs from CSV in bes_data.elm_data_tools
         # _Base_Trainer parameters
         # ELM regression parameters,
-        normalize_labels=True,
         pre_elm_size=2000,
     )
     model.train()

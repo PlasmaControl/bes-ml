@@ -32,10 +32,9 @@ class _ELM_Data_Base(_Base_Trainer_Dataclass):
     data_partition_file: str = 'data_partition.yaml'  # data partition for training, valid., and testing
     max_elms: int = None
     num_workers: int = 0  # number of subprocess workers for pytorch dataloader
-    label_type: np.dtype = dataclasses.field(default=None, init=False)
     bad_elm_indices: Iterable = None  # iterable of ELM indices to skip when reading data
     bad_elm_indices_csv: str | bool = None  # CSV file to read bad ELM indices
-    all_data_to_device: bool = False  # if True, send full dataset to device; if False (default) only send batches to device
+    label_type: np.dtype = dataclasses.field(default=None, init=False)
 
     def _prepare_data(self) -> None:
 
@@ -378,15 +377,12 @@ class ELM_Dataset(torch.utils.data.Dataset):
         self.sample_indices = torch.from_numpy(sample_indices)
         self.signal_window_size = torch.tensor(signal_window_size, dtype=torch.int)
         self.prediction_horizon = torch.tensor(prediction_horizon, dtype=torch.int)
-        self.all_data_to_device = all_data_to_device
-        self.device = device
-        if self.all_data_to_device:
-            # send all data to device
-            self.labels = self.labels.to(self.device)
-            self.signals = self.signals.to(self.device)
-            self.sample_indices = self.sample_indices.to(self.device)
-            self.signal_window_size = self.signal_window_size.to(self.device)
-            self.prediction_horizon = self.prediction_horizon.to(self.device)
+        if all_data_to_device:
+            self.labels = self.labels.to(device)
+            self.signals = self.signals.to(device)
+            self.sample_indices = self.sample_indices.to(device)
+            self.signal_window_size = self.signal_window_size.to(device)
+            self.prediction_horizon = self.prediction_horizon.to(device)
 
     def __len__(self) -> int:
         return self.sample_indices.size(dim=0)
@@ -397,8 +393,4 @@ class ELM_Dataset(torch.utils.data.Dataset):
         signal_window = self.signals[:, time_idx : time_idx + self.signal_window_size, :, :]
         # label for signal window
         label = self.labels[ time_idx + self.signal_window_size + self.prediction_horizon - 1 ]
-        if not self.all_data_to_device:
-            # send batches to device
-            signal_window = signal_window.to(self.device)
-            label = label.to(self.device)
         return signal_window, label
