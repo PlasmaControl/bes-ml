@@ -46,11 +46,11 @@ def fail_stale_trials(
 def run_optuna(
         db_name: str,
         n_gpus: int,
-        n_workers_per_gpu: int,
         n_epochs: int,
-        n_trials_per_worker: int,
         objective_func: Callable,
         trainer_class: Callable,
+        n_trials_per_worker: int = 1000,
+        n_workers_per_gpu: int = 1,
         analyzer_class: Callable = None,
         sampler_startup_trials: int = 1000,  # random startup trials before activating sampler
         pruner_startup_trials: int = 1000,  # startup trials before pruning
@@ -67,7 +67,7 @@ def run_optuna(
         assert n_gpus == 1
 
     db_file = Path(db_name) / f'{db_name}.db'
-    db_file.parent.mkdir(parents=True, exist_ok=True)
+    db_file.parent.mkdir(exist_ok=True)
     db_url = f'sqlite:///{db_file.as_posix()}'
     if db_file.exists():
         print(f'Studies in storage: {db_url}')
@@ -151,19 +151,19 @@ def run_optuna(
 def subprocess_worker(
     db_url: str,
     db_dir: str,
-    n_trials_per_worker: int,
-    i_gpu: Union[int,str],
     n_epochs: int,
     objective_func: Callable,
     trainer_class: Callable,
-    analyzer_class: Callable,
-    sampler_startup_trials: int,
-    pruner_startup_trials: int,
-    pruner_warmup_epochs: int,
-    pruner_minimum_trials_at_epoch: int,
-    pruner_patience: int,
-    maximize_score: bool,
-    constant_liar: bool,
+    i_gpu: int | str = 'auto',
+    n_trials_per_worker: int = 1000,
+    analyzer_class: Callable = None,
+    sampler_startup_trials: int = 1000,
+    pruner_startup_trials: int = 1000,
+    pruner_warmup_epochs: int = 10,
+    pruner_minimum_trials_at_epoch: int = 20,
+    pruner_patience: int = 10,
+    maximize_score: bool = True,
+    constant_liar: bool = False,
 ) -> None:
 
     sampler = optuna.samplers.TPESampler(
@@ -211,14 +211,14 @@ def subprocess_worker(
 
 
 def launch_trial(
-        trial: Union[optuna.trial.Trial, optuna.trial.FrozenTrial],
+        trial: optuna.trial.Trial | optuna.trial.FrozenTrial,
         db_dir: str,
-        i_gpu: Union[int,str],
         n_epochs: int,
         objective_func: Callable,
         trainer_class: Callable,
-        analyzer_class: Callable,
-        maximize_score: bool,
+        analyzer_class: Callable = None,
+        maximize_score: bool = True,
+        i_gpu: int | str = 'auto',
 ) -> float:
 
     db_dir = Path(db_dir)
@@ -234,7 +234,8 @@ def launch_trial(
         input_kwargs = objective_func(trial)
         input_kwargs['n_epochs'] = n_epochs
         input_kwargs['output_dir'] = trial_dir.as_posix()
-        input_kwargs['device'] = f'cuda:{i_gpu:d}' if isinstance(i_gpu, int) else i_gpu
+        device = f'cuda:{i_gpu:d}' if isinstance(i_gpu, int) else i_gpu
+        input_kwargs['device'] = device
 
         print(f'Trial {trial.number}')
         for key, value in trial.params.items():
@@ -257,7 +258,11 @@ def launch_trial(
             else:
                 result = outputs['train_loss'][-1]
             if analyzer_class is not None:
-                analysis = analyzer_class(output_dir=input_kwargs['output_dir'])
+                analysis = analyzer_class(
+                    output_dir=input_kwargs['output_dir'],
+                    device=device,
+                    verbose=False,
+                )
                 analysis.plot_training(save=True)
 
     sys.stdout = sys.__stdout__
@@ -266,7 +271,7 @@ def launch_trial(
     return result
 
 
-def study_test(
+def study_example(
         trial: Union[optuna.trial.Trial, optuna.trial.FrozenTrial],
 ) -> dict:
     input_kwargs = {
@@ -284,12 +289,12 @@ def study_test(
 if __name__ == '__main__':
 
     run_optuna(
-        db_name=study_test.__name__,
+        db_name=study_example.__name__,
         n_gpus=2,  # <=2 for head node, <=4 for compute node, ==1 if run_on_cpu
         n_workers_per_gpu=2,  # max 3 for V100
         n_trials_per_worker=5,
         n_epochs=8,
-        objective_func=study_test,
+        objective_func=study_example,
         trainer_class=elm_regression.Trainer,
         sampler_startup_trials=60,
         pruner_startup_trials=10,
