@@ -37,6 +37,7 @@ class _ELM_Data_Base(
     data_partition_file: str = 'data_partition.yaml'  # data partition for training, valid., and testing
     max_elms: int = None
     num_workers: int = 0  # number of subprocess workers for pytorch dataloader
+    pin_memory: bool = True  # data loader pinned memory
     bad_elm_indices: Iterable = None  # iterable of ELM indices to skip when reading data
     bad_elm_indices_csv: str | bool = None  # CSV file to read bad ELM indices
     label_type: np.int8 | np.float32 = dataclasses.field(default=None, init=False)
@@ -328,7 +329,8 @@ class _ELM_Data_Base(
                 batch_size=self.batch_size,
                 shuffle=True if self.seed is None else False,
                 num_workers=self.num_workers,
-                pin_memory=(self.device.type == 'cpu'),
+                # pin_memory=(self.device.type == 'cpu'),
+                pin_memory=self.pin_memory,
                 drop_last=True,
             )
         if self.validation_dataset:
@@ -337,7 +339,8 @@ class _ELM_Data_Base(
                     batch_size=self.batch_size,
                     shuffle=False,
                     num_workers=self.num_workers,
-                    pin_memory=(self.device.type == 'cpu'),
+                    # pin_memory=(self.device.type == 'cpu'),
+                    pin_memory=self.pin_memory,
                     drop_last=True,
                 )
 

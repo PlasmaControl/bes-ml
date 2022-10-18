@@ -383,8 +383,8 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             mode = 'Valid'
         with context:
             for i_batch, (signal_windows, labels) in enumerate(data_loader):
-                signal_windows = signal_windows.to(self.device)
-                labels = labels.to(self.device)
+                signal_windows = signal_windows.to(self.device, non_blocking=True)
+                labels = labels.to(self.device, non_blocking=True)
                 if i_batch % self.minibatch_print_interval == 0:
                     t_start_minibatch = time.time()
                 if is_train:
