@@ -86,10 +86,11 @@ def run_optuna(
     study_dir.mkdir(exist_ok=True)
 
     storage = optuna.storages.RDBStorage(url=db_url)
-    print(f'Studies in storage: {db_url}')
+    print(f'Existing studies in storage:')
     for study in optuna.get_all_study_summaries(db_url):
         print(f'  Study {study.study_name} with {study.n_trials} trials')
 
+    print(f"Creating/loading study {study_name}")
     study = optuna.create_study(
         study_name=study_name,
         storage=storage,
