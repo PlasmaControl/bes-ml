@@ -3,12 +3,13 @@ import os
 from pathlib import Path
 import concurrent.futures
 import time
-from typing import Callable, Union
+from typing import Callable
+import multiprocessing as mp
+import traceback
 
 import numpy as np
+import torch.cuda
 import optuna
-
-from bes_ml import elm_regression
 
 
 def fail_stale_trials(
@@ -36,7 +37,7 @@ def fail_stale_trials(
 
     for stale_trial in stale_trials:
         print(f'Setting trial {stale_trial.number} with state {stale_trial.state} to FAIL')
-        status = storage.set_trial_state(
+        status = storage.set_trial_state_values(
             trial_id=stale_trial._trial_id,
             state=optuna.trial.TrialState.FAIL,
         )
@@ -44,40 +45,53 @@ def fail_stale_trials(
 
 
 def run_optuna(
-        db_name: str,
-        n_gpus: int,
         n_epochs: int,
         objective_func: Callable,
         trainer_class: Callable,
-        n_trials_per_worker: int = 1000,
+        db_name: str = None,
+        db_url: str = None,
+        study_dir: str|Path = None,
+        study_name: str = None,
+        n_gpus: int = None,
         n_workers_per_gpu: int = 1,
+        n_trials_per_worker: int = 1000,
         analyzer_class: Callable = None,
         sampler_startup_trials: int = 1000,  # random startup trials before activating sampler
         pruner_startup_trials: int = 1000,  # startup trials before pruning
         pruner_warmup_epochs: int = 10,  # initial epochs before pruning
         pruner_minimum_trials_at_epoch: int = 20,  # minimum trials at each epoch before pruning
         pruner_patience: int = 10,  # epochs to wait for improvement before pruning
-        run_on_cpu: bool = False,  # if True, run on CPUs with multiprocessing
         maximize_score: bool = True,  #  True (default) to maximize validation score; False to minimize training loss
         fail_stale_trials: bool = False,  # if True, fail any stale trials
         constant_liar: bool = False,  # if True, add penalty to running trials to avoid redundant sampling
 ) -> None:
 
-    if run_on_cpu:
-        assert n_gpus == 1
+    assert db_name or (db_url and study_name)
 
-    db_file = Path(db_name) / f'{db_name}.db'
-    db_file.parent.mkdir(exist_ok=True)
-    db_url = f'sqlite:///{db_file.as_posix()}'
-    if db_file.exists():
-        print(f'Studies in storage: {db_url}')
-        for study in optuna.get_all_study_summaries(db_url):
-            print(f'  Study {study.study_name} with {study.n_trials} trials')
+    if db_name:
+        if study_dir is None:
+            study_dir = Path(db_name)
+            study_name = db_name
+        else:
+            study_dir = Path(study_dir)
+            if not study_name:
+                study_name = 'study'
+        db_file = study_dir / f'{db_name}.db'
+        db_url = f'sqlite:///{db_file.as_posix()}'
+    else:
+        study_dir = Path(study_name)
+
+    assert db_url and study_name and study_dir
+
+    study_dir.mkdir(exist_ok=True)
 
     storage = optuna.storages.RDBStorage(url=db_url)
+    print(f'Studies in storage: {db_url}')
+    for study in optuna.get_all_study_summaries(db_url):
+        print(f'  Study {study.study_name} with {study.n_trials} trials')
 
     study = optuna.create_study(
-        study_name='study',
+        study_name=study_name,
         storage=storage,
         load_if_exists=True,
         direction='maximize' if maximize_score else 'minimize',
@@ -92,17 +106,20 @@ def run_optuna(
         )
         for stale_trial in stale_trials:
             print(f'Setting trial {stale_trial.number} with state {stale_trial.state} to FAIL')
-            status = storage.set_trial_state(
+            status = storage.set_trial_state_values(
                 stale_trial._trial_id,
                 optuna.trial.TrialState.FAIL,
             )
             print(f'Success?: {status}')
 
     # launch workers
+    if n_gpus is None:
+        n_gpus = torch.cuda.device_count()
     n_workers = n_gpus * n_workers_per_gpu
     subprocess_kwargs = {
         'db_url': db_url,
-        'db_dir': db_file.parent.as_posix(),
+        'study_dir': study_dir.as_posix() if study_dir else None,
+        'study_name': study_name,
         'n_trials_per_worker': n_trials_per_worker,
         'n_epochs': n_epochs,
         'objective_func': objective_func,
@@ -117,7 +134,11 @@ def run_optuna(
         'constant_liar': constant_liar,
     }
     if n_workers > 1:
-        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
+        mp_context = mp.get_context('spawn')
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=n_workers,
+            mp_context=mp_context,
+        ) as executor:
             futures = []
             for i_worker in range(n_workers):
                 i_gpu = i_worker % n_gpus
@@ -126,7 +147,7 @@ def run_optuna(
                       f'and running {n_trials_per_worker} trials')
                 future = executor.submit(
                     subprocess_worker,  # callable that calls study.optimize()
-                    i_gpu=i_gpu if not run_on_cpu else 'cpu',
+                    i_gpu=i_gpu,
                     **subprocess_kwargs,
                 )
                 futures.append(future)
@@ -143,17 +164,18 @@ def run_optuna(
     else:
         print("Starting trial")
         subprocess_worker(
-            i_gpu=0 if not run_on_cpu else 'cpu',
+            i_gpu=0,
             **subprocess_kwargs,
         )
 
 
 def subprocess_worker(
     db_url: str,
-    db_dir: str,
     n_epochs: int,
     objective_func: Callable,
     trainer_class: Callable,
+    study_dir: str,
+    study_name: str,
     i_gpu: int | str = 'auto',
     n_trials_per_worker: int = 1000,
     analyzer_class: Callable = None,
@@ -184,7 +206,7 @@ def subprocess_worker(
 
     # load study
     study = optuna.load_study(
-        study_name='study',
+        study_name=study_name,
         storage=db_url,
         sampler=sampler,
         pruner=pruner,
@@ -193,7 +215,7 @@ def subprocess_worker(
     def launch_trial_wrapper(trial) -> float:
         return launch_trial(
             trial=trial,
-            db_dir=db_dir,
+            study_dir=study_dir,
             i_gpu=i_gpu,
             n_epochs=n_epochs,
             objective_func=objective_func,
@@ -212,8 +234,8 @@ def subprocess_worker(
 
 def launch_trial(
         trial: optuna.trial.Trial | optuna.trial.FrozenTrial,
-        db_dir: str,
         n_epochs: int,
+        study_dir: str,
         objective_func: Callable,
         trainer_class: Callable,
         analyzer_class: Callable = None,
@@ -221,9 +243,9 @@ def launch_trial(
         i_gpu: int | str = 'auto',
 ) -> float:
 
-    db_dir = Path(db_dir)
-    assert db_dir.exists()
-    trial_dir = db_dir / f'trial_{trial.number:04d}'
+    study_dir = Path(study_dir)
+    assert study_dir.exists()
+    trial_dir = study_dir / f'trial_{trial.number:04d}'
 
     trial.set_user_attr('maximize_score', maximize_score)
 
@@ -249,7 +271,9 @@ def launch_trial(
                 **input_kwargs,
             )
             outputs = trainer.train()
-        except:
+        except Exception as e:
+            print(repr(e))
+            traceback.print_exc()
             result = np.NAN
         else:
             assert isinstance(outputs, dict) and 'train_loss' in outputs
@@ -271,37 +295,36 @@ def launch_trial(
     return result
 
 
-def study_example(
-        trial: Union[optuna.trial.Trial, optuna.trial.FrozenTrial],
-) -> dict:
-    input_kwargs = {
-        'fraction_test': 0.0,
-        'fraction_validation': 0.0,
-        'log_time': False,
-        'inverse_weight_label': False,
-        'learning_rate': 10 ** trial.suggest_int('lr_exp', -6, -2),
-        'cnn_layer1_num_kernels': 10 * trial.suggest_int('cnn_layer1_num_kernels_factor_10', 1, 8),
-        'cnn_layer2_num_kernels': 5 * trial.suggest_int('cnn_layer2_num_kernels_factor_5', 1, 8),
-    }
-    return input_kwargs
-
-
-if __name__ == '__main__':
-
-    run_optuna(
-        db_name=study_example.__name__,
-        n_gpus=2,  # <=2 for head node, <=4 for compute node, ==1 if run_on_cpu
-        n_workers_per_gpu=2,  # max 3 for V100
-        n_trials_per_worker=5,
-        n_epochs=8,
-        objective_func=study_example,
-        trainer_class=elm_regression.Trainer,
-        sampler_startup_trials=60,
-        pruner_startup_trials=10,
-        pruner_warmup_epochs=6,
-        pruner_minimum_trials_at_epoch=20,
-        pruner_patience=4,
-        run_on_cpu=False,
-        maximize_score=False,
-        constant_liar=True,
-    )
+# def study_example(
+#         trial: Union[optuna.trial.Trial, optuna.trial.FrozenTrial],
+# ) -> dict:
+#     input_kwargs = {
+#         'fraction_test': 0.0,
+#         'fraction_validation': 0.0,
+#         'log_time': False,
+#         'inverse_weight_label': False,
+#         'learning_rate': 10 ** trial.suggest_int('lr_exp', -6, -2),
+#         'cnn_layer1_num_kernels': 10 * trial.suggest_int('cnn_layer1_num_kernels_factor_10', 1, 8),
+#         'cnn_layer2_num_kernels': 5 * trial.suggest_int('cnn_layer2_num_kernels_factor_5', 1, 8),
+#     }
+#     return input_kwargs
+#
+#
+# if __name__ == '__main__':
+#
+#     run_optuna(
+#         db_name=study_example.__name__,
+#         n_gpus=2,  # <=2 for head node, <=4 for compute node, ==1 if run_on_cpu
+#         n_workers_per_gpu=2,  # max 3 for V100
+#         n_trials_per_worker=5,
+#         n_epochs=8,
+#         objective_func=study_example,
+#         trainer_class=elm_regression.Trainer,
+#         sampler_startup_trials=60,
+#         pruner_startup_trials=10,
+#         pruner_warmup_epochs=6,
+#         pruner_minimum_trials_at_epoch=20,
+#         pruner_patience=4,
+#         maximize_score=False,
+#         constant_liar=True,
+#     )
