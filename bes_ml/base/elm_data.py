@@ -287,7 +287,11 @@ class _ELM_Data_Base(
 
         return return_tuple
 
-    def _apply_label_normalization(self, labels: torch.Tensor = None, *args, **kwargs) -> torch.Tensor:
+    def _apply_label_normalization(
+        self,
+        labels: torch.Tensor = None,
+        valid_indices: torch.Tensor = None,
+    ) -> torch.Tensor:
         return labels
 
     def _make_datasets(self) -> None:

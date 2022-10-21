@@ -424,7 +424,11 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         all_labels = np.concatenate(all_labels)
         return epoch_loss, all_predictions, all_labels
 
-    def _apply_loss_weight(self, losses: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+    def _apply_loss_weight(
+            self,
+            losses: torch.Tensor,
+            labels: torch.Tensor,
+    ) -> torch.Tensor:
         return losses
 
 

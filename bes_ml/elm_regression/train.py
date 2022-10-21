@@ -77,7 +77,11 @@ class Trainer(
             assert labels.min() == 0
         return labels, signals, valid_t0
 
-    def _apply_loss_weight(self, losses: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    def _apply_loss_weight(
+            self,
+            losses: torch.Tensor,
+            labels: torch.Tensor,
+    ) -> torch.Tensor:
         if self.inverse_weight_label:
             return torch.div(losses, labels)
         else:
@@ -117,13 +121,9 @@ class Trainer(
 
 if __name__=='__main__':
     model = Trainer(
-        # model parameters
         dense_num_kernels=8,
-        # ELM dataset parameters
         max_elms=5,
         bad_elm_indices_csv=True,  # read bad ELMs from CSV in bes_data.elm_data_tools
-        # _Base_Trainer parameters
-        # ELM regression parameters,
         pre_elm_size=2000,
     )
     model.train()

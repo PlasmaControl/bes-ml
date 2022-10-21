@@ -2,7 +2,7 @@ import io
 import logging
 from pathlib import Path
 import sys
-from typing import Union, Iterable
+from typing import Iterable
 import inspect
 import dataclasses
 
@@ -20,7 +20,7 @@ except ImportError:
 
 
 @dataclasses.dataclass(eq=False)
-class _Base_Features_Dataclass():
+class _Base_Features_Dataclass:
     signal_window_size: int = 64  # power of 2; ~16-512
     spatial_maxpool_size: int = 1  # 1 (default, no spatial maxpool), 2, or 4
     time_interval: int = 1  # time domain slice interval (i.e. time[::interval])
@@ -47,7 +47,7 @@ class _Base_Features(nn.Module, _Base_Features_Dataclass):
         self.maxpool = None
         if self.spatial_maxpool_size > 1:
             self.maxpool = nn.MaxPool3d(
-                kernel_size=[1, self.spatial_maxpool_size, self.spatial_maxpool_size],
+                kernel_size=(1, self.spatial_maxpool_size, self.spatial_maxpool_size),
             )
 
         # signal window
@@ -179,7 +179,7 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
         input_shape = (1, self.signal_window_size, 8, 8)
 
         def test_bad_shape(shape):
-            assert np.all(np.array(shape)>=1), f"Bad shape: {shape}"
+            assert np.all(np.array(shape) >= 1), f"Bad shape: {shape}"
 
         self.layer1_conv = nn.Conv3d(
             in_channels=1,
@@ -255,7 +255,6 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
 
         self.num_kernels = np.prod(output_shape, dtype=int)
         self.logger.info(f"CNN output shape: {output_shape}")
-
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.activation(self.dropout(self.layer1_conv(x)))
@@ -403,7 +402,7 @@ class DCT_Features(_DCT_Features_Dataclass, _Base_Features):
                 )
                 dct_bins[:, i_bin: i_bin + 1, :, :, :] = tmp
             dct_sw = torch.mean(dct_bins, dim=1, keepdim=True)
-            dct_sw_features = torch.unsqueeze( self.conv[i_sw](dct_sw), 1)
+            dct_sw_features = torch.unsqueeze(self.conv[i_sw](dct_sw), 1)
             dct_features[:, i_sw:i_sw+1, :, :, :, :] = dct_sw_features
         output_features = self._dropout_relu_flatten(dct_features)
         return output_features
@@ -491,7 +490,7 @@ class DWT_Features(_DWT_Features_Dataclass, _Base_Features):
                 )  # make 3D and move time dim. to last
                 x_lo, x_hi = self.dwt(x_tmp)  # multi-level DWT on last dim.
                 coeff = [x_lo] + [hi for hi in x_hi]  # make list of coeff.
-                dwt_sw[i_batch, 0, :, :, :] =  (
+                dwt_sw[i_batch, 0, :, :, :] = (
                     torch.cat(coeff, dim=2)
                     .permute(2, 0, 1)
                     .unsqueeze(0)
@@ -529,7 +528,7 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
             self.fft_num_kernels == 0 and
             self.dct_num_kernels == 0 and
             self.dwt_num_kernels == 0 and
-            (self.cnn_layer1_num_kernels==0 and self.cnn_layer2_num_kernels==0)
+            (self.cnn_layer1_num_kernels == 0 and self.cnn_layer2_num_kernels == 0)
         ) is False
 
         if self.logger is None:
@@ -538,14 +537,14 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
             self.logger.addHandler(logging.StreamHandler())
 
         self.dense_features = \
-        self.fft_features = \
-        self.dct_features = \
-        self.dwt_features = \
-        self.cnn_features = None
+            self.fft_features = \
+            self.dct_features = \
+            self.dwt_features = \
+            self.cnn_features = None
 
         self_parameters = inspect.signature(self.__class__).parameters
 
-        def get_feature_class_parameters(feature_class: object) -> dict:
+        def get_feature_class_parameters(feature_class) -> dict:
             feature_parameters = inspect.signature(feature_class).parameters
             feature_kwargs = {}
             for param_name in feature_parameters:
@@ -589,7 +588,7 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
         self.logger.info(f"Total features: {self.total_features}")
 
         hidden_layers = []
-        in_features = self.total_features  #  features are input layer to MLP
+        in_features = self.total_features  # features are input layer to MLP
         for i_layer, layer_size in enumerate(self.mlp_hidden_layers):
             hidden_layers.append(
                 nn.Linear(in_features=in_features, out_features=layer_size)
@@ -628,12 +627,12 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
 
         return x
 
-    def save_pytorch_model(self, filename: Union[Path,str] = None) -> None:
+    def save_pytorch_model(self, filename: Path | str = None) -> None:
         filename = Path(filename)
         torch.save(self.state_dict(), filename.as_posix())
         self.logger.info(f"  Saved model: {filename}  file size: {filename.stat().st_size/1e3:.1f} kB")
 
-    def save_onnx_model(self, filename: Union[Path,str] = None) -> None:
+    def save_onnx_model(self, filename: Path | str = None) -> None:
         filename = Path(filename)
         torch.onnx.export(
             model=self, 
@@ -665,8 +664,7 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
         self.logger.info(f"Single output size: {test_output.shape}")
 
 
-
-if __name__=='__main__':
+if __name__ == '__main__':
     m = Multi_Features_Model(
         dense_num_kernels=8,
         fft_num_kernels=8,
