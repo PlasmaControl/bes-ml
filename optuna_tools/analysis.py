@@ -229,7 +229,7 @@ def summarize_study(
 if __name__ == '__main__':
     plt.close('all')
 
-    study_dir = Path.home() / 'edgeml/scratch/study_reg_cnn_v07'
+    study_dir = Path.home() / 'edgeml/scratch/study_reg_cnn_v08'
 
     summarize_study(study_dir)
 
