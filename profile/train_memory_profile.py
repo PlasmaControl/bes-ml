@@ -32,8 +32,8 @@ if __name__=='__main__':
         Trainer._make_datasets,
         Multi_Features_Model.forward,
         Dense_Features.forward,
-        _Base_Features._dropout_relu_flatten,
-        _Base_Features._time_interval_and_maxpool,
+        _Base_Features._flatten_activation_dropout,
+        _Base_Features._time_interval_and_pooling,
     ]
 
     lp = LineProfiler()

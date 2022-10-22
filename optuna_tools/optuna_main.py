@@ -114,9 +114,6 @@ def run_optuna(
             print(f'Success?: {status}')
 
     # launch workers
-    if n_gpus is None:
-        n_gpus = torch.cuda.device_count()
-    n_workers = n_gpus * n_workers_per_gpu
     subprocess_kwargs = {
         'db_url': db_url,
         'study_dir': study_dir.as_posix() if study_dir else None,
@@ -134,6 +131,12 @@ def run_optuna(
         'maximize_score': maximize_score,
         'constant_liar': constant_liar,
     }
+    if n_gpus is None:
+        n_gpus = torch.cuda.device_count()
+    if n_gpus:
+        n_workers = n_gpus * n_workers_per_gpu
+    else:
+        n_workers = n_workers_per_gpu
     if n_workers > 1:
         mp_context = mp.get_context('spawn')
         with concurrent.futures.ProcessPoolExecutor(
@@ -142,7 +145,10 @@ def run_optuna(
         ) as executor:
             futures = []
             for i_worker in range(n_workers):
-                i_gpu = i_worker % n_gpus
+                if n_gpus:
+                    i_gpu = i_worker % n_gpus
+                else:
+                    i_gpu = 'auto'
                 print(f'Launching worker {i_worker+1} '
                       f'(of {n_workers}) on gpu {i_gpu} '
                       f'and running {n_trials_per_worker} trials')
