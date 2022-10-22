@@ -22,9 +22,12 @@ except ImportError:
 @dataclasses.dataclass(eq=False)
 class _Base_Features_Dataclass:
     signal_window_size: int = 64  # power of 2; ~16-512
-    spatial_maxpool_size: int = 1  # 1 (default, no spatial maxpool), 2, or 4
-    time_interval: int = 1  # time domain slice interval (i.e. time[::interval])
-    subwindow_size: int = -1  # power of 2, or -1 (default) for full signal window
+    time_slice_interval: int = 1  # power of 2; time domain slice interval (i.e. time[::interval])
+    spatial_pool_size: int = 1  # power of 2; spatial pooling size
+    time_pool_size: int = 1  # power of 2; time pooling size
+    pool_func: str = 'avg'  # `avg` or `max`
+    # subwindows: int = 1  # power of 2; subwindows
+    # subwindow_size: int = -1  # power of 2, or -1 (default) for full signal window
     activation_name: str = 'LeakyReLU'  # activation function in torch.nn like `LeakyReLu` or `SiLu`
     leakyrelu_negative_slope: float = 1e-3  # leaky relu negative slope; ~1e-3
     dropout_rate: float = 0.1  # ~0.1
@@ -42,48 +45,71 @@ class _Base_Features(nn.Module, _Base_Features_Dataclass):
             self.logger.setLevel(logging.INFO)
             self.logger.addHandler(logging.StreamHandler())
 
-        # spatial maxpool
-        assert self.spatial_maxpool_size in [1, 2, 4]
-        self.maxpool = None
-        if self.spatial_maxpool_size > 1:
-            self.maxpool = nn.MaxPool3d(
-                kernel_size=(1, self.spatial_maxpool_size, self.spatial_maxpool_size),
-            )
-
         # signal window
-        assert np.log2(self.signal_window_size) % 1 == 0  # ensure power of 2
+        assert np.log2(self.signal_window_size).is_integer()  # ensure power of 2
 
-        # time slice interval
-        assert self.time_interval >= 1
-        assert np.log2(self.time_interval) % 1 == 0  # ensure power of 2
-        self.time_points = self.signal_window_size // self.time_interval
+        # time slice interval to simulate lower sample rate
+        assert np.log2(self.time_slice_interval).is_integer()  # ensure power of 2
+        self.time_points = self.signal_window_size // self.time_slice_interval
+
+        # time/space pooling
+        assert np.log2(self.spatial_pool_size).is_integer() and self.spatial_pool_size <= 8
+        assert np.log2(self.time_pool_size).is_integer() and self.time_pool_size <= self.time_points
+        if self.spatial_pool_size > 1 or self.time_pool_size > 1:
+            if self.pool_func.lower().startswith('avg'):
+                pool_func = nn.AvgPool3d
+            elif self.pool_func.lower().startswith('max'):
+                pool_func = nn.MaxPool3d
+            else:
+                assert False, f"Invalid pool_func: {self.pool_func}"
+            self.pooling_layer = pool_func(
+                kernel_size=[self.time_pool_size, self.spatial_pool_size, self.spatial_pool_size],
+            )
+        else:
+            self.pooling_layer = None
+
+        self.time_points = self.time_points // self.time_pool_size
+        assert np.log2(self.time_points).is_integer()
 
         # subwindows
-        if self.subwindow_size == -1:
-            self.subwindow_size = self.time_points
-        assert np.log2(self.subwindow_size) % 1 == 0  # ensure power of 2
-        assert self.subwindow_size <= self.time_points
-        self.subwindow_nbins = self.time_points // self.subwindow_size
-        assert self.subwindow_nbins >= 1
+        # assert np.log2(self.subwindows).is_integer() and self.subwindow_size < self.time_points
+        # self.subwindow_size = self.time_points // self.subwindow_size
+        # assert np.log2(self.subwindow_size).is_integer()
+
+        # if self.subwindow_size == -1:
+        #     self.subwindow_size = self.time_points
+        # assert np.log2(self.subwindow_size).is_integer()  # ensure power of 2
+        # assert self.subwindow_size <= self.time_points
+        # self.subwindows = self.time_points // self.subwindow_size
+        # assert self.subwindows >= 1
         
+        # activation function
         self.activation_function = getattr(nn, self.activation_name)
         if self.activation_name == 'LeakyReLu':
             self.activation = self.activation_function(negative_slope=self.leakyrelu_negative_slope)
         else:
             self.activation = self.activation_function()
+
+        # dropout
         self.dropout = nn.Dropout3d(p=self.dropout_rate)
 
         self.num_kernels = None  # set in subclass
         self.conv = None  # set in subclass
 
-    def _time_interval_and_maxpool(self, x: torch.Tensor) -> torch.Tensor:
-        if self.time_interval > 1:
-            x = x[:, :, ::self.time_interval, :, :]
-        if self.maxpool:
-            x = self.maxpool(x)
+        self._input_size_after_timeslice_pooling = (
+            self.time_points,
+            8 // self.spatial_pool_size,
+            8 // self.spatial_pool_size,
+        )
+
+    def _time_interval_and_pooling(self, x: torch.Tensor) -> torch.Tensor:
+        if self.time_slice_interval > 1:
+            x = x[:, :, ::self.time_slice_interval, :, :]
+        if self.pooling_layer:
+            x = self.pooling_layer(x)
         return x
 
-    def _dropout_relu_flatten(self, x: torch.Tensor) -> torch.Tensor:
+    def _flatten_activation_dropout(self, x: torch.Tensor) -> torch.Tensor:
         return torch.flatten(self.activation(self.dropout(x)), 1)
 
 
@@ -100,45 +126,46 @@ class Dense_Features(_Dense_Features_Dataclass, _Base_Features):
 
         self.num_kernels = self.dense_num_kernels
 
-        filter_size = (
-            self.subwindow_size,
-            8 // self.spatial_maxpool_size,
-            8 // self.spatial_maxpool_size,
-        )
+        kernel_size = self._input_size_after_timeslice_pooling
 
         # list of conv. filter banks (each with self.num_kernels) with size self.subwindow_bins
-        self.conv = nn.ModuleList(
-            [
-                nn.Conv3d(
-                    in_channels=1,
-                    out_channels=self.dense_num_kernels,
-                    kernel_size=filter_size,
-                ) for _ in range(self.subwindow_nbins)
-            ]
+        # self.conv = nn.ModuleList(
+        #     [
+        #         nn.Conv3d(
+        #             in_channels=1,
+        #             out_channels=self.dense_num_kernels,
+        #             kernel_size=kernel_size,
+        #         ) for _ in range(self.subwindows)
+        #     ]
+        # )
+        self.conv = nn.Conv3d(
+            in_channels=1,
+            out_channels=self.dense_num_kernels,
+            kernel_size=kernel_size,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self._time_interval_and_maxpool(x)
-        if self.subwindow_nbins == 1:
-            x_new = self.conv[0](x)
-        else:
-            x_new_size = [
-                x.shape[0],
-                self.dense_num_kernels,
-                self.subwindow_nbins,
-                1,
-                1,
-            ]
-            x_new = torch.empty(size=x_new_size, dtype=x.dtype, device=x.device)
-            for i_bin in range(self.subwindow_nbins):
-                i_start = i_bin * self.subwindow_size
-                i_stop = (i_bin+1) * self.subwindow_size
-                # if torch.any(torch.isnan(self.conv[i_bin].weight)) or torch.any(torch.isnan(self.conv[i_bin].bias)):
-                #     assert False
-                x_new[:, :, i_bin:i_bin+1, :, :] = self.conv[i_bin](
-                    x[:, :, i_start:i_stop, :, :]
-                )
-        x = self._dropout_relu_flatten(x_new)
+        x = self._time_interval_and_pooling(x)
+        # if self.subwindows == 1:
+        x = self.conv(x)
+        # else:
+        #     x_new_size = [
+        #         x.shape[0],
+        #         self.dense_num_kernels,
+        #         self.subwindows,
+        #         1,
+        #         1,
+        #     ]
+        #     x_new = torch.empty(size=x_new_size, dtype=x.dtype, device=x.device)
+        #     for i_bin in range(self.subwindows):
+        #         i_start = i_bin * self.subwindow_size
+        #         i_stop = (i_bin+1) * self.subwindow_size
+        #         # if torch.any(torch.isnan(self.conv[i_bin].weight)) or torch.any(torch.isnan(self.conv[i_bin].bias)):
+        #         #     assert False
+        #         x_new[:, :, i_bin:i_bin+1, :, :] = self.conv[i_bin](
+        #             x[:, :, i_start:i_stop, :, :]
+        #         )
+        x = self._flatten_activation_dropout(x)
         return x
 
 
@@ -146,14 +173,14 @@ class Dense_Features(_Dense_Features_Dataclass, _Base_Features):
 class _CNN_Features_Dataclass(_Base_Features_Dataclass):
     cnn_layer1_num_kernels: int = 0
     cnn_layer1_kernel_time_size: int = 5  # must be odd
-    cnn_layer1_kernel_spatial_size: int = 3
-    cnn_layer1_maxpool_time_size: int = 4
-    cnn_layer1_maxpool_spatial_size: int = 1
+    cnn_layer1_kernel_spatial_size: int = 3  # must be odd
+    cnn_layer1_maxpool_time_size: int = 4  # must be power of 2
+    cnn_layer1_maxpool_spatial_size: int = 1  # must be power of 2
     cnn_layer2_num_kernels: int = 0
     cnn_layer2_kernel_time_size: int = 5  # must be odd
-    cnn_layer2_kernel_spatial_size: int = 3
-    cnn_layer2_maxpool_time_size: int = 4
-    cnn_layer2_maxpool_spatial_size: int = 2
+    cnn_layer2_kernel_spatial_size: int = 3  # must be odd
+    cnn_layer2_maxpool_time_size: int = 4  # must be power of 2
+    cnn_layer2_maxpool_spatial_size: int = 2  # must be power of 2
 
 
 @dataclasses.dataclass(eq=False)
@@ -163,24 +190,40 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
         super().__post_init__()
 
         # CNN only valid with subwindow_size == time_points == signal_window_size
+        # assert (
+        #     # self.subwindow_size == self.signal_window_size and
+        #     self.time_slice_interval == 1 and
+        #     # self.subwindows == 1 and
+        #     self.time_points == self.signal_window_size and
+        #     self.spatial_pool_size == 1
+        # )
+
+        # maxpools must be power of 2
         assert (
-            self.subwindow_size == self.signal_window_size and
-            self.time_interval == 1 and
-            self.subwindow_nbins == 1 and
-            self.time_points == self.signal_window_size and
-            self.spatial_maxpool_size == 1
+            np.log2(self.cnn_layer1_maxpool_spatial_size).is_integer() and
+            np.log2(self.cnn_layer2_maxpool_spatial_size).is_integer() and
+            np.log2(self.cnn_layer1_maxpool_time_size).is_integer() and
+            np.log2(self.cnn_layer2_maxpool_time_size).is_integer()
         )
 
+        # ensure valid maxpool in time dimension
+        assert self.cnn_layer1_maxpool_time_size * self.cnn_layer2_maxpool_time_size <= self.time_points
+
+        # kernel sizes must be odd
         assert (
             self.cnn_layer1_kernel_time_size % 2 == 1 and
             self.cnn_layer2_kernel_time_size % 2 == 1
+            # self.cnn_layer1_kernel_spatial_size % 2 == 1 and
+            # self.cnn_layer2_kernel_spatial_size % 2 == 1
         )
 
-        input_shape = (1, self.signal_window_size, 8, 8)
+        input_shape = tuple([1]+list(self._input_size_after_timeslice_pooling))
+        self.logger.info(f"CNN input after pre-pooling, pre-slicing: {input_shape}")
 
         def test_bad_shape(shape):
             assert np.all(np.array(shape) >= 1), f"Bad shape: {shape}"
 
+        # Conv #1
         self.layer1_conv = nn.Conv3d(
             in_channels=1,
             out_channels=self.cnn_layer1_num_kernels,
@@ -189,18 +232,21 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
                 self.cnn_layer1_kernel_spatial_size,
                 self.cnn_layer1_kernel_spatial_size,
             ),
-            stride=(1, 1, 1),
-            padding=((self.cnn_layer1_kernel_time_size-1)//2, 0, 0),
+            # stride=(1, 1, 1),
+            padding=((self.cnn_layer1_kernel_time_size-1)//2, 0, 0),  # pad time dimension
         )
-
         output_shape = [
             self.cnn_layer1_num_kernels,
-            input_shape[1],
-            input_shape[2]-(self.cnn_layer1_kernel_spatial_size-1),
+            input_shape[1],  # time dim unchanged due to padding
+            input_shape[2]-(self.cnn_layer1_kernel_spatial_size-1),  # contract
             input_shape[3]-(self.cnn_layer1_kernel_spatial_size-1),
         ]
+        self.logger.info(f"CNN after conv #1: {output_shape}")
         test_bad_shape(output_shape)
+        assert output_shape[2] % self.cnn_layer1_maxpool_spatial_size == 0
 
+
+        # maxpool #1
         self.layer1_maxpool = nn.MaxPool3d(
             kernel_size=(
                 self.cnn_layer1_maxpool_time_size,
@@ -208,15 +254,16 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
                 self.cnn_layer1_maxpool_spatial_size,
             ),
         )
-
         output_shape = [
             output_shape[0],
             output_shape[1] // self.cnn_layer1_maxpool_time_size,
             output_shape[2] // self.cnn_layer1_maxpool_spatial_size,
             output_shape[3] // self.cnn_layer1_maxpool_spatial_size,
         ]
+        self.logger.info(f"CNN after maxpool #1: {output_shape}")
         test_bad_shape(output_shape)
 
+        # conv #2
         self.layer2_conv = nn.Conv3d(
             in_channels=self.cnn_layer1_num_kernels,
             out_channels=self.cnn_layer2_num_kernels,
@@ -228,15 +275,17 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
             stride=(1, 1, 1),
             padding=((self.cnn_layer2_kernel_time_size-1)//2, 0, 0),
         )
-
         output_shape = [
             self.cnn_layer2_num_kernels,
             output_shape[1],
             output_shape[2] - (self.cnn_layer2_kernel_spatial_size-1),
             output_shape[3] - (self.cnn_layer2_kernel_spatial_size-1),
         ]
+        self.logger.info(f"CNN after conv #2: {output_shape}")
         test_bad_shape(output_shape)
+        assert output_shape[2] % self.cnn_layer2_maxpool_spatial_size == 0
 
+        # maxpool #2
         self.layer2_maxpool = nn.MaxPool3d(
             kernel_size=(
                 self.cnn_layer2_maxpool_time_size,
@@ -244,19 +293,20 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
                 self.cnn_layer2_maxpool_spatial_size,
             ),
         )
-
         output_shape = [
             output_shape[0],
             output_shape[1] // self.cnn_layer2_maxpool_time_size,
             output_shape[2] // self.cnn_layer2_maxpool_spatial_size,
             output_shape[3] // self.cnn_layer2_maxpool_spatial_size,
         ]
+        self.logger.info(f"CNN after maxpool #2 (output): {output_shape}")
         test_bad_shape(output_shape)
 
         self.num_kernels = np.prod(output_shape, dtype=int)
         self.logger.info(f"CNN output shape: {output_shape}")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self._time_interval_and_pooling(x)
         x = self.activation(self.dropout(self.layer1_conv(x)))
         x = self.layer1_maxpool(x)
         x = self.activation(self.dropout(self.layer2_conv(x)))
@@ -285,8 +335,8 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
 
         filter_size = (
             self.nfreqs, 
-            8 // self.spatial_maxpool_size, 
-            8 // self.spatial_maxpool_size,
+            8 // self.spatial_pool_size,
+            8 // self.spatial_pool_size,
         )
 
         # list of conv. filter banks (each with self.num_kernels) with size self.subwindow_bins
@@ -296,23 +346,23 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
                     in_channels=1,
                     out_channels=self.fft_num_kernels,
                     kernel_size=filter_size,
-                ) for _ in range(self.subwindow_nbins)
+                ) for _ in range(self.subwindows)
             ]
         )
 
     def forward(self, x):
         # x = x.to(self.device)  # needed for PowerPC architecture
-        x = self._time_interval_and_maxpool(x)
+        x = self._time_interval_and_pooling(x)
         fft_features_size = [
             x.shape[0],
-            self.subwindow_nbins,
+            self.subwindows,
             self.fft_num_kernels,
             1,
             1,
             1,
         ]
         fft_features = torch.empty(size=fft_features_size, dtype=x.dtype, device=x.device)
-        for i_sw in torch.arange(self.subwindow_nbins):
+        for i_sw in torch.arange(self.subwindows):
             fft_bins_size = [
                 x.shape[0],
                 self.fft_nbins,
@@ -333,7 +383,7 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
             fft_sw_features = self.conv[i_sw](fft_sw)
             fft_features[:, i_sw:i_sw+1, :, :, :, :] = \
                 torch.unsqueeze(fft_sw_features, 1)
-        output_features = self._dropout_relu_flatten(fft_features)
+        output_features = self._flatten_activation_dropout(fft_features)
         return output_features
 
 
@@ -359,8 +409,8 @@ class DCT_Features(_DCT_Features_Dataclass, _Base_Features):
 
         filter_size = (
             self.nfreqs, 
-            8 // self.spatial_maxpool_size, 
-            8 // self.spatial_maxpool_size,
+            8 // self.spatial_pool_size,
+            8 // self.spatial_pool_size,
         )
 
         # list of conv. filter banks (each with self.num_kernels) with size self.subwindow_bins
@@ -370,23 +420,23 @@ class DCT_Features(_DCT_Features_Dataclass, _Base_Features):
                     in_channels=1,
                     out_channels=self.dct_num_kernels,
                     kernel_size=filter_size,
-                ) for _ in range(self.subwindow_nbins)
+                ) for _ in range(self.subwindows)
             ]
         )
 
     def forward(self, x):
         # x = x.to(self.device)  # needed for PowerPC architecture
-        x = self._time_interval_and_maxpool(x)
+        x = self._time_interval_and_pooling(x)
         dct_features_size = [
             x.shape[0],
-            self.subwindow_nbins,
+            self.subwindows,
             self.dct_num_kernels,
             1,
             1,
             1,
         ]
         dct_features = torch.empty(size=dct_features_size, dtype=x.dtype, device=x.device)
-        for i_sw in torch.arange(self.subwindow_nbins):
+        for i_sw in torch.arange(self.subwindows):
             dct_bins_size = [
                 x.shape[0],
                 self.dct_nbins,
@@ -404,7 +454,7 @@ class DCT_Features(_DCT_Features_Dataclass, _Base_Features):
             dct_sw = torch.mean(dct_bins, dim=1, keepdim=True)
             dct_sw_features = torch.unsqueeze(self.conv[i_sw](dct_sw), 1)
             dct_features[:, i_sw:i_sw+1, :, :, :, :] = dct_sw_features
-        output_features = self._dropout_relu_flatten(dct_features)
+        output_features = self._flatten_activation_dropout(dct_features)
         return output_features
 
 
@@ -447,8 +497,8 @@ class DWT_Features(_DWT_Features_Dataclass, _Base_Features):
 
         filter_size = (
             self.dwt_output_length, 
-            8 // self.spatial_maxpool_size, 
-            8 // self.spatial_maxpool_size,
+            8 // self.spatial_pool_size,
+            8 // self.spatial_pool_size,
         )
 
         # list of conv. filter banks (each with self.num_kernels) with size self.subwindow_bins
@@ -458,22 +508,22 @@ class DWT_Features(_DWT_Features_Dataclass, _Base_Features):
                     in_channels=1,
                     out_channels=self.dwt_num_kernels,
                     kernel_size=filter_size,
-                ) for _ in range(self.subwindow_nbins)
+                ) for _ in range(self.subwindows)
             ]
         )
 
     def forward(self, x):
-        x = self._time_interval_and_maxpool(x)
+        x = self._time_interval_and_pooling(x)
         dwt_features_size = [
             x.shape[0],
-            self.subwindow_nbins,
+            self.subwindows,
             self.dwt_num_kernels,
             1,
             1,
             1,
         ]
         dwt_features = torch.empty(size=dwt_features_size, dtype=x.dtype, device=x.device)
-        for i_sw in torch.arange(self.subwindow_nbins):
+        for i_sw in torch.arange(self.subwindows):
             x_sw = x[:, :, i_sw*self.subwindow_size:(i_sw+1)*self.subwindow_size, :, :]
             dwt_sw_size = [
                 x_sw.shape[0],
@@ -499,7 +549,7 @@ class DWT_Features(_DWT_Features_Dataclass, _Base_Features):
             dwt_sw_features = self.conv[i_sw](dwt_sw)
             dwt_features[:, i_sw:i_sw+1, :, :, :, :] = \
                 torch.unsqueeze(dwt_sw_features, 1)
-        output_features = self._dropout_relu_flatten(dwt_features)
+        output_features = self._flatten_activation_dropout(dwt_features)
         return output_features
 
 
@@ -574,7 +624,7 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
 
         self.total_features = sum(
             [
-                features.num_kernels * features.subwindow_nbins
+                features.num_kernels #* features.subwindow_nbins
                 for features in [
                     self.dense_features,
                     self.fft_features,
