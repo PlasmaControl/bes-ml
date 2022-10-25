@@ -173,12 +173,12 @@ class Dense_Features(_Dense_Features_Dataclass, _Base_Features):
 class _CNN_Features_Dataclass(_Base_Features_Dataclass):
     cnn_layer1_num_kernels: int = 0
     cnn_layer1_kernel_time_size: int = 5  # must be odd
-    cnn_layer1_kernel_spatial_size: int = 3  # must be odd
+    cnn_layer1_kernel_spatial_size: int = 3
     cnn_layer1_maxpool_time_size: int = 4  # must be power of 2
     cnn_layer1_maxpool_spatial_size: int = 1  # must be power of 2
     cnn_layer2_num_kernels: int = 0
     cnn_layer2_kernel_time_size: int = 5  # must be odd
-    cnn_layer2_kernel_spatial_size: int = 3  # must be odd
+    cnn_layer2_kernel_spatial_size: int = 3
     cnn_layer2_maxpool_time_size: int = 4  # must be power of 2
     cnn_layer2_maxpool_spatial_size: int = 2  # must be power of 2
 
@@ -198,7 +198,7 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
         #     self.spatial_pool_size == 1
         # )
 
-        # maxpools must be power of 2
+        # maxpool sizes must be power of 2
         assert (
             np.log2(self.cnn_layer1_maxpool_spatial_size).is_integer() and
             np.log2(self.cnn_layer2_maxpool_spatial_size).is_integer() and
@@ -207,7 +207,8 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
         )
 
         # ensure valid maxpool in time dimension
-        assert self.cnn_layer1_maxpool_time_size * self.cnn_layer2_maxpool_time_size <= self.time_points
+        assert self.cnn_layer1_maxpool_time_size * self.cnn_layer2_maxpool_time_size <= self.time_points, \
+            f"Maxpool time sizes {self.cnn_layer1_maxpool_time_size} and {self.cnn_layer2_maxpool_time_size} not compatible with time points {self.time_points}"
 
         # kernel sizes must be odd
         assert (
@@ -242,9 +243,11 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
             input_shape[3]-(self.cnn_layer1_kernel_spatial_size-1),
         ]
         self.logger.info(f"CNN after conv #1: {output_shape}")
+        assert input_shape[2]-(self.cnn_layer1_kernel_spatial_size-1) > 0, \
+            f"Spatial size {input_shape[2]} not compatible with kernel spatial size {self.cnn_layer1_kernel_spatial_size}  (layer 1)"
         test_bad_shape(output_shape)
-        assert output_shape[2] % self.cnn_layer1_maxpool_spatial_size == 0
-
+        assert output_shape[2] % self.cnn_layer1_maxpool_spatial_size == 0, \
+            f"Spatial size {output_shape[2]} not compatible with maxpool spatial {self.cnn_layer1_maxpool_spatial_size} (layer 1)"
 
         # maxpool #1
         self.layer1_maxpool = nn.MaxPool3d(
@@ -282,8 +285,11 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
             output_shape[3] - (self.cnn_layer2_kernel_spatial_size-1),
         ]
         self.logger.info(f"CNN after conv #2: {output_shape}")
+        assert output_shape[2]-(self.cnn_layer2_kernel_spatial_size-1) > 0, \
+            f"Spatial size {output_shape[2]} not compatible with kernel spatial size {self.cnn_layer2_kernel_spatial_size} (layer 2)"
         test_bad_shape(output_shape)
-        assert output_shape[2] % self.cnn_layer2_maxpool_spatial_size == 0
+        assert output_shape[2] % self.cnn_layer2_maxpool_spatial_size == 0, \
+            f"Spatial size {output_shape[2]} not compatible with maxpool spatial {self.cnn_layer2_maxpool_spatial_size}  (layer 2)"
 
         # maxpool #2
         self.layer2_maxpool = nn.MaxPool3d(

@@ -5,7 +5,6 @@ import concurrent.futures
 import time
 from typing import Callable
 import multiprocessing as mp
-import traceback
 
 import numpy as np
 import torch.cuda
@@ -56,8 +55,8 @@ def run_optuna(
         n_workers_per_gpu: int = 1,
         n_trials_per_worker: int = 1000,
         analyzer_class: Callable = None,
-        sampler_startup_trials: int = 1000,  # random startup trials before activating sampler
-        pruner_startup_trials: int = 1000,  # startup trials before pruning
+        sampler_startup_trials: int = 100000,  # random startup trials before activating sampler
+        pruner_startup_trials: int = 100000,  # startup trials before pruning
         pruner_warmup_epochs: int = 10,  # initial epochs before pruning
         pruner_minimum_trials_at_epoch: int = 20,  # minimum trials at each epoch before pruning
         pruner_patience: int = 10,  # epochs to wait for improvement before pruning
@@ -158,7 +157,7 @@ def run_optuna(
                     **subprocess_kwargs,
                 )
                 futures.append(future)
-                time.sleep(5)
+                time.sleep(2)
             concurrent.futures.wait(futures)
             for i_future, future in enumerate(futures):
                 if future.exception() is None:
@@ -196,7 +195,7 @@ def subprocess_worker(
 ) -> None:
 
     sampler = optuna.samplers.TPESampler(
-        n_startup_trials=sampler_startup_trials,
+        n_startup_trials=sampler_startup_trials,  # trials with random sampling before enabling sampler
         constant_liar=constant_liar,
     )
     sampler.reseed_rng()
@@ -266,12 +265,6 @@ def launch_trial(
         device = f'cuda:{i_gpu:d}' if isinstance(i_gpu, int) else i_gpu
         input_kwargs['device'] = device
 
-        print(f'Trial {trial.number}')
-        for key, value in trial.params.items():
-            print(f'  Optuna param: {key}, value: {value}')
-        for key, value in input_kwargs.items():
-            print(f'  Model input: {key}, value: {value}')
-
         try:
             trainer = trainer_class(
                 optuna_trial=trial,
@@ -279,8 +272,9 @@ def launch_trial(
             )
             outputs = trainer.train()
         except Exception as e:
-            print(repr(e))
-            traceback.print_exc()
+            sys.stdout = sys.__stdout__
+            sys.stderr = sys.__stderr__
+            print(f"Trial {trial.number} failed: {repr(e)}")
             result = np.NAN
         else:
             assert isinstance(outputs, dict) and 'train_loss' in outputs

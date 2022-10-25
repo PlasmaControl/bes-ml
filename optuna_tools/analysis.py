@@ -2,13 +2,14 @@ from pathlib import Path
 import shutil
 from typing import Union, Sequence
 import subprocess
+from typing import Callable
 
 import numpy as np
 import matplotlib.pyplot as plt
 import optuna
 import seaborn as sns
 
-from bes_ml.elm_regression.analyze import Analyzer
+# from bes_ml.elm_regression.analyze import Analyzer
 
 
 NON_RUNNING_STATES = (
@@ -31,7 +32,7 @@ def open_study(
 
     db_url = f'sqlite:///{db_file.as_posix()}'
 
-    study = optuna.load_study('study', db_url)
+    study = optuna.load_study(study_name=study_dir.name, storage=db_url)
 
     return study
 
@@ -71,9 +72,11 @@ def merge_pdfs(
 def plot_study(
         study_dir: Union[Path, str],  # study dir. or db file
         save: bool = False,
-        metric: str = 'train_loss',
+        metric: str = 'valid_loss',
         use_last: bool = True,  # use last metric, not extremum
         quantile: float = None,
+        plot_trials: int = 4,
+        analyzer: Callable = None,
 ):
     study_dir = Path(study_dir).resolve()
     study = open_study(study_dir)
@@ -87,19 +90,21 @@ def plot_study(
     print(f'Completed trials: {len(trials)}')
 
     if use_last:
-        key = lambda trial: trial.user_attrs[metric][-1]
+        sort_key = lambda trial: trial.user_attrs[metric][-1]
     else:
         if 'score' in metric:
-            key = lambda trial: np.max(trial.user_attrs[metric])
+            sort_key = lambda trial: np.max(trial.user_attrs[metric])
+        elif 'loss' in metric:
+            sort_key = lambda trial: np.min(trial.user_attrs[metric])
         else:
-            key = lambda trial: np.min(trial.user_attrs[metric])
+            raise KeyError
 
     # sort trials by key
-    trials = sorted(trials, key=key)
+    trials = sorted(trials, key=sort_key)
     if 'score' in metric:
         trials.reverse()
 
-    values = np.array([key(trial) for trial in trials])
+    values = np.array([sort_key(trial) for trial in trials])
 
     if quantile is not None:
         if 'loss' in metric:
@@ -109,21 +114,19 @@ def plot_study(
             trials = [trial for trial, value in zip(trials, values) if value >= quantile]
         else:
             trials = [trial for trial, value in zip(trials, values) if value <= quantile]
-        values = np.array([key(trial) for trial in trials])
-
-    # subset of top trials
-    # top_quantile = np.quantile(values, 0.0)
-    # trials = [trial for i_trial, trial in enumerate(trials) if values[i_trial] >= top_quantile]
-    # values = np.array([values[i_trial] for i_trial in range(len(trials))])
+        values = np.array([sort_key(trial) for trial in trials])
 
     print("Top trials")
     for i_trial, trial in enumerate(trials[0:10]):
         print(f"  Trial {trial.number}  {metric} {values[i_trial]:.4g}")
 
-    # top_trial = trials[0]
-    # top_value = values[0]
-    # top_trial_dir = (study_dir / f'trial_{top_trial.number:04d}').resolve()
-    # print(f'Top trial {top_trial.number}  Max value: {top_value:.4f}  Dir: {top_trial_dir}')
+    if plot_trials and analyzer:
+        for trial in trials[0:plot_trials]:
+            plot_trial(
+                analyzer=analyzer,
+                study_dir=study_dir,
+                trial_number=trial.number,
+            )
 
     params = tuple(trials[-1].params.keys())
     n_params = len(params)
@@ -152,12 +155,31 @@ def plot_study(
         plt.savefig(filepath, transparent=True)
 
 
+def plot_trial(
+        analyzer: Callable,
+        trial_dir: Path|str = None,
+        study_dir: Path|str = None,
+        trial_number: int = None,
+        device = 'auto',
+        max_elms: int = None,
+) -> None:
+    if trial_dir:
+        trial_dir = Path(trial_dir)
+    elif study_dir and trial_number:
+        study_dir = Path(study_dir)
+        trial_dir = study_dir / f"trial_{trial_number:04d}"
+    assert trial_dir.exists()
+    trial_result = analyzer(trial_dir, device=device)
+    trial_result.plot_training()
+
+
 def plot_top_trials(
         study_dir,
         n_trials = 1,
         device = None,
         max_elms = None,
         use_train_loss = False,
+        analyzer: Callable = None,
 ):
     study_dir = Path(study_dir).resolve()
     study = open_study(study_dir)
@@ -178,7 +200,7 @@ def plot_top_trials(
         i_trial = sorted_indices[i]
         trial = trials[i_trial]
         trial_dir = study_dir / f'trial_{trial.number:04d}'
-        run = Analyzer(trial_dir, device=device)
+        run = analyzer(trial_dir, device=device)
         run.plot_training_epochs()
         # run.plot_valid_indices_analysis()
         if max_elms:
@@ -236,38 +258,5 @@ if __name__ == '__main__':
     plot_study(study_dir, metric='valid_loss', quantile=0.0, use_last=False, save=True)
 
     # plot_top_trials(study_dir, use_train_loss=True, n_trials=4)
-
-    # work_dir = Path.home() / 'edgeml/scratch/work/study_06'
-    # assert work_dir.exists()
-    #
-    # study_dirs = sorted(work_dir.glob('s06_*'))
-    # assert study_dirs
-    # for study_dir in study_dirs:
-    #     if not study_dir.is_dir():
-    #         continue
-    #     plot_study(study_dir, save=True, plot_top_trials=False)
-    # # merge study PDFs
-    # inputs = sorted(work_dir.glob('*.pdf'))
-    # assert inputs
-    # output = work_dir / 'optuna_results.pdf'
-    # output.unlink(missing_ok=True)
-    # merge_pdfs(inputs, output, delete_inputs=True)
-
-    # studies = (
-    #     sorted(work_dir.glob('s06_class_*')) +
-    #     sorted(work_dir.glob('s06_logreg_*'))
-    # )
-    # for study in studies:
-    #     if not study.is_dir(): continue
-    #     assert study.exists()
-    #     try:
-    #         plot_top_trials(
-    #             study,
-    #             n_trials=4,
-    #             device='cuda:1',
-    #             max_elms=18,
-    #         )
-    #     except:
-    #         pass
 
     plt.show()

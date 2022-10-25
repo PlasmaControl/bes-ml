@@ -57,6 +57,7 @@ class _ELM_Data_Base(
             self.label_type = np.int8
 
         if self.device.type == 'cuda':
+            self.logger.info("Using 2 workers for data loader")
             self.num_workers = 2
 
         self._get_data()

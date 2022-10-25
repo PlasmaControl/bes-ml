@@ -44,6 +44,7 @@ class _Base_Trainer_Dataclass:
     optimizer_type: str = 'sgd'  # adam (default) or sgd
     sgd_momentum: float = 0.0  # momentum for SGD optimizer, 0-1
     sgd_dampening: float = 0.0  # dampening for SGD optimizer, 0-1
+    sgd_nesterov: bool = False  # True for Nesterov momentum forumula
     learning_rate: float = 1e-3  # optimizer learning rate
     lr_scheduler_patience: int = 10  # epochs to wait before triggering lr scheduler
     lr_scheduler_factor: float = 0.5  # reduction factor for lr scheduler
@@ -97,7 +98,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         """
         Use python's logging to allow simultaneous print to console and log file.
         """
-        self.logger = logging.getLogger(name=__name__)
+        self.logger = logging.getLogger(name=__name__+str(np.random.randint(1e12)))
         self.logger.setLevel(logging.INFO)
 
         # logs to log file
@@ -173,6 +174,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                 weight_decay=self.weight_decay,
                 momentum=self.sgd_momentum,
                 dampening=self.sgd_dampening,
+                nesterov=self.sgd_nesterov,
             )
         self.logger.info(
             f"Optimizer {self.optimizer_type.upper()} " +
@@ -329,27 +331,29 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                     report_value = loss
                 assert np.isfinite(report_value)
                 report_successful = False
-                tries = 0
-                while report_successful is False and tries < 5:
+                tries = 1
+                while report_successful is False and tries <= 10:
                     try:
                         self.optuna_trial.report(report_value, i_epoch)
                     except:
                         self.logger.info("Failed optuna report, trying again...")
-                        time.sleep(3)
                         tries += 1
+                        time.sleep(2)
                     else:
                         report_successful = True
+                # break loop if report fails
                 if report_successful is False:
                     self.logger.info("==> Failed Optuna report, exiting training loop")
                     break
+                # break loop if pruning
                 if self.optuna_trial.should_prune():
                     do_optuna_prune = True
                     self.logger.info("==> Pruning trial with Optuna")
                     break  # exit epoch training loop
 
             # break loop if score stops improving
-            if (i_epoch > 40) and (i_epoch > best_epoch+20) and (score < 0.9 * best_score):
-                self.logger.info("==> Score is < 90% best score; breaking")
+            if (i_epoch > 20) and (i_epoch > best_epoch+10) and (score < 0.95 * best_score):
+                self.logger.info("==> Score is < 95% best score after 10 epochs; breaking")
                 break
 
         self.logger.info(f"End training loop")
