@@ -165,7 +165,7 @@ def plot_trial(
 ) -> None:
     if trial_dir:
         trial_dir = Path(trial_dir)
-    elif study_dir and trial_number:
+    elif study_dir is not None and trial_number is not None:
         study_dir = Path(study_dir)
         trial_dir = study_dir / f"trial_{trial_number:04d}"
     assert trial_dir.exists()
