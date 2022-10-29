@@ -122,8 +122,10 @@ class Trainer(
 if __name__=='__main__':
     model = Trainer(
         dense_num_kernels=8,
-        max_elms=5,
+        # max_elms=5,
+        fraction_test=0,
+        fraction_validation=0,
         bad_elm_indices_csv=True,  # read bad ELMs from CSV in bes_data.elm_data_tools
-        pre_elm_size=2000,
+        # pre_elm_size=2000,
     )
     model.train()
