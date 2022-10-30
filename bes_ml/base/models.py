@@ -143,6 +143,7 @@ class Dense_Features(_Dense_Features_Dataclass, _Base_Features):
             out_channels=self.dense_num_kernels,
             kernel_size=kernel_size,
         )
+        self.conv.bias.data.zero_()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self._time_interval_and_pooling(x)
@@ -236,6 +237,7 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
             # stride=(1, 1, 1),
             padding=((self.cnn_layer1_kernel_time_size-1)//2, 0, 0),  # pad time dimension
         )
+        self.layer1_conv.bias.data.zero_()
         output_shape = [
             self.cnn_layer1_num_kernels,
             input_shape[1],  # time dim unchanged due to padding
@@ -278,6 +280,7 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
             stride=(1, 1, 1),
             padding=((self.cnn_layer2_kernel_time_size-1)//2, 0, 0),
         )
+        self.layer2_conv.bias.data.zero_()
         output_shape = [
             self.cnn_layer2_num_kernels,
             output_shape[1],
@@ -646,14 +649,18 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
         hidden_layers = []
         in_features = self.total_features  # features are input layer to MLP
         for i_layer, layer_size in enumerate(self.mlp_hidden_layers):
-            hidden_layers.append(
-                nn.Linear(in_features=in_features, out_features=layer_size)
-            )
+            layer = nn.Linear(in_features=in_features, out_features=layer_size)
+            layer.bias.data.zero_()
+            hidden_layers.append(layer)
             in_features = layer_size
             self.logger.info(f"MLP layer {i_layer+1} size: {layer_size}")
         self.hidden_layers = nn.ModuleList(hidden_layers)
 
-        self.output_layer = nn.Linear(in_features=in_features, out_features=self.mlp_output_size)
+        self.output_layer = nn.Linear(
+            in_features=in_features, 
+            out_features=self.mlp_output_size, 
+            bias=False,
+        )
         self.logger.info(f"MLP output size: {self.mlp_output_size}")
 
         self.activation_function = getattr(nn, self.activation_name)
@@ -718,6 +725,12 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
         self.logger.info(f'Single input size: {test_input.shape}')
         test_output = self(test_input)
         self.logger.info(f"Single output size: {test_output.shape}")
+
+        print("Modules:")
+        for module in self.modules():
+            trainable_params = sum(p.numel() for p in module.parameters(recurse=False) if p.requires_grad)
+            if trainable_params:
+                print(f"  Module: {module._get_name()}  trainable params: {trainable_params}")
 
 
 if __name__ == '__main__':

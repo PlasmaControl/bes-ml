@@ -287,15 +287,6 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             # log training time
             self.results['epoch_time'].append(time.time()-t_start_epoch)
 
-            # save results to yaml
-            with (self.output_dir/self.results_file).open('w') as results_file:
-                yaml.dump(
-                    self.results,
-                    results_file,
-                    default_flow_style=False,
-                    sort_keys=False,
-                )
-
             # best score and save model
             if score > best_score:
                 best_score = score
@@ -304,6 +295,48 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                 self.model.save_pytorch_model(filename=self.output_dir/self.checkpoint_file)
                 if self.save_onnx_model:
                     self.model.save_onnx_model(filename=self.output_dir/self.onnx_checkpoint_file)
+
+            for module_name, module in self.model.named_modules():
+                n_params = sum(p.numel() for p in module.parameters(recurse=False) if p.requires_grad)
+                if n_params == 0:
+                    continue
+                for attr_name in ['weight', 'bias']:
+                    # if not hasattr(module, attr_name):
+                    #     self.logger.info(f"    {module_name} has no attr {attr_name}")
+                    #     continue
+                    attr = getattr(module, attr_name)
+                    if attr is None or attr.numel() < 3:
+                        continue
+                    mean = attr.mean()
+                    stdev = torch.sqrt(torch.mean((attr-mean)**2))
+                    scores = (attr - mean) / stdev
+                    skew = torch.mean(scores**3)
+                    kurt = torch.mean(scores**4) - 3
+                    self.logger.info(f"    {module_name} {attr_name} shape: {list(attr.size())}  mean: {mean:.6f}  stdev: {stdev:.6f}  skew: {skew:.6f}  kurt: {kurt:.6f}")
+                    result_key = f"{module_name}.{attr_name}"
+                    if result_key not in self.results:
+                        self.results[result_key] = {
+                            'size': attr.numel(),
+                            'shape': list(attr.size()),
+                            'mean': [],
+                            'stdev': [],
+                            'skew': [],
+                            'kurt': [],
+                        }
+                    for value, key in zip(
+                        [mean, stdev, skew, kurt],
+                        ['mean', 'stdev', 'skew', 'kurt'],
+                    ):
+                        self.results[result_key][key].append(value.item())
+
+            # save results to yaml
+            with (self.output_dir/self.results_file).open('w') as results_file:
+                yaml.dump(
+                    self.results,
+                    results_file,
+                    default_flow_style=False,
+                    sort_keys=False,
+                )
 
             # print epoch summary
             status =  f"Ep {i_epoch+1:03d}: "
@@ -378,7 +411,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         batch_losses = []
         all_predictions = []
         all_labels = []
-        n_bins = 80
+        n_bins = 20
         cummulative_hist = np.zeros(n_bins, dtype=int)
         if is_train:
             self.model.train()
@@ -430,14 +463,14 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                     status += f"minibatch time {time.time()-t_start_minibatch:.3f} s"
                     self.logger.info(status)
 
-        if is_train and epoch == 0:
-            bin_center = bin_edges[:-1] + (bin_edges[1]-bin_edges[0])/2
-            for h, bc in zip(cummulative_hist, bin_center):
-                self.logger.info(f"  Bin center {bc:.3f}  Count {h}")
-            mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
-            self.logger.info(f"Mean: {mean:.6f}")
-            stdev = np.sqrt(np.sum(cummulative_hist * (bin_center-mean)**2) / np.sum(cummulative_hist))
-            self.logger.info(f"StDev: {stdev:.6f}")
+        # if is_train and epoch == 0:
+        #     bin_center = bin_edges[:-1] + (bin_edges[1]-bin_edges[0])/2
+        #     for h, bc in zip(cummulative_hist, bin_center):
+        #         self.logger.info(f"  Bin center {bc:.3f}  Count {h}")
+        #     mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
+        #     self.logger.info(f"Mean: {mean:.6f}")
+        #     stdev = np.sqrt(np.sum(cummulative_hist * (bin_center-mean)**2) / np.sum(cummulative_hist))
+        #     self.logger.info(f"StDev: {stdev:.6f}")
         
         epoch_loss = np.mean(batch_losses)
         all_predictions = np.concatenate(all_predictions)
