@@ -411,7 +411,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         batch_losses = []
         all_predictions = []
         all_labels = []
-        n_bins = 20
+        n_bins = 80
         cummulative_hist = np.zeros(n_bins, dtype=int)
         if is_train:
             self.model.train()
@@ -463,14 +463,14 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                     status += f"minibatch time {time.time()-t_start_minibatch:.3f} s"
                     self.logger.info(status)
 
-        # if is_train and epoch == 0:
-        #     bin_center = bin_edges[:-1] + (bin_edges[1]-bin_edges[0])/2
-        #     for h, bc in zip(cummulative_hist, bin_center):
-        #         self.logger.info(f"  Bin center {bc:.3f}  Count {h}")
-        #     mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
-        #     self.logger.info(f"Mean: {mean:.6f}")
-        #     stdev = np.sqrt(np.sum(cummulative_hist * (bin_center-mean)**2) / np.sum(cummulative_hist))
-        #     self.logger.info(f"StDev: {stdev:.6f}")
+        if is_train and epoch == 0:
+            bin_center = bin_edges[:-1] + (bin_edges[1]-bin_edges[0])/2
+            for h, bc in zip(cummulative_hist, bin_center):
+                self.logger.info(f"  Bin center {bc:.3f}  Count {h}")
+            mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
+            self.logger.info(f"Mean: {mean:.6f}")
+            stdev = np.sqrt(np.sum(cummulative_hist * (bin_center-mean)**2) / np.sum(cummulative_hist))
+            self.logger.info(f"StDev: {stdev:.6f}")
         
         epoch_loss = np.mean(batch_losses)
         all_predictions = np.concatenate(all_predictions)

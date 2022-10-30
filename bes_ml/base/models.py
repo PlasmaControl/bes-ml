@@ -659,7 +659,7 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
         self.output_layer = nn.Linear(
             in_features=in_features, 
             out_features=self.mlp_output_size, 
-            bias=False,
+            # bias=False,
         )
         self.logger.info(f"MLP output size: {self.mlp_output_size}")
 
@@ -726,11 +726,11 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
         test_output = self(test_input)
         self.logger.info(f"Single output size: {test_output.shape}")
 
-        print("Modules:")
-        for module in self.modules():
-            trainable_params = sum(p.numel() for p in module.parameters(recurse=False) if p.requires_grad)
-            if trainable_params:
-                print(f"  Module: {module._get_name()}  trainable params: {trainable_params}")
+        # print("Modules:")
+        # for module in self.modules():
+        #     trainable_params = sum(p.numel() for p in module.parameters(recurse=False) if p.requires_grad)
+        #     if trainable_params:
+        #         print(f"  Module: {module._get_name()}  trainable params: {trainable_params}")
 
 
 if __name__ == '__main__':
