@@ -89,7 +89,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         self.model = self.model.to(self.device)
         self._make_optimizer_scheduler()
         self._prepare_data()
-        self._validate_data()
+        # self._validate_data()
 
         # validate data loaders
         for data_loader in [self.train_data_loader, self.validation_data_loader]:
@@ -236,7 +236,6 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                 loss, predictions, labels = self._single_epoch_loop(
                     is_train=is_train,
                     data_loader=data_loader,
-                    epoch=i_epoch,
                 )
                 # F1/R2 score
                 if self.is_regression:
