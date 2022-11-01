@@ -216,13 +216,12 @@ def summarize_study(
     trials = study.get_trials()
     for trial in trials:
         tmp = f"  Trial {trial.number}  state {trial.state}"
-        if trial.state in [
-            optuna.trial.TrialState.COMPLETE,
-            optuna.trial.TrialState.PRUNED,
-        ]:
-            tmp += f"  ep {len(trial.user_attrs['train_loss'])}"
-            tmp += f"  train_loss {trial.user_attrs['train_loss'][-1]:.4f}"
-            if trial.user_attrs['valid_score']:
+        if trial.state is optuna.trial.TrialState.FAIL:
+            continue
+        if 'train_score' in trial.user_attrs:
+            tmp += f"  ep {len(trial.user_attrs['train_score'])}"
+            tmp += f"  train_score {trial.user_attrs['train_score'][-1]:.4f}"
+            if 'valid_score' in trial.user_attrs:
                 tmp += f"  valid_score {trial.user_attrs['valid_score'][-1]:.4f}"
         print(tmp)
 
@@ -241,11 +240,10 @@ def summarize_study(
 
     assert count == len(trials)
 
-    importance = optuna.importance.get_param_importances(
-        study,
-    )
-    for param_name in importance:
-        print(f"  {param_name}  importance {importance[param_name]:0.3f}")
+    if sum([int(trial.state == optuna.trial.TrialState.COMPLETE) for trial in trials]) > 20:
+        importance = optuna.importance.get_param_importances(study)
+        for param_name in importance:
+            print(f"  {param_name}  importance {importance[param_name]:0.3f}")
 
 
 if __name__ == '__main__':
