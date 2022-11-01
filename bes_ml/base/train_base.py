@@ -46,9 +46,10 @@ class _Base_Trainer_Dataclass:
     sgd_dampening: float = 0.0  # dampening for SGD optimizer, 0-1
     sgd_nesterov: bool = False  # True for Nesterov momentum forumula
     learning_rate: float = 1e-3  # optimizer learning rate
-    lr_scheduler_patience: int = 10  # epochs to wait before triggering lr scheduler
+    lr_scheduler_patience: int = 20  # epochs to wait before triggering lr scheduler
     lr_scheduler_factor: float = 0.5  # reduction factor for lr scheduler
     lr_scheduler_threshold: float = 1e-3  # threshold for *relative* decrease in loss to *not* trigger LR scheduler
+    low_score_patience: int = 20  # epochs to wait before aborting due to low score
     weight_decay: float = 1e-3  # optimizer L2 regularization factor
     # optuna integration
     optuna_trial: Any = None  # optuna trial
@@ -88,6 +89,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         self.model = self.model.to(self.device)
         self._make_optimizer_scheduler()
         self._prepare_data()
+        self._validate_data()
 
         # validate data loaders
         for data_loader in [self.train_data_loader, self.validation_data_loader]:
@@ -301,9 +303,6 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                 if n_params == 0:
                     continue
                 for attr_name in ['weight', 'bias']:
-                    # if not hasattr(module, attr_name):
-                    #     self.logger.info(f"    {module_name} has no attr {attr_name}")
-                    #     continue
                     attr = getattr(module, attr_name)
                     if attr is None or attr.numel() < 3:
                         continue
@@ -312,7 +311,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                     scores = (attr - mean) / stdev
                     skew = torch.mean(scores**3)
                     kurt = torch.mean(scores**4) - 3
-                    self.logger.info(f"    {module_name} {attr_name} shape: {list(attr.size())}  mean: {mean:.6f}  stdev: {stdev:.6f}  skew: {skew:.6f}  kurt: {kurt:.6f}")
+                    # self.logger.info(f"    {module_name} {attr_name} shape: {list(attr.size())}  mean: {mean:.6f}  stdev: {stdev:.6f}  skew: {skew:.6f}  kurt: {kurt:.6f}")
                     result_key = f"{module_name}.{attr_name}"
                     if result_key not in self.results:
                         self.results[result_key] = {
@@ -386,8 +385,8 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                     break  # exit epoch training loop
 
             # break loop if score stops improving
-            if (i_epoch > 20) and (i_epoch > best_epoch+10) and (score < 0.95 * best_score):
-                self.logger.info("==> Score is < 95% best score after 10 epochs; breaking")
+            if (i_epoch > 20) and (i_epoch > best_epoch+self.low_score_patience) and (score < 0.95 * best_score):
+                self.logger.info("==> Score is < 95% best score; breaking")
                 break
 
         self.logger.info(f"End training loop")
@@ -406,13 +405,10 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         self,
         is_train: bool = True,  # True for train, False for evaluation/inference
         data_loader: torch.utils.data.DataLoader = None,  # train or validation data loader
-        epoch: int = 0,
     ) -> Union[np.ndarray, Tuple]:
         batch_losses = []
         all_predictions = []
         all_labels = []
-        n_bins = 80
-        cummulative_hist = np.zeros(n_bins, dtype=int)
         if is_train:
             self.model.train()
             context = contextlib.nullcontext()
@@ -423,9 +419,6 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             mode = 'Valid'
         with context:
             for i_batch, (signal_windows, labels) in enumerate(data_loader):
-                if is_train and epoch == 0:
-                    hist, bin_edges = np.histogram(signal_windows, bins=n_bins, range=[-1, 1])
-                    cummulative_hist += hist
                 signal_windows = signal_windows.to(self.device, non_blocking=True)
                 labels = labels.to(self.device, non_blocking=True)
                 if i_batch % self.minibatch_print_interval == 0:
@@ -463,19 +456,13 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                     status += f"minibatch time {time.time()-t_start_minibatch:.3f} s"
                     self.logger.info(status)
 
-        if is_train and epoch == 0:
-            bin_center = bin_edges[:-1] + (bin_edges[1]-bin_edges[0])/2
-            for h, bc in zip(cummulative_hist, bin_center):
-                self.logger.info(f"  Bin center {bc:.3f}  Count {h}")
-            mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
-            self.logger.info(f"Mean: {mean:.6f}")
-            stdev = np.sqrt(np.sum(cummulative_hist * (bin_center-mean)**2) / np.sum(cummulative_hist))
-            self.logger.info(f"StDev: {stdev:.6f}")
-        
         epoch_loss = np.mean(batch_losses)
         all_predictions = np.concatenate(all_predictions)
         all_labels = np.concatenate(all_labels)
         return epoch_loss, all_predictions, all_labels
+
+    def _validate_data(self) -> None:
+        raise NotImplementedError
 
     def _apply_loss_weight(
             self,

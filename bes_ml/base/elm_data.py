@@ -245,6 +245,10 @@ class _ELM_Data_Base(
         if self.normalize_signals:
             self.logger.info(f"  Normalizing signals to max ~= 1")
             packaged_signals /= 10.4  # normalize to max ~= 1
+            packaged_signals /= 2*0.022  # set stdev to ~0.5
+
+        self.signals_min = np.min(packaged_signals)
+        self.signals_max = np.max(packaged_signals)
 
         # valid indices for data sampling
         packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
@@ -349,6 +353,25 @@ class _ELM_Data_Base(
                     drop_last=True,
                 )
 
+    def _validate_data(self) -> None:
+        n_bins = 80
+        cummulative_hist = np.zeros(n_bins, dtype=int)
+        for signal_windows, _ in self.train_data_loader:
+            hist, bin_edges = np.histogram(
+                signal_windows,
+                bins=n_bins,
+                range=[self.signals_min, self.signals_max],
+            )
+            cummulative_hist += hist
+        bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
+        for h, bc in zip(cummulative_hist, bin_center):
+            self.logger.info(f"  Bin center {bc:.3f}  Count {h}")
+        mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
+        self.logger.info(f"Training data mean: {mean:.6f}")
+        stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
+        self.logger.info(f"Training data StDev: {stdev:.6f}")
+
+
 
 # TODO: make dataclass
 class ELM_Dataset(torch.utils.data.Dataset):
@@ -385,3 +408,4 @@ class ELM_Dataset(torch.utils.data.Dataset):
         # label for signal window
         label = self.labels[ time_idx + self.signal_window_size + self.prediction_horizon - 1 ]
         return signal_window, label
+
