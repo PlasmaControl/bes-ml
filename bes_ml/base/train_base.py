@@ -352,8 +352,8 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                     break  # exit epoch training loop
 
             # break loop if score stops improving
-            if (i_epoch > 20) and (i_epoch > best_epoch+10) and (score < 0.95 * best_score):
-                self.logger.info("==> Score is < 95% best score after 10 epochs; breaking")
+            if (i_epoch > 20) and (i_epoch > best_epoch+20) and (score < 0.95 * best_score):
+                self.logger.info("==> Score is < 95% best score after 20 epochs; breaking")
                 break
 
         self.logger.info(f"End training loop")
