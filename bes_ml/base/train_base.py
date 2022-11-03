@@ -288,6 +288,15 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             # log training time
             self.results['epoch_time'].append(time.time()-t_start_epoch)
 
+            # save results to yaml
+            with (self.output_dir/self.results_file).open('w') as results_file:
+                yaml.dump(
+                    self.results,
+                    results_file,
+                    default_flow_style=False,
+                    sort_keys=False,
+                )
+
             # best score and save model
             if score > best_score:
                 best_score = score
