@@ -20,19 +20,26 @@ NON_RUNNING_STATES = (
 
 
 def open_study(
-        study_dir: Union[Path, str],
+        study_dir: Union[Path, str] = None,
+        study_name: str = None,
+        db_url: str = None,
 ) -> optuna.study.Study:
     study_dir = Path(study_dir).resolve()
     assert study_dir.exists() and study_dir.is_dir()
     print(f"Opening study {study_dir}")
 
-    db_file = study_dir / f"{study_dir.name}.db"
-    assert db_file.exists()
-    print(f"Opening database {db_file}")
+    if study_name is None:
+        study_name = study_dir.name
 
-    db_url = f'sqlite:///{db_file.as_posix()}'
+    if db_url is None:
+        db_file = study_dir / f"{study_dir.name}.db"
+        assert db_file.exists()
+        print(f"Opening database {db_file}")
+        db_url = f'sqlite:///{db_file.as_posix()}'
 
-    study = optuna.load_study(study_name=study_dir.name, storage=db_url)
+    assert study_name and db_url
+
+    study = optuna.load_study(study_name=study_name, storage=db_url)
 
     return study
 
@@ -70,7 +77,9 @@ def merge_pdfs(
 
 
 def plot_study(
-        study_dir: Union[Path, str],  # study dir. or db file
+        study_dir: Union[Path, str] = None,  # study dir. or db file
+        study_name: str = None,
+        db_url: str = None,
         save: bool = False,
         metric: str = 'valid_loss',
         use_last: bool = True,  # use last metric, not extremum
@@ -79,7 +88,11 @@ def plot_study(
         analyzer: Callable = None,
 ):
     study_dir = Path(study_dir).resolve()
-    study = open_study(study_dir)
+    study = open_study(
+        study_dir=study_dir,
+        study_name=study_name,
+        db_url=db_url,
+    )
 
     trials = study.get_trials(
         states=(
@@ -208,10 +221,16 @@ def plot_top_trials(
 
 
 def summarize_study(
-        study_dir: Union[Path, str],  # study dir. or db file
+        study_dir: Union[Path, str] = None,  # study dir. or db file
+        study_name: str = None,
+        db_url: str = None,
 ) -> None:
     study_dir = Path(study_dir).resolve()
-    study = open_study(study_dir)
+    study = open_study(
+        study_dir=study_dir,
+        study_name=study_name,
+        db_url=db_url,
+    )
 
     trials = study.get_trials()
     for trial in trials:
