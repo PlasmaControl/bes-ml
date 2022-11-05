@@ -32,7 +32,9 @@ class _ELM_Data_Base(
     fraction_validation: float = 0.2  # fraction of dataset for validation
     fraction_test: float = 0.2  # fraction of dataset for testing
     test_data_file: str = 'test_data.pkl'
-    normalize_signals: bool = True  # if True, normalize BES signals such that max ~= 1
+    # normalize_signals: bool = True  # if True, normalize BES signals such that max ~= 1
+    standardize_signals: bool = True # if True, normalize training data to mean=0, stdev=1
+    clip_n_sigma: int = 6  # remove signal windows with abs(standardized_signals) > n_sigma
     seed: int = None  # RNG seed for deterministic, reproducable shuffling (ELMs, sample indices, etc.)
     data_partition_file: str = 'data_partition.yaml'  # data partition for training, valid., and testing
     max_elms: int = None
@@ -57,10 +59,11 @@ class _ELM_Data_Base(
             self.label_type = np.int8
 
         if self.device.type == 'cuda':
-            self.logger.info("Using 2 workers for data loader")
             self.num_workers = 2
+        self.logger.info("Subprocess workers per data loader: {self.num_workers}")
 
         self._get_data()
+        # self._validate_data()
         self._make_datasets()
         self._make_data_loaders()
 
@@ -235,21 +238,12 @@ class _ELM_Data_Base(
 
         assert packaged_labels.size == packaged_valid_t0.size
 
-        if save_filename:
+        if save_filename and self.is_main_process:
             plt.close()
             pdf_files = sorted(self.output_dir.glob(f'{save_filename}_*.pdf'))
             output = self.output_dir / f'{save_filename}.pdf'
             merge_pdfs(pdf_files, output, delete_inputs=True)
         
-        # normalize signals to max ~= 1
-        if self.normalize_signals:
-            self.logger.info(f"  Normalizing signals to max ~= 1")
-            packaged_signals /= 10.4  # normalize to max ~= 1
-            packaged_signals /= 2*0.022  # set stdev to ~0.5
-
-        self.signals_min = np.min(packaged_signals)
-        self.signals_max = np.max(packaged_signals)
-
         # valid indices for data sampling
         packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
         packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
@@ -292,12 +286,28 @@ class _ELM_Data_Base(
 
         return return_tuple
 
-    def _apply_label_normalization(
-        self,
-        labels: torch.Tensor = None,
-        valid_indices: torch.Tensor = None,
-    ) -> torch.Tensor:
-        return labels
+    # def _validate_data(self) -> None:
+
+    #     # normalize signals to max ~= 1
+    #     if self.normalize_signals:
+    #         self.logger.info(f"  Normalizing signals to max ~= 1")
+    #         packaged_signals /= 10.4  # normalize to max ~= 1
+    #         packaged_signals /= 2*0.022  # set stdev to ~0.5
+
+    #     self.signals_min = np.min(packaged_signals)
+    #     self.signals_max = np.max(packaged_signals)
+
+
+    def _apply_label_normalization(self) -> torch.Tensor:
+        raise NotImplementedError
+
+    def _check_for_balanced_data(self) -> None:
+        # if classification, must implement in subclass
+        raise NotImplementedError
+
+    def _get_valid_indices(self) -> None:
+        # must implement in subclass
+        raise NotImplementedError
 
     def _make_datasets(self) -> None:
         if hasattr(self, 'prediction_horizon'):
@@ -312,6 +322,20 @@ class _ELM_Data_Base(
             signal_window_size = self.signal_window_size,
             prediction_horizon=prediction_horizon,
         )
+        training_data_stats = self.train_dataset.get_signal_statistics()
+        self.logger.info(
+            f"Raw signals min {training_data_stats['min']:.4f} max {training_data_stats['max']:.4f} " +
+            f"mean {training_data_stats['mean']:.4f} stdev {training_data_stats['stdev']:.4f}"
+        )
+        self.results['training_data_stats'] = training_data_stats
+        if self.standardize_signals:
+            self.logger.info("Standardizing training data with mean=0, stdev=1")
+            self.train_dataset.standardize_signals(**training_data_stats)
+            if self.clip_n_sigma:
+                self.logger.info(f"  Clipping signal windows with abs(signals) > {self.clip_n_sigma} * stdev")
+                new_stats = self.train_dataset.clip_signals(clip_n_sigma=self.clip_n_sigma)
+                self.logger.info(f"  New min {new_stats['min']:.4f} max {new_stats['max']:.4f} mean {new_stats['mean']:.4f} stdev {new_stats['stdev']:.4f}")
+                self.logger.info(f"  New sample indices size: {self.train_dataset.sample_indices.numel()}")
 
         if self.validation_data:
             self.validation_dataset = ELM_Dataset(
@@ -321,16 +345,16 @@ class _ELM_Data_Base(
                 signal_window_size = self.signal_window_size,
                 prediction_horizon=prediction_horizon,
             )
+            if self.standardize_signals:
+                self.logger.info("Standardizing validation data in accordance with training data")
+                self.validation_dataset.standardize_signals(**training_data_stats)
+                if self.clip_n_sigma:
+                    self.logger.info(f"  Clipping signal windows with abs(signals) > {self.clip_n_sigma} * stdev")
+                    new_stats = self.validation_dataset.clip_signals(clip_n_sigma=self.clip_n_sigma)
+                    self.logger.info(f"  New min {new_stats['min']:.4f} max {new_stats['max']:.4f} mean {new_stats['mean']:.4f} stdev {new_stats['stdev']:.4f}")
+                    self.logger.info(f"  New sample indices size: {self.validation_dataset.sample_indices.numel()}")
         else:
             self.validation_dataset = None
-
-    def _check_for_balanced_data(self) -> None:
-        # if classification, must implement in subclass
-        raise NotImplementedError
-
-    def _get_valid_indices(self) -> None:
-        # must implement in subclass
-        raise NotImplementedError
 
     def _make_data_loaders(self) -> None:
         self.train_data_loader = torch.utils.data.DataLoader(
@@ -352,25 +376,6 @@ class _ELM_Data_Base(
                     pin_memory=self.pin_memory,
                     drop_last=True,
                 )
-
-    def _validate_data(self) -> None:
-        n_bins = 80
-        cummulative_hist = np.zeros(n_bins, dtype=int)
-        for signal_windows, _ in self.train_data_loader:
-            hist, bin_edges = np.histogram(
-                signal_windows,
-                bins=n_bins,
-                range=[self.signals_min, self.signals_max],
-            )
-            cummulative_hist += hist
-        bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
-        for h, bc in zip(cummulative_hist, bin_center):
-            self.logger.info(f"  Bin center {bc:.3f}  Count {h}")
-        mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
-        self.logger.info(f"Training data mean: {mean:.6f}")
-        stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
-        self.logger.info(f"Training data StDev: {stdev:.6f}")
-
 
 
 # TODO: make dataclass
@@ -397,6 +402,57 @@ class ELM_Dataset(torch.utils.data.Dataset):
         self.sample_indices = torch.from_numpy(sample_indices)
         self.signal_window_size = torch.tensor(signal_window_size, dtype=torch.int)
         self.prediction_horizon = torch.tensor(prediction_horizon, dtype=torch.int)
+
+    def get_signal_statistics(self, skip_mean_stdev: bool = False) -> dict:
+        signal_min = np.inf
+        signal_max = -np.inf
+        for signal_window, _ in self:
+            signal_min = np.min([signal_min, signal_window.min()])
+            signal_max = np.max([signal_max, signal_window.max()])
+        if skip_mean_stdev:
+            return_value = {
+                'min': signal_min.item(),
+                'max': signal_max.item(),
+            }
+        else:
+            n_bins = 80
+            cummulative_hist = np.zeros(n_bins, dtype=int)
+            for signal_window, _ in self:
+                hist, bin_edges = np.histogram(
+                    signal_window,
+                    bins=n_bins,
+                    range=[signal_min, signal_max],
+                )
+                cummulative_hist += hist
+            bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
+            mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
+            stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
+            return_value = {
+                'min': signal_min.item(),
+                'max': signal_max.item(),
+                'mean': mean.item(),
+                'stdev': stdev.item(),
+            }
+        return return_value
+
+    def standardize_signals(
+        self,
+        mean: float,
+        stdev: float,
+        **kwargs,
+    ) -> None:
+        self.signals = (self.signals - mean) / stdev
+
+    def clip_signals(self, clip_n_sigma: float = 6.0) -> dict:
+        sample_indices = self.sample_indices.tolist()
+        for i in range(len(sample_indices)-1, -1, -1):
+            signal_window, _ = self[i]
+            if torch.max(torch.abs(signal_window)) > clip_n_sigma:
+                sample_indices.pop(i)
+        self.sample_indices = torch.tensor(sample_indices, dtype=torch.int)
+        new_stats = self.get_signal_statistics()
+        assert new_stats['min'] >= -clip_n_sigma and new_stats['max'] <= clip_n_sigma
+        return new_stats
 
     def __len__(self) -> int:
         return self.sample_indices.size(dim=0)

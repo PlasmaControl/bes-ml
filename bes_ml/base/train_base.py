@@ -7,11 +7,13 @@ import dataclasses
 import time
 
 # 3rd-party imports
+import yaml
 import numpy as np
+from sklearn import metrics
 import torch
 import torch.utils.data
-import yaml
-from sklearn import metrics
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 try:
     import optuna  # conda-forge
@@ -36,9 +38,12 @@ class _Base_Trainer_Dataclass:
     save_onnx_model: bool = False  # export ONNX format
     onnx_checkpoint_file: str = 'checkpoint.onnx'  # onnx save file
     logger: logging.Logger = None
+    logger_name: str = None
     terminal_output: bool = True  # terminal output if True
     # training parameters
-    device: str | torch.device = 'auto'  # auto (default), cpu, cuda, or cuda:X
+    device: str | torch.device = 'auto'  # auto (default), cpu, cuda, or cuda:X; ignored if dpp
+    ddp_rank: int = None
+    ddp_world_size: int = None
     n_epochs: int = 2  # training epochs
     minibatch_print_interval: int = 2000  # print minibatch info
     optimizer_type: str = 'sgd'  # adam (default) or sgd
@@ -51,11 +56,14 @@ class _Base_Trainer_Dataclass:
     lr_scheduler_threshold: float = 1e-3  # threshold for *relative* decrease in loss to *not* trigger LR scheduler
     low_score_patience: int = 20  # epochs to wait before aborting due to low score
     weight_decay: float = 1e-3  # optimizer L2 regularization factor
+    do_train: bool = False # if True, start training at end of init
     # optuna integration
     optuna_trial: Any = None  # optuna trial
     # global parameters
     is_regression: bool = dataclasses.field(default=None, init=False)
     is_classification: bool = dataclasses.field(default=None, init=False)
+    is_ddp: bool = dataclasses.field(default=None, init=False)
+    is_main_process: bool = dataclasses.field(default=None, init=False)
     model: Multi_Features_Model = dataclasses.field(default=None, init=False)
     train_data_loader: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
     validation_data_loader: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
@@ -70,11 +78,16 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         self.output_dir = Path(self.output_dir).resolve()
         self.output_dir.mkdir(exist_ok=True, parents=True)
 
+        self.is_ddp = False if self.ddp_rank is None else True
+        self.is_main_process = self.ddp_rank in [None, 0]
+
         self._create_logger()
-        self._print_inputs()
-        self._save_inputs_to_yaml()
+        if self.is_main_process:
+            self._print_inputs()
+            self._save_inputs_to_yaml()
 
         self.results = {
+            'completed_epochs': 0,
             'train_loss': [],
             'train_score': [],
             'epoch_time': [],
@@ -85,45 +98,46 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         assert self.is_regression ^ self.is_classification  # XOR
 
         self._make_model()
-        self._set_device()
-        self.model = self.model.to(self.device)
+        self._setup_device()
         self._make_optimizer_scheduler()
         self._prepare_data()
-        # self._validate_data()
 
         # validate data loaders
         for data_loader in [self.train_data_loader, self.validation_data_loader]:
             assert isinstance(data_loader, torch.utils.data.DataLoader) or data_loader is None
 
+        if self.do_train:
+            self.train()
 
     def _create_logger(self):
         """
         Use python's logging to allow simultaneous print to console and log file.
         """
-        self.logger = logging.getLogger(name=__name__+str(np.random.randint(1e12)))
+        if self.logger_name is None:
+            self.logger_name = __name__+str(np.random.randint(1e12))
+        self.logger = logging.getLogger(name=self.logger_name)
         self.logger.setLevel(logging.INFO)
 
-        # logs to log file
-        log_file = self.output_dir / self.log_file
-        f_handler = logging.FileHandler(log_file.as_posix(), mode="w")
-        # create formatters and add it to the handlers
-        f_format = logging.Formatter("%(asctime)s:  %(message)s")
-        f_handler.setFormatter(f_format)
-        # add handlers to the logger
-        self.logger.addHandler(f_handler)
-
-        # logs to console
-        if self.terminal_output:
-            s_handler = logging.StreamHandler()
-            self.logger.addHandler(s_handler)
+        if self.is_main_process:
+            # logs to log file
+            log_file = self.output_dir / self.log_file
+            self.logger.addHandler(logging.FileHandler(log_file.as_posix(), mode="w"))
+            if self.terminal_output:
+                # logs to console
+                self.logger.addHandler(logging.StreamHandler())
+        else:
+            # null logger if not main process
+            self.logger.addHandler(logging.NullHandler())
 
     def _print_inputs(self):
+        if not self.is_main_process:
+            return
         cls = self.__class__
         self.logger.info(f"Class `{cls.__name__}` parameters:")
-        cls_fields_tuple = dataclasses.fields(cls)
+        cls_fields = sorted(dataclasses.fields(cls), key=lambda field: field.name)
         self_fields_dict = dataclasses.asdict(self)
-        assert set([field.name for field in cls_fields_tuple]) == set(self_fields_dict.keys())
-        for field in cls_fields_tuple:
+        assert set([field.name for field in cls_fields]) == set(self_fields_dict.keys())
+        for field in cls_fields:
             if field.name == 'logger': continue
             if self_fields_dict[field.name] == field.default:
                 tmp = f"  {field.name}: {self_fields_dict[field.name]}"
@@ -132,6 +146,8 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             self.logger.info(tmp)
 
     def _save_inputs_to_yaml(self):
+        if not self.is_main_process:
+            return
         filename = Path(self.output_dir / self.inputs_file)
         self_fields_dict = dataclasses.asdict(self)
         for skip_key in ['logger', 'optuna_trial']:
@@ -144,7 +160,6 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                 self_fields_dict,
                 parameters_file,
                 default_flow_style=False,
-                sort_keys=False,
             )
 
     def _make_model(self) -> None:
@@ -153,25 +168,44 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             for field in dataclasses.fields(Multi_Features_Model)
         }
         self.model = Multi_Features_Model(**model_kwargs)
-        self.model.print_model_summary()
+        if self.is_main_process:
+            self.model.print_model_summary()
 
-    def _set_device(self) -> None:
-        if self.device == 'auto':
+    def _setup_device(self) -> None:
+        if self.device in ['auto', 'dpp']:
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device = torch.device(self.device)
         self.logger.info(f"Device: {self.device}")
+        if self.is_ddp:
+            dist.init_process_group(
+                'nccl' if torch.cuda.is_available() else 'gloo', 
+                rank=self.ddp_rank, 
+                world_size=self.ddp_world_size,
+            )
+            # if torch.cuda.is_available():
+            #     torch.cuda.set_device(self.ddp_rank)
+            self.logger.info(f"Device: {self.device}  world_size: {self.ddp_world_size}  rank: {self.ddp_rank}")
+            self.ddp_model = DDP(
+                self.model, 
+                device_ids=[self.ddp_rank,] if torch.cuda.is_available() else None,
+                output_device=self.ddp_rank if torch.cuda.is_available() else None,
+            )
+            self._model_alias = self.ddp_model
+        else:
+            self.model = self.model.to(self.device)
+            self._model_alias = self.model
 
     def _make_optimizer_scheduler(self) -> None:
         assert self.optimizer_type in ['adam', 'sgd']
         if self.optimizer_type == 'adam':
             self.optimizer = torch.optim.Adam(
-                self.model.parameters(), 
+                self._model_alias.parameters(), 
                 lr=self.learning_rate, 
                 weight_decay=self.weight_decay,
             )
         elif self.optimizer_type == 'sgd':
             self.optimizer = torch.optim.SGD(
-                self.model.parameters(), 
+                self._model_alias.parameters(), 
                 lr=self.learning_rate, 
                 weight_decay=self.weight_decay,
                 momentum=self.sgd_momentum,
@@ -221,10 +255,12 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         self.logger.info(f"Begin training loop over {self.n_epochs} epochs")
         t_start_training = time.time()
         valid_loss = valid_score = valid_roc = None
+        do_optuna_prune = False
         # loop over epochs
         for i_epoch in range(self.n_epochs):
             t_start_epoch = time.time()
-            self.logger.info(f"Ep {i_epoch+1:03d}: begin")
+            if self.is_main_process:
+                self.logger.info(f"Ep {i_epoch+1:03d}: begin")
             self.results['lr'].append(self.optimizer.param_groups[0]['lr'])
             for is_train, data_loader in zip(
                 [True, False],
@@ -288,25 +324,14 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             # log training time
             self.results['epoch_time'].append(time.time()-t_start_epoch)
 
-            # save results to yaml
-            with (self.output_dir/self.results_file).open('w') as results_file:
-                yaml.dump(
-                    self.results,
-                    results_file,
-                    default_flow_style=False,
-                    sort_keys=False,
-                )
+            self.results['completed_epochs'] += 1
 
-            # best score and save model
-            if score > best_score:
-                best_score = score
-                best_epoch = i_epoch
-                self.logger.info(f"  Best score: {best_score:.3f}")
-                self.model.save_pytorch_model(filename=self.output_dir/self.checkpoint_file)
-                if self.save_onnx_model:
-                    self.model.save_onnx_model(filename=self.output_dir/self.onnx_checkpoint_file)
+            if not self.is_main_process:
+                # skip remainder if not DDP main process
+                continue
 
-            for module_name, module in self.model.named_modules():
+            # record layer statistics
+            for module_name, module in self._model_alias.named_modules():
                 n_params = sum(p.numel() for p in module.parameters(recurse=False) if p.requires_grad)
                 if n_params == 0:
                     continue
@@ -319,10 +344,9 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                     scores = (attr - mean) / stdev
                     skew = torch.mean(scores**3)
                     kurt = torch.mean(scores**4) - 3
-                    # self.logger.info(f"    {module_name} {attr_name} shape: {list(attr.size())}  mean: {mean:.6f}  stdev: {stdev:.6f}  skew: {skew:.6f}  kurt: {kurt:.6f}")
-                    result_key = f"{module_name}.{attr_name}"
-                    if result_key not in self.results:
-                        self.results[result_key] = {
+                    module_attr_name = f"{module_name}.{attr_name}"
+                    if module_attr_name not in self.results:
+                        self.results[module_attr_name] = {
                             'size': attr.numel(),
                             'shape': list(attr.size()),
                             'mean': [],
@@ -330,11 +354,11 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                             'skew': [],
                             'kurt': [],
                         }
-                    for value, key in zip(
+                    for stat_value, stat_name in zip(
                         [mean, stdev, skew, kurt],
                         ['mean', 'stdev', 'skew', 'kurt'],
                     ):
-                        self.results[result_key][key].append(value.item())
+                        self.results[module_attr_name][stat_name].append(stat_value.item())
 
             # save results to yaml
             with (self.output_dir/self.results_file).open('w') as results_file:
@@ -347,29 +371,34 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
 
             # print epoch summary
             status =  f"Ep {i_epoch+1:03d}: "
-            status += f"train loss {train_loss:.3f}  "
-            status += f"train {self.results['score_function_name']} {train_score:.3f}  "
+            status += f"train loss {train_loss:.4f}  "
+            status += f"train {self.results['score_function_name']} {train_score:.4f}  "
             if self.is_classification:
                 status += f"train ROC {train_roc:.3f}  "
             if valid_loss:
-                status += f"val loss {valid_loss:.3f}  "
-                status += f"val {self.results['score_function_name']} {valid_score:.3f}  "
+                status += f"val loss {valid_loss:.4f}  "
+                status += f"val {self.results['score_function_name']} {valid_score:.4f}  "
                 if self.is_classification:
                     status += f"val ROC {valid_roc:.3f}  "
             status += f"ep time {time.time()-t_start_epoch:.1f} s "
             status += f"(total time {time.time()-t_start_training:.1f} s)"
             self.logger.info(status)
 
+            # best score and save model
+            if score > best_score:
+                best_score = score
+                best_epoch = i_epoch
+                self.logger.info(f"  Best score: {best_score:.4f}")
+                self.model.save_pytorch_model(filename=self.output_dir/self.checkpoint_file)
+                if self.save_onnx_model:
+                    self.model.save_onnx_model(filename=self.output_dir/self.onnx_checkpoint_file)
+
             # optuna integration; report epoch result to optuna
-            do_optuna_prune = False
             if optuna is not None and self.optuna_trial is not None:
                 # save results dict in trial user attributes
-                for key in self.results:
-                    self.optuna_trial.set_user_attr(key, self.results[key])
-                if self.optuna_trial.user_attrs['maximize_score']:
-                    report_value = score
-                else:
-                    report_value = loss
+                for stat_name in self.results:
+                    self.optuna_trial.set_user_attr(stat_name, self.results[stat_name])
+                report_value = score if self.optuna_trial.user_attrs['maximize_score'] else loss
                 assert np.isfinite(report_value)
                 report_successful = False
                 tries = 1
@@ -418,23 +447,27 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         all_predictions = []
         all_labels = []
         if is_train:
-            self.model.train()
+            self._model_alias.train()
             context = contextlib.nullcontext()
             mode = 'Train'
         else:
-            self.model.eval()
+            self._model_alias.eval()
             context = torch.no_grad()
             mode = 'Valid'
         with context:
             for i_batch, (signal_windows, labels) in enumerate(data_loader):
-                signal_windows = signal_windows.to(self.device, non_blocking=True)
-                labels = labels.to(self.device, non_blocking=True)
+                if self.is_ddp and torch.cuda.is_available():
+                    signal_windows = signal_windows.to(self.ddp_rank, non_blocking=True)
+                    labels = labels.to(self.ddp_rank, non_blocking=True)
+                else:
+                    signal_windows = signal_windows.to(self.device, non_blocking=True)
+                    labels = labels.to(self.device, non_blocking=True)
                 if i_batch % self.minibatch_print_interval == 0:
                     t_start_minibatch = time.time()
                 if is_train:
                     self.optimizer.zero_grad()
                 # predictions are floats: regression scalars or classification logits
-                predictions = self.model(signal_windows)
+                predictions = self._model_alias(signal_windows)
                 if self.is_regression:
                     labels = labels.type_as(predictions)
                 elif self.is_classification:
@@ -468,9 +501,6 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         all_predictions = np.concatenate(all_predictions)
         all_labels = np.concatenate(all_labels)
         return epoch_loss, all_predictions, all_labels
-
-    def _validate_data(self) -> None:
-        raise NotImplementedError
 
     def _apply_loss_weight(
             self,

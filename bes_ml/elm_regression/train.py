@@ -1,8 +1,10 @@
 from typing import Tuple
 import dataclasses
+import os
 
 import numpy as np
 import torch
+import torch.multiprocessing as mp
 
 try:
     from ..base.elm_data import _ELM_Data_Base
@@ -23,7 +25,7 @@ class Trainer(
     # parameters for ELM regression task
     log_time: bool = False  # if True, use label = log(time_to_elm_onset)
     inverse_weight_label: bool = False  # if True, weight losses by 1/label
-    normalize_labels: bool = True  # if True, normalize labels to min/max = +/- 1
+    normalize_labels: bool = True  # if True, normalize labels to max/min = +/- 1
     pre_elm_size: int = None  # maximum pre-ELM window in time frames
 
     def __post_init__(self):
@@ -118,15 +120,30 @@ class Trainer(
         return labels
 
 
-
-if __name__=='__main__':
-    model = Trainer(
+def main(rank: int = None, world_size: int = None):
+    Trainer(
         dense_num_kernels=8,
-        # max_elms=5,
-        n_epochs=20,
+        max_elms=5,
+        # n_epochs=20,
         fraction_test=0,
-        fraction_validation=0,
+        # fraction_validation=0,
+        seed = 0,
         bad_elm_indices_csv=True,  # read bad ELMs from CSV in bes_data.elm_data_tools
         # pre_elm_size=2000,
+        ddp_rank=rank,
+        ddp_world_size=world_size,
+        do_train=True,
+        logger_name=__name__+str(np.random.randint(1e12)),
     )
-    model.train()
+
+
+def ddp_main():
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "29500"
+    world_size = 2
+    mp.spawn(main, args=(world_size,), nprocs=world_size, join=True)
+
+
+if __name__=='__main__':
+    # main()
+    ddp_main()

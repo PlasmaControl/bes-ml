@@ -1,7 +1,10 @@
 from typing import Tuple
 import dataclasses
+import os
 
 import numpy as np
+import torch.multiprocessing as mp
+
 
 try:
     from ..base.elm_data import _ELM_Data_Base
@@ -117,30 +120,33 @@ class Trainer(
         return packaged_valid_t0_indices
 
 
-if __name__=='__main__':
-    model = Trainer(
-        # model parameters
+def main(rank: int = None, world_size: int = None):
+    Trainer(
         dense_num_kernels=8,
-        signal_window_size=32,
-        activation_name='SiLU',
-        dropout_rate=0.1,
-        # ELM dataset parameters
-        normalize_signals=True,
-        batch_size=128,
-        fraction_validation=0.0,
-        fraction_test=0.0,
         max_elms=5,
+        # n_epochs=20,
+        fraction_test=0,
+        # fraction_validation=0,
+        seed = 0,
         bad_elm_indices_csv=True,  # read bad ELMs from CSV in bes_data.elm_data_tools
-        # _Base_Trainer parameters
-        n_epochs=4,
-        optimizer_type='sgd',
-        sgd_momentum=0.5,
-        learning_rate=1e-3,
-        lr_scheduler_patience=3,
-        weight_decay=1e-3,
         # ELM classification parameters,
         prediction_horizon=100,
         oversample_active_elm=True,
         one_hot_encoding=True,
+        do_train=True,
+        ddp_rank=rank,
+        ddp_world_size=world_size,
+        logger_name=__name__+str(np.random.randint(1e12)),
     )
-    model.train()
+
+
+def ddp_main():
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "29500"
+    world_size = 2
+    mp.spawn(main, args=(world_size,), nprocs=world_size, join=True)
+
+
+if __name__=='__main__':
+    # main()
+    ddp_main()

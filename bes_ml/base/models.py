@@ -593,7 +593,8 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
         if self.logger is None:
             self.logger = logging.getLogger(__name__)
             self.logger.setLevel(logging.INFO)
-            self.logger.addHandler(logging.StreamHandler())
+            # self.logger.addHandler(logging.StreamHandler())
+            self.logger.addHandler(logging.NullHandler())
 
         self.dense_features = \
             self.fft_features = \

@@ -34,4 +34,4 @@ def merge_pdfs(
         assert result.returncode == 0 and output.exists()
         if delete_inputs is True:
             for pdf_file in inputs:
-                pdf_file.unlink()
+                pdf_file.unlink(missing_ok=True)
