@@ -176,6 +176,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device = torch.device(self.device)
         self.logger.info(f"Device: {self.device}")
+        self.model = self.model.to(self.device)
         if self.is_ddp:
             dist.init_process_group(
                 'nccl' if torch.cuda.is_available() else 'gloo', 
@@ -192,7 +193,6 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             )
             self._model_alias = self.ddp_model
         else:
-            self.model = self.model.to(self.device)
             self._model_alias = self.model
 
     def _make_optimizer_scheduler(self) -> None:
