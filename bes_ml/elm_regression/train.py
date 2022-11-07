@@ -130,20 +130,24 @@ def main(rank: int = None, world_size: int = None):
         seed = 0,
         bad_elm_indices_csv=True,  # read bad ELMs from CSV in bes_data.elm_data_tools
         # pre_elm_size=2000,
-        ddp_rank=rank,
-        ddp_world_size=world_size,
+        # ddp=True,
+        local_rank=rank,
+        world_size=world_size,
+        device='cpu',
         do_train=True,
         logger_name=__name__+str(np.random.randint(1e12)),
     )
 
 
-def ddp_main():
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "29500"
-    world_size = 2
+def main_mp_spawn(world_size: int = 1):
+    if 'MASTER_ADDR' not in os.environ:
+        os.environ["MASTER_ADDR"] = "localhost"
+    if 'MASTER_PORT' not in os.environ:
+        os.environ["MASTER_PORT"] = "29500"
+    world_size = os.environ.get('$SLURM_NTASKS', world_size)
     mp.spawn(main, args=(world_size,), nprocs=world_size, join=True)
 
 
 if __name__=='__main__':
     # main()
-    ddp_main()
+    main_mp_spawn(world_size=2)

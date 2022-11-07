@@ -134,8 +134,8 @@ def main(rank: int = None, world_size: int = None):
         oversample_active_elm=True,
         one_hot_encoding=True,
         do_train=True,
-        ddp_rank=rank,
-        ddp_world_size=world_size,
+        world_rank=rank,
+        world_size=world_size,
         logger_name=__name__+str(np.random.randint(1e12)),
     )
 
