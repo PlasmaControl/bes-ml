@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 from typing import Union, Tuple, Any
 import dataclasses
+from datetime import datetime
 import time
 import os
 
@@ -33,7 +34,7 @@ class _Base_Trainer_Dataclass:
     # output parameters
     output_dir: Path | str = Path('run_dir')  # path to output dir.
     results_file: str = 'results.yaml'  # output training results
-    log_file: str = 'log.txt'  # output log file
+    # log_file: str = 'log.txt'  # output log file
     inputs_file: str = 'inputs.yaml'  # save inputs to yaml
     checkpoint_file: str = 'checkpoint.pytorch'  # pytorch save file
     save_onnx_model: bool = False  # export ONNX format
@@ -72,6 +73,7 @@ class _Base_Trainer_Dataclass:
     train_data_loader: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
     validation_data_loader: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
     results: dict = dataclasses.field(default=None, init=False)
+    _barrier: callable = dataclasses.field(default=None, init=False)
 
 
 @dataclasses.dataclass(eq=False)
@@ -79,6 +81,9 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
     """Base class for model trainer"""
 
     def __post_init__(self):
+
+        t_start_setup = time.time()
+
         self.output_dir = Path(self.output_dir).resolve()
         self.output_dir.mkdir(exist_ok=True, parents=True)
 
@@ -103,14 +108,11 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
 
         self._create_logger()
 
-        self._barrier()
-
         if self.is_main_process:
             self.logger.info(f"In main process with world rank {self.world_rank}")
             self.logger.info(f"Using DDP: {self.is_ddp}")
             self._print_inputs()
             self._save_inputs_to_yaml()
-
         self._barrier()
 
         # subclass must set is_regression XOR is_classification
@@ -127,6 +129,8 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         for data_loader in [self.train_data_loader, self.validation_data_loader]:
             assert isinstance(data_loader, torch.utils.data.DataLoader) or data_loader is None
 
+        self.logger.info(f"Setup time {time.time() - t_start_setup:.1f} s")
+
         if self.do_train:
             self.train()
 
@@ -138,25 +142,32 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         """
         Use python's logging to allow simultaneous print to console and log file.
         """
-        if self.logger_hash is None:
-            self.logger_hash = str(np.random.randint(1e12))
-        self.logger = logging.getLogger(name=f'logger_{self.logger_hash}')
+        if self.is_ddp:
+            assert self.logger_hash
+        if not self.logger_hash:
+            self.logger_hash = str(int(datetime.now().timestamp()))
+        self.logger = logging.getLogger(name=f"{__name__}_{self.logger_hash}")
         self.logger.setLevel(logging.INFO)
 
+        log_file = self.output_dir / f'log.txt'
+        log_file.unlink(missing_ok=True)
+        formatter = logging.Formatter(f"Rank {self.world_rank}: %(message)s")
+        self._barrier()
         if self.is_main_process or self.log_all_ranks:
             # logs to log file
-            f_handler = logging.FileHandler(
-                self.output_dir / f'log_{self.logger_hash}.txt',
-                # mode="w",
-            )
+            f_handler = logging.FileHandler(log_file)
+            f_handler.setFormatter(formatter)
             self.logger.addHandler(f_handler)
             if self.terminal_output:
                 # logs to console
-                self.logger.addHandler(logging.StreamHandler())
+                s_handler = logging.StreamHandler()
+                s_handler.setFormatter(formatter)
+                self.logger.addHandler(s_handler)
             self.logger.info(f"Logging for world rank {self.world_rank}")
         else:
             # null logger if not main process
             self.logger.addHandler(logging.NullHandler())
+        self._barrier()
 
     def _print_inputs(self):
         cls = self.__class__
@@ -176,7 +187,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
     def _save_inputs_to_yaml(self):
         filename = Path(self.output_dir / self.inputs_file)
         self_fields_dict = dataclasses.asdict(self)
-        for skip_key in ['logger', 'optuna_trial']:
+        for skip_key in ['logger', 'optuna_trial', '_barrier']:
             self_fields_dict.pop(skip_key)
         for key in self_fields_dict:
             if isinstance(self_fields_dict[key], Path):
@@ -194,7 +205,6 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             for field in dataclasses.fields(Multi_Features_Model)
         }
         self.model = Multi_Features_Model(**model_kwargs)
-        self._barrier()
         if self.is_main_process:
             self.model.print_model_summary()
         self._barrier()
@@ -204,7 +214,6 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             self.device = f'cuda:{self.local_rank}' if torch.cuda.is_available() else 'cpu'
         self.logger.info(f"Device {self.device}  world size {self.world_size}  " +
                          f"world rank {self.world_rank}  local rank {self.local_rank}")
-        self._barrier()
         self.device = torch.device(self.device)
 
         self.model = self.model.to(self.device)
@@ -309,6 +318,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                     [True, False],
                     [self.train_data_loader, self.validation_data_loader],
             ):
+                self._barrier()
                 if data_loader is None:
                     continue  # skip if validation data is empty
                 # loss and predictions
@@ -352,13 +362,13 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             # step LR scheduler
             self.lr_scheduler.step(loss)
 
-            # log training time
-            self.results['epoch_time'].append(time.time() - t_start_epoch)
-            self.results['completed_epochs'] += 1
-
             if not self.is_main_process:
                 # skip remainder if not main process
                 continue
+
+            # log training time
+            self.results['epoch_time'].append(time.time() - t_start_epoch)
+            self.results['completed_epochs'] += 1
 
             # record layer statistics
             for module_name, module in self._model_alias.named_modules():
@@ -411,7 +421,6 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                 if self.is_classification:
                     status += f"val ROC {valid_roc:.3f}  "
             status += f"ep time {time.time() - t_start_epoch:.1f} s "
-            status += f"(total time {time.time() - t_start_training:.1f} s)"
             self.logger.info(status)
 
             # best score and save model
@@ -456,11 +465,11 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                 self.logger.info("==> Score is < 95% best score; breaking")
                 break
 
+        self._barrier()
+
         if self.is_main_process:
             self.logger.info(f"End training loop")
-            self.logger.info(f"Elapsed time {time.time() - t_start_training:.1f} s")
-
-        self._barrier()
+            self.logger.info(f"Training time {time.time() - t_start_training:.1f} s")
 
         for handler in self.logger.handlers[:]:
             handler.close()

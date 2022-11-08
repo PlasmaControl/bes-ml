@@ -138,6 +138,7 @@ class _ELM_Data_Base(
             shuffle_indices=True,
             oversample_active_elm=self.oversample_active_elm,
         )
+        self._barrier()
 
         if n_validation_elms:
             self.logger.info(f"Validation ELM events: {validation_elms.size}")
@@ -147,6 +148,7 @@ class _ELM_Data_Base(
             )
         else:
             self.logger.info("Skipping validation data")
+        self._barrier()
 
         if n_test_elms:
             self.logger.info(f"Test ELM events: {test_elms.size}")
@@ -171,6 +173,7 @@ class _ELM_Data_Base(
             self.logger.info(f"  File size: {test_data_file.stat().st_size/1e6:.1f} MB")
         else:
             self.logger.info("Skipping test data")
+        self._barrier()
 
     def _preprocess_data(
         self,
@@ -183,14 +186,14 @@ class _ELM_Data_Base(
         packaged_window_start = None
         packaged_valid_t0 = None
         packaged_labels = None
-        if save_filename:
+        if save_filename and self.is_main_process:
             plt.ioff()
             _, axes = plt.subplots(nrows=3, ncols=4, figsize=(16, 9))
             self.logger.info(f"  Plotting valid indices: {save_filename}_**.pdf")
             i_page = 1
         with h5py.File(self.data_location, 'r') as h5_file:
             for i_elm, elm_index in enumerate(elm_indices):
-                if save_filename and i_elm%12==0:
+                if save_filename and i_elm%12==0 and self.is_main_process:
                     for axis in axes.flat:
                         plt.sca(axis)
                         plt.cla()
@@ -204,7 +207,7 @@ class _ELM_Data_Base(
                     labels = np.array(elm_event["manual_labels"], dtype=self.label_type)
                 labels, signals, valid_t0 = self._get_valid_indices(labels, signals)
                 assert labels.size == valid_t0.size
-                if save_filename:
+                if save_filename and self.is_main_process:
                     plt.sca(axes.flat[i_elm%12])
                     plt.plot(signals[:,2,3]/10, label='BES 20')
                     plt.plot(signals[:,2,5]/10, label='BES 22')
@@ -336,6 +339,7 @@ class _ELM_Data_Base(
                 new_stats = self.train_dataset.clip_signals(clip_n_sigma=self.clip_n_sigma)
                 self.logger.info(f"  New min {new_stats['min']:.4f} max {new_stats['max']:.4f} mean {new_stats['mean']:.4f} stdev {new_stats['stdev']:.4f}")
                 self.logger.info(f"  New sample indices size: {self.train_dataset.sample_indices.numel()}")
+        self._barrier()
 
         if self.validation_data:
             self.validation_dataset = ELM_Dataset(
@@ -355,6 +359,7 @@ class _ELM_Data_Base(
                     self.logger.info(f"  New sample indices size: {self.validation_dataset.sample_indices.numel()}")
         else:
             self.validation_dataset = None
+        self._barrier()
 
     def _make_data_loaders(self) -> None:
         train_sampler = torch.utils.data.DistributedSampler(
@@ -368,10 +373,9 @@ class _ELM_Data_Base(
             batch_size=self.batch_size,
             shuffle=True if (self.seed is None and self.is_ddp is False) else False,
             num_workers=self.num_workers,
-            # pin_memory=(self.device.type == 'cpu'),
             pin_memory=self.pin_memory,
             drop_last=True,
-            persistent_workers=True,
+            persistent_workers=True if self.num_workers > 0 else False,
         )
         if self.validation_dataset:
             validation_sampler = torch.utils.data.DistributedSampler(
@@ -385,11 +389,11 @@ class _ELM_Data_Base(
                 batch_size=self.batch_size,
                 shuffle=False,
                 num_workers=self.num_workers,
-                # pin_memory=(self.device.type == 'cpu'),
                 pin_memory=self.pin_memory,
                 drop_last=True,
-                persistent_workers=True,
+                persistent_workers=True if self.num_workers > 0 else False,
             )
+        self._barrier()
 
 
 # TODO: make dataclass

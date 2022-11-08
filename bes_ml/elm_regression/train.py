@@ -1,6 +1,7 @@
 from typing import Tuple
 import dataclasses
 import os
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -123,10 +124,10 @@ class Trainer(
 def main(rank: int = None, world_size: int = None, **kwargs):
     Trainer(
         dense_num_kernels=8,
-        max_elms=5,
-        # n_epochs=20,
+        # max_elms=5,
+        n_epochs=10,
         fraction_test=0,
-        # fraction_validation=0,
+        fraction_validation=0,
         seed = 0,
         bad_elm_indices_csv=True,  # read bad ELMs from CSV in bes_data.elm_data_tools
         # pre_elm_size=2000,
@@ -134,7 +135,8 @@ def main(rank: int = None, world_size: int = None, **kwargs):
         local_rank=rank,
         world_size=world_size,
         do_train=True,
-        logger_hash=str(np.random.randint(1e12)),
+        # log_all_ranks=True,
+        logger_hash=str(int(datetime.now().timestamp())),
         **kwargs,
     )
 
@@ -151,6 +153,4 @@ def main_mp_spawn(world_size: int = None):
 
 if __name__=='__main__':
     # main()
-    # main(device='cpu')
-    # main_mp_spawn(world_size=1)
     main_mp_spawn(world_size=4)
