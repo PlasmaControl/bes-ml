@@ -456,8 +456,11 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                 self.logger.info("==> Score is < 95% best score; breaking")
                 break
 
-        self.logger.info(f"End training loop")
-        self.logger.info(f"Elapsed time {time.time() - t_start_training:.1f} s")
+        if self.is_main_process:
+            self.logger.info(f"End training loop")
+            self.logger.info(f"Elapsed time {time.time() - t_start_training:.1f} s")
+
+        self._barrier()
 
         for handler in self.logger.handlers[:]:
             handler.close()

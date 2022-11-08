@@ -357,25 +357,39 @@ class _ELM_Data_Base(
             self.validation_dataset = None
 
     def _make_data_loaders(self) -> None:
+        train_sampler = torch.utils.data.DistributedSampler(
+            self.train_dataset,
+            shuffle=True if self.seed is None else False,
+            drop_last=True,
+        ) if self.is_ddp else None
         self.train_data_loader = torch.utils.data.DataLoader(
-                dataset=self.train_dataset,
+            dataset=self.train_dataset,
+            sampler= train_sampler,
+            batch_size=self.batch_size,
+            shuffle=True if (self.seed is None and self.is_ddp is False) else False,
+            num_workers=self.num_workers,
+            # pin_memory=(self.device.type == 'cpu'),
+            pin_memory=self.pin_memory,
+            drop_last=True,
+            persistent_workers=True,
+        )
+        if self.validation_dataset:
+            validation_sampler = torch.utils.data.DistributedSampler(
+                self.validation_dataset,
+                shuffle=False,
+                drop_last=True,
+            ) if self.is_ddp else None
+            self.validation_data_loader = torch.utils.data.DataLoader(
+                dataset=self.validation_dataset,
+                sampler=validation_sampler,
                 batch_size=self.batch_size,
-                shuffle=True if self.seed is None else False,
+                shuffle=False,
                 num_workers=self.num_workers,
                 # pin_memory=(self.device.type == 'cpu'),
                 pin_memory=self.pin_memory,
                 drop_last=True,
+                persistent_workers=True,
             )
-        if self.validation_dataset:
-            self.validation_data_loader = torch.utils.data.DataLoader(
-                    dataset=self.validation_dataset,
-                    batch_size=self.batch_size,
-                    shuffle=False,
-                    num_workers=self.num_workers,
-                    # pin_memory=(self.device.type == 'cpu'),
-                    pin_memory=self.pin_memory,
-                    drop_last=True,
-                )
 
 
 # TODO: make dataclass
