@@ -136,7 +136,7 @@ def main(rank: int = None, world_size: int = None):
         do_train=True,
         world_rank=rank,
         world_size=world_size,
-        logger_name=__name__+str(np.random.randint(1e12)),
+        logger_hash=__name__ + str(np.random.randint(1e12)),
     )
 
 

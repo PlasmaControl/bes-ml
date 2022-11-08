@@ -60,7 +60,7 @@ class _ELM_Data_Base(
 
         if self.device.type == 'cuda':
             self.num_workers = 2
-        self.logger.info("Subprocess workers per data loader: {self.num_workers}")
+        self.logger.info(f"Subprocess workers per data loader: {self.num_workers}")
 
         self._get_data()
         # self._validate_data()

@@ -120,7 +120,7 @@ class Trainer(
         return labels
 
 
-def main(rank: int = None, world_size: int = None):
+def main(rank: int = None, world_size: int = None, **kwargs):
     Trainer(
         dense_num_kernels=8,
         max_elms=5,
@@ -130,24 +130,27 @@ def main(rank: int = None, world_size: int = None):
         seed = 0,
         bad_elm_indices_csv=True,  # read bad ELMs from CSV in bes_data.elm_data_tools
         # pre_elm_size=2000,
-        # ddp=True,
+        # device='cpu',
         local_rank=rank,
         world_size=world_size,
-        device='cpu',
         do_train=True,
-        logger_name=__name__+str(np.random.randint(1e12)),
+        logger_hash=str(np.random.randint(1e12)),
+        **kwargs,
     )
 
 
-def main_mp_spawn(world_size: int = 1):
+def main_mp_spawn(world_size: int = None):
     if 'MASTER_ADDR' not in os.environ:
         os.environ["MASTER_ADDR"] = "localhost"
     if 'MASTER_PORT' not in os.environ:
         os.environ["MASTER_PORT"] = "29500"
-    world_size = os.environ.get('$SLURM_NTASKS', world_size)
+    if world_size is None:
+        world_size = int(os.environ.get('$SLURM_NTASKS', 1))
     mp.spawn(main, args=(world_size,), nprocs=world_size, join=True)
 
 
 if __name__=='__main__':
     # main()
-    main_mp_spawn(world_size=2)
+    # main(device='cpu')
+    # main_mp_spawn(world_size=1)
+    main_mp_spawn(world_size=4)

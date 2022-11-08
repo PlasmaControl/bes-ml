@@ -39,7 +39,8 @@ class _Base_Trainer_Dataclass:
     save_onnx_model: bool = False  # export ONNX format
     onnx_checkpoint_file: str = 'checkpoint.onnx'  # onnx save file
     logger: logging.Logger = None
-    logger_name: str = None
+    logger_hash: str = None
+    log_all_ranks: bool = False
     terminal_output: bool = True  # terminal output if True
     # training parameters
     device: str | torch.device = 'auto'  # auto (default), cpu, cuda, or cuda:X
@@ -82,22 +83,40 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         self.output_dir.mkdir(exist_ok=True, parents=True)
 
         if self.world_size is None and self.local_rank is None:
-            self.world_size = os.environ.get('SLURM_NTASKS', 1)
-            self.local_rank = os.environ.get('SLURM_LOCALID', 0)
-        self.world_rank = os.environ.get('SLURM_PROCID', self.local_rank)
+            self.world_size = int(os.environ.get('SLURM_NTASKS', 1))
+            self.local_rank = int(os.environ.get('SLURM_LOCALID', 0))
+        self.world_rank = int(os.environ.get('SLURM_PROCID', self.local_rank))
+        if self.world_rank < self.local_rank:
+            self.world_rank = self.local_rank
 
         self.is_ddp = self.world_size > 1
         self.is_main_process = self.world_rank == 0
 
-        self.results = {}
+        if self.is_ddp:
+            dist.init_process_group(
+                'nccl' if torch.cuda.is_available() else 'gloo',
+                rank=self.world_rank,
+                world_size=self.world_size,
+            )
+
+        print(f"World size {self.world_size}  world rank {self.world_rank}  local rank {self.local_rank}")
 
         self._create_logger()
+
+        self._barrier()
+
         if self.is_main_process:
+            self.logger.info(f"In main process with world rank {self.world_rank}")
+            self.logger.info(f"Using DDP: {self.is_ddp}")
             self._print_inputs()
             self._save_inputs_to_yaml()
 
+        self._barrier()
+
         # subclass must set is_regression XOR is_classification
         assert self.is_regression ^ self.is_classification  # XOR
+
+        self.results = {}
 
         self._make_model()
         self._setup_device()
@@ -111,25 +130,30 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         if self.do_train:
             self.train()
 
+    def _barrier(self):
+        if self.is_ddp:
+            dist.barrier()
+
     def _create_logger(self):
         """
         Use python's logging to allow simultaneous print to console and log file.
         """
-        if self.logger_name is None:
-            self.logger_name = __name__ + str(np.random.randint(1e12))
-        self.logger = logging.getLogger(name=self.logger_name)
+        if self.logger_hash is None:
+            self.logger_hash = str(np.random.randint(1e12))
+        self.logger = logging.getLogger(name=f'logger_{self.logger_hash}')
         self.logger.setLevel(logging.INFO)
 
-        if self.is_main_process:
+        if self.is_main_process or self.log_all_ranks:
             # logs to log file
             f_handler = logging.FileHandler(
-                self.output_dir / self.log_file,
-                mode="w",
+                self.output_dir / f'log_{self.logger_hash}.txt',
+                # mode="w",
             )
             self.logger.addHandler(f_handler)
             if self.terminal_output:
                 # logs to console
                 self.logger.addHandler(logging.StreamHandler())
+            self.logger.info(f"Logging for world rank {self.world_rank}")
         else:
             # null logger if not main process
             self.logger.addHandler(logging.NullHandler())
@@ -170,34 +194,30 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             for field in dataclasses.fields(Multi_Features_Model)
         }
         self.model = Multi_Features_Model(**model_kwargs)
+        self._barrier()
         if self.is_main_process:
             self.model.print_model_summary()
+        self._barrier()
 
     def _setup_device(self) -> None:
         if self.device == 'auto':
-            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            self.device = f'cuda:{self.local_rank}' if torch.cuda.is_available() else 'cpu'
+        self.logger.info(f"Device {self.device}  world size {self.world_size}  " +
+                         f"world rank {self.world_rank}  local rank {self.local_rank}")
+        self._barrier()
         self.device = torch.device(self.device)
+
         self.model = self.model.to(self.device)
         if self.is_ddp:
-            dist.init_process_group(
-                'nccl' if torch.cuda.is_available() else 'gloo',
-                rank=self.world_rank,
-                world_size=self.world_size,
-            )
-            if self.device.type=='cuda' and torch.cuda.is_available():
-                torch.cuda.set_device(self.local_rank % torch.cuda.device_count())
-                self.device = torch.device(f'cuda:{self.local_rank}')
-            self.logger.info(f"Device {self.device}  world size {self.world_size}  " +
-                             f"world rank {self.world_rank}  local rank {self.local_rank}")
             self.ddp_model = DDP(
                 self.model,
-                device_ids=[self.world_rank] if torch.cuda.is_available() else None,
-                output_device=self.world_rank if torch.cuda.is_available() else None,
+                device_ids=[self.world_rank] if self.device.type == 'cuda' else None,
+                output_device=self.world_rank if self.device.type == 'cuda' else None,
             )
             self._model_alias = self.ddp_model
         else:
-            self.logger.info(f"Device: {self.device}")
             self._model_alias = self.model
+        self._barrier()
 
     def _make_optimizer_scheduler(self) -> None:
         assert self.optimizer_type in ['adam', 'sgd']
@@ -216,12 +236,12 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                 dampening=self.sgd_dampening,
                 nesterov=self.sgd_nesterov,
             )
-        if self.is_main_process:
-            self.logger.info(
-                f"Optimizer {self.optimizer_type.upper()} " +
-                f"with learning rate {self.learning_rate:.1e} " +
-                f"and weight decay {self.weight_decay:.1e}"
-            )
+        # if self.is_main_process:
+        self.logger.info(
+            f"Optimizer {self.optimizer_type.upper()} " +
+            f"with learning rate {self.learning_rate:.1e} " +
+            f"and weight decay {self.weight_decay:.1e}"
+        )
         self.lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
             factor=self.lr_scheduler_factor,
@@ -230,6 +250,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             mode='min',
             verbose=True,
         )
+        self._barrier()
 
     def _prepare_data(self) -> None:
         # implement in subclass
