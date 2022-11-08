@@ -135,7 +135,7 @@ def main(rank: int = None, world_size: int = None, **kwargs):
         local_rank=rank,
         world_size=world_size,
         do_train=True,
-        # log_all_ranks=True,
+        log_all_ranks=True,
         logger_hash=str(int(datetime.now().timestamp())),
         **kwargs,
     )
@@ -152,5 +152,5 @@ def main_mp_spawn(world_size: int = None):
 
 
 if __name__=='__main__':
-    # main()
-    main_mp_spawn(world_size=4)
+    main()
+    # main_mp_spawn(world_size=4)
