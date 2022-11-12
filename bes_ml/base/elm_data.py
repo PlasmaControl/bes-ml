@@ -41,7 +41,7 @@ class _ELM_Data_Base(
     num_workers: int = 0  # number of subprocess workers for pytorch dataloader
     pin_memory: bool = True  # data loader pinned memory
     bad_elm_indices: Iterable = None  # iterable of ELM indices to skip when reading data
-    bad_elm_indices_csv: str | bool = None  # CSV file to read bad ELM indices
+    bad_elm_indices_csv: str | bool = True  # CSV file to read bad ELM indices
     label_type: np.int8 | np.float32 = dataclasses.field(default=None, init=False)
 
     def _prepare_data(self) -> None:
