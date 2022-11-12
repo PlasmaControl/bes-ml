@@ -2,6 +2,7 @@ from typing import Tuple
 import dataclasses
 import os
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -123,19 +124,18 @@ class Trainer(
 
 def main(rank: int = None, world_size: int = None, **kwargs):
     Trainer(
-        dense_num_kernels=8,
-        # max_elms=5,
-        n_epochs=10,
-        fraction_test=0,
-        fraction_validation=0,
-        seed = 0,
-        bad_elm_indices_csv=True,  # read bad ELMs from CSV in bes_data.elm_data_tools
-        # pre_elm_size=2000,
-        # device='cpu',
+        data_location = Path.home() / 'ml/scratch/data/labeled_elm_events.hdf5',
         local_rank=rank,
         world_size=world_size,
         do_train=True,
-        log_all_ranks=True,
+        dense_num_kernels=128,
+        signal_window_size=128,
+        max_elms=50,
+        n_epochs=2,
+        fraction_test=0,
+        # fraction_validation=0,
+        seed = 0,
+        # pre_elm_size=2000,
         logger_hash=str(int(datetime.now().timestamp())),
         **kwargs,
     )

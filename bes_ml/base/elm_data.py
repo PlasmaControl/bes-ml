@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 import dataclasses
 from typing import Union,Iterable, Tuple
@@ -32,16 +33,16 @@ class _ELM_Data_Base(
     fraction_validation: float = 0.2  # fraction of dataset for validation
     fraction_test: float = 0.2  # fraction of dataset for testing
     test_data_file: str = 'test_data.pkl'
-    # normalize_signals: bool = True  # if True, normalize BES signals such that max ~= 1
-    standardize_signals: bool = True # if True, normalize training data to mean=0, stdev=1
-    clip_n_sigma: int = 6  # remove signal windows with abs(standardized_signals) > n_sigma
-    seed: int = None  # RNG seed for deterministic, reproducable shuffling (ELMs, sample indices, etc.)
+    standardize_mean: float = 0.01
+    standardize_stdev: float = 0.221
+    clip_sigma: float = 6.0  # remove signal windows with abs(standardized_signals) > n_sigma
+    seed: int = None  # RNG seed for deterministic, reproducible shuffling (ELMs, sample indices, etc.)
     data_partition_file: str = 'data_partition.yaml'  # data partition for training, valid., and testing
     max_elms: int = None
     num_workers: int = 0  # number of subprocess workers for pytorch dataloader
     pin_memory: bool = True  # data loader pinned memory
     bad_elm_indices: Iterable = None  # iterable of ELM indices to skip when reading data
-    bad_elm_indices_csv: str | bool = None  # CSV file to read bad ELM indices
+    bad_elm_indices_csv: str | bool = True  # CSV file to read bad ELM indices
     label_type: np.int8 | np.float32 = dataclasses.field(default=None, init=False)
 
     def _prepare_data(self) -> None:
@@ -63,7 +64,6 @@ class _ELM_Data_Base(
         self.logger.info(f"Subprocess workers per data loader: {self.num_workers}")
 
         self._get_data()
-        # self._validate_data()
         self._make_datasets()
         self._make_data_loaders()
 
@@ -71,27 +71,31 @@ class _ELM_Data_Base(
         self.logger.info(f"Data file: {self.data_location}")
 
         with h5py.File(self.data_location, "r") as data_file:
+            self.logger.info(f"ELM events in data file: {len(data_file)}")
             if self.bad_elm_indices is None:
                 self.bad_elm_indices = []
             if self.bad_elm_indices_csv is True:
                 self.bad_elm_indices_csv = bad_elm_indices_csv
             if self.bad_elm_indices_csv:
-                self.logger.info(f"Reading bad ELM indices from {self.bad_elm_indices_csv}")
+                self.logger.info(f"Ignoring bad ELM indices from {self.bad_elm_indices_csv}")
                 with Path(self.bad_elm_indices_csv).open() as file:
                     self.bad_elm_indices = [int(line) for line in file]
             good_keys = []
+            bad_elm_count = 0
             for key in data_file:
                 if int(key) not in self.bad_elm_indices:
                     good_keys.append(key)
                 else:
-                    self.logger.info(f"  Skipping bad ELM index {int(key)}")
+                    bad_elm_count += 1
             elm_indices = np.array(
                 [int(key) for key in good_keys],
                 dtype=int,
             )
             time_frames = sum([data_file[key]['time'].shape[0] for key in good_keys])
-        self.logger.info(f"ELM events in data file: {elm_indices.size}")
-        self.logger.info(f"Total time frames: {time_frames:,}")
+        if bad_elm_count:
+            self.logger.info(f"Ignored bad ELM events: {bad_elm_count}")
+        self.logger.info(f"Valid ELM events: {elm_indices.size}")
+        self.logger.info(f"Total time frames for valid ELM events: {time_frames:,}")
 
         # shuffle ELM events
         self.rng_generator.shuffle(elm_indices)
@@ -126,17 +130,11 @@ class _ELM_Data_Base(
                 sort_keys=False,
             )
 
-        # TODO: move to classification trainer
-        if self.is_regression:
-            self.oversample_active_elm = False
-
-        self.train_data = self.validation_data = self.test_data = None
-
         self.logger.info(f"Training ELM events: {training_elms.size}")
         self.train_data = self._preprocess_data(
             elm_indices=training_elms,
             shuffle_indices=True,
-            oversample_active_elm=self.oversample_active_elm,
+            oversample_active_elm=self.oversample_active_elm if self.is_classification else False,
         )
         self._barrier()
 
@@ -148,6 +146,7 @@ class _ELM_Data_Base(
             )
         else:
             self.logger.info("Skipping validation data")
+            self.validation_data = None
         self._barrier()
 
         if n_test_elms:
@@ -169,34 +168,29 @@ class _ELM_Data_Base(
                     },
                     file,
                 )
-            assert test_data_file.exists(), f"{test_data_file} does not exist"
             self.logger.info(f"  File size: {test_data_file.stat().st_size/1e6:.1f} MB")
         else:
             self.logger.info("Skipping test data")
+            self.test_data = None
         self._barrier()
 
     def _preprocess_data(
         self,
-        elm_indices: Iterable = None,
+        elm_indices: np.ndarray = None,
         shuffle_indices: bool = False,
         oversample_active_elm: bool = False,
         save_filename: str = '',
-    ) -> None:
-        packaged_signals = None
-        packaged_window_start = None
-        packaged_valid_t0 = None
-        packaged_labels = None
+    ) -> tuple:
         if save_filename and self.is_main_process:
             plt.ioff()
             _, axes = plt.subplots(nrows=3, ncols=4, figsize=(16, 9))
             self.logger.info(f"  Plotting valid indices: {save_filename}_**.pdf")
             i_page = 1
         with h5py.File(self.data_location, 'r') as h5_file:
+            elm_data = []
             for i_elm, elm_index in enumerate(elm_indices):
-                if save_filename and i_elm%12==0 and self.is_main_process:
-                    for axis in axes.flat:
-                        plt.sca(axis)
-                        plt.cla()
+                if i_elm%200 == 0:
+                    self.logger.info(f"  ELM event {i_elm:04d}/{elm_indices.size:04d}")
                 elm_key = f"{elm_index:05d}"
                 elm_event = h5_file[elm_key]
                 signals = np.array(elm_event["signals"], dtype=np.float32)  # (64, <time>)
@@ -207,7 +201,14 @@ class _ELM_Data_Base(
                     labels = np.array(elm_event["manual_labels"], dtype=self.label_type)
                 labels, signals, valid_t0 = self._get_valid_indices(labels, signals)
                 assert labels.size == valid_t0.size
+                elm_data.append(
+                    {'signals': signals, 'labels': labels, 'valid_t0': valid_t0}
+                )
                 if save_filename and self.is_main_process:
+                    if i_elm % 12 == 0:
+                        for axis in axes.flat:
+                            plt.sca(axis)
+                            plt.cla()
                     plt.sca(axes.flat[i_elm%12])
                     plt.plot(signals[:,2,3]/10, label='BES 20')
                     plt.plot(signals[:,2,5]/10, label='BES 22')
@@ -224,20 +225,20 @@ class _ELM_Data_Base(
                             transparent=True,
                         )
                         i_page += 1
-                if packaged_signals is None:
-                    packaged_window_start = np.array([0])
-                    packaged_valid_t0 = valid_t0
-                    packaged_signals = signals
-                    packaged_labels = labels
-                else:
-                    last_index = packaged_labels.size - 1
-                    packaged_window_start = np.append(
-                        packaged_window_start, 
-                        last_index + 1
-                    )
-                    packaged_valid_t0 = np.concatenate([packaged_valid_t0, valid_t0])
-                    packaged_signals = np.concatenate([packaged_signals, signals], axis=0)
-                    packaged_labels = np.concatenate([packaged_labels, labels], axis=0)
+
+        self.logger.info('  Finished reading ELM event data')
+
+        packaged_labels = np.concatenate([elm['labels'] for elm in elm_data], axis=0)
+        packaged_signals = np.concatenate([elm['signals'] for elm in elm_data], axis=0)
+        packaged_valid_t0 = np.concatenate([elm['valid_t0'] for elm in elm_data], axis=0)
+        index_count = 0
+        packaged_window_start = np.array([], dtype=int)
+        for elm in elm_data:
+            packaged_window_start = np.append(
+                packaged_window_start,
+                index_count,
+            )
+            index_count += elm['labels'].size
 
         assert packaged_labels.size == packaged_valid_t0.size
 
@@ -251,6 +252,29 @@ class _ELM_Data_Base(
         packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
         packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
 
+        # standardize/clip signals
+        stats = self._get_statistics(
+            sample_indices=packaged_valid_t0_indices,
+            signals=packaged_signals,
+        )
+        self.logger.info(f"  Raw signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
+
+        if self.standardize_mean and self.standardize_stdev:
+            self.logger.info(f'  Standardizing signals with mean {self.standardize_mean:.4f} and stdev {self.standardize_stdev:.4f}')
+            packaged_signals = self._standardize_signals(signals=packaged_signals)
+            if self.clip_sigma:
+                self.logger.info(f"  Removing signal windows with max(abs(signals)) > {self.clip_sigma}")
+                packaged_valid_t0_indices = self._clip_signals(
+                    sample_indices=packaged_valid_t0_indices,
+                    signals=packaged_signals,
+                )
+            stats = self._get_statistics(
+                sample_indices=packaged_valid_t0_indices,
+                signals=packaged_signals,
+            )
+            self.logger.info(f"  Modified signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
+
+        # balance or normalize labels
         if self.is_classification:
             # assess data balance for active ELM/inactive ELM classification
             packaged_valid_t0_indices = self._check_for_balanced_data(
@@ -260,46 +284,69 @@ class _ELM_Data_Base(
             )
         elif self.is_regression:
             # if specified, normalize time-to-ELM labels to min/max = -/+ 1
-            packaged_labels = self._apply_label_normalization(packaged_labels, packaged_valid_t0_indices)
+            packaged_labels = self._apply_label_normalization(
+                packaged_labels,
+                packaged_valid_t0_indices,
+            )
 
         if shuffle_indices:
             self.rng_generator.shuffle(packaged_valid_t0_indices)
 
-        self.logger.info( "  Data tensors -> signals, labels, sample_indices, window_start_indices:")
-        for tensor in [
+        self.logger.info("  Finished packaging data")
+
+        self.logger.info( "  Data tensors -> signals, labels, sample_indices, window_start_indices, elm_indices:")
+        return_tuple = (
             packaged_signals,
             packaged_labels,
             packaged_valid_t0_indices,
             packaged_window_start,
-        ]:
-            self.logger.info(
-                f"  shape {tensor.shape}, dtype {tensor.dtype}, min {tensor.min():.3f}, max {tensor.max():.3f}"
-            )
-
-        return_tuple = (
-            packaged_signals, 
-            packaged_labels, 
-            packaged_valid_t0_indices, 
-            packaged_window_start, 
             elm_indices,
         )
-        # ensure everything is np.ndarray
-        for item in return_tuple:
-            assert isinstance(item, np.ndarray)
+        for array in return_tuple:
+            assert isinstance(array, np.ndarray)
+            self.logger.info(
+                f"    shape {array.shape}, dtype {array.dtype}, min {array.min():.3f}, max {array.max():.3f}"
+            )
 
         return return_tuple
 
-    # def _validate_data(self) -> None:
+    def _get_statistics(self, sample_indices: np.ndarray, signals: np.ndarray) -> dict:
+        signal_min = np.inf
+        signal_max = -np.inf
+        n_bins = 100
+        cummulative_hist = np.zeros(n_bins, dtype=int)
+        for i in sample_indices[::32]:
+            signal_window = signals[i: i + self.signal_window_size, :, :]
+            signal_min = np.min([signal_min, signal_window.min()])
+            signal_max = np.max([signal_max, signal_window.max()])
+            hist, bin_edges = np.histogram(
+                signal_window,
+                bins=n_bins,
+                range=[-10.4, 10.4],
+            )
+            cummulative_hist += hist
+        bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
+        mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
+        stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
+        return {
+            'count': sample_indices.size,
+            'min': signal_min.item(),
+            'max': signal_max.item(),
+            'mean': mean.item(),
+            'stdev': stdev.item(),
+        }
 
-    #     # normalize signals to max ~= 1
-    #     if self.normalize_signals:
-    #         self.logger.info(f"  Normalizing signals to max ~= 1")
-    #         packaged_signals /= 10.4  # normalize to max ~= 1
-    #         packaged_signals /= 2*0.022  # set stdev to ~0.5
+    def _standardize_signals(self, signals: np.ndarray) -> np.ndarray:
+        return (signals - self.standardize_mean) / self.standardize_stdev
 
-    #     self.signals_min = np.min(packaged_signals)
-    #     self.signals_max = np.max(packaged_signals)
-
+    def _clip_signals(self, sample_indices: np.ndarray, signals: np.ndarray) -> np.ndarray:
+        mask = []
+        for i in sample_indices:
+            signal_window = signals[i: i + self.signal_window_size, :, :]
+            mask.append(
+                (signal_window.max() <= self.clip_sigma) and (signal_window.min() >= -self.clip_sigma)
+            )
+        return sample_indices[mask]
 
     def _apply_label_normalization(self) -> torch.Tensor:
         raise NotImplementedError
@@ -313,52 +360,23 @@ class _ELM_Data_Base(
         raise NotImplementedError
 
     def _make_datasets(self) -> None:
-        if hasattr(self, 'prediction_horizon'):
-            prediction_horizon = self.prediction_horizon
-        else:
-            prediction_horizon = 0
-
+        self.logger.info('Making datasets')
         self.train_dataset = ELM_Dataset(
             signals=self.train_data[0],
             labels=self.train_data[1],
             sample_indices=self.train_data[2],
             signal_window_size = self.signal_window_size,
-            prediction_horizon=prediction_horizon,
+            prediction_horizon=self.prediction_horizon if hasattr(self, 'prediction_horizon') else 0,
         )
-        training_data_stats = self.train_dataset.get_signal_statistics()
-        self.logger.info(
-            f"Raw signals min {training_data_stats['min']:.4f} max {training_data_stats['max']:.4f} " +
-            f"mean {training_data_stats['mean']:.4f} stdev {training_data_stats['stdev']:.4f}"
-        )
-        self.results['training_data_stats'] = training_data_stats
-        if self.standardize_signals:
-            self.logger.info("Standardizing training data with mean=0, stdev=1")
-            self.train_dataset.standardize_signals(**training_data_stats)
-            if self.clip_n_sigma:
-                self.logger.info(f"  Clipping signal windows with abs(signals) > {self.clip_n_sigma} * stdev")
-                new_stats = self.train_dataset.clip_signals(clip_n_sigma=self.clip_n_sigma)
-                self.logger.info(f"  New min {new_stats['min']:.4f} max {new_stats['max']:.4f} mean {new_stats['mean']:.4f} stdev {new_stats['stdev']:.4f}")
-                self.logger.info(f"  New sample indices size: {self.train_dataset.sample_indices.numel()}")
         self._barrier()
 
-        if self.validation_data:
-            self.validation_dataset = ELM_Dataset(
-                signals=self.validation_data[0],
-                labels=self.validation_data[1],
-                sample_indices=self.validation_data[2],
-                signal_window_size = self.signal_window_size,
-                prediction_horizon=prediction_horizon,
-            )
-            if self.standardize_signals:
-                self.logger.info("Standardizing validation data in accordance with training data")
-                self.validation_dataset.standardize_signals(**training_data_stats)
-                if self.clip_n_sigma:
-                    self.logger.info(f"  Clipping signal windows with abs(signals) > {self.clip_n_sigma} * stdev")
-                    new_stats = self.validation_dataset.clip_signals(clip_n_sigma=self.clip_n_sigma)
-                    self.logger.info(f"  New min {new_stats['min']:.4f} max {new_stats['max']:.4f} mean {new_stats['mean']:.4f} stdev {new_stats['stdev']:.4f}")
-                    self.logger.info(f"  New sample indices size: {self.validation_dataset.sample_indices.numel()}")
-        else:
-            self.validation_dataset = None
+        self.validation_dataset = ELM_Dataset(
+            signals=self.validation_data[0],
+            labels=self.validation_data[1],
+            sample_indices=self.validation_data[2],
+            signal_window_size = self.signal_window_size,
+            prediction_horizon=self.prediction_horizon if hasattr(self, 'prediction_horizon') else 0,
+        ) if self.validation_data else None
         self._barrier()
 
     def _make_data_loaders(self) -> None:
@@ -400,86 +418,34 @@ class _ELM_Data_Base(
 class ELM_Dataset(torch.utils.data.Dataset):
 
     def __init__(
-        self,
-        signals: np.ndarray = None, 
-        labels: np.ndarray = None, 
-        sample_indices: np.ndarray = None, 
-        signal_window_size: int = None,
-        prediction_horizon: int = 0,  # =0 for time-to-ELM regression; >=0 for classification prediction
+            self,
+            signals: np.ndarray,
+            labels: np.ndarray,
+            sample_indices: np.ndarray,
+            signal_window_size: int,
+            prediction_horizon: int = 0,  # =0 for time-to-ELM regression; >=0 for classification prediction
     ) -> None:
-        self.signals = torch.unsqueeze(torch.from_numpy(signals), 0)
+        self.signals = torch.from_numpy(signals[np.newaxis, ...])
         assert (
-            self.signals.ndim == 4 and 
-            self.signals.shape[0] == 1 and 
-            self.signals.shape[2] == 8 and 
-            self.signals.shape[3] == 8
+            self.signals.ndim == 4 and
+            self.signals.size(0) == 1 and
+            self.signals.size(2) == 8 and
+            self.signals.size(3) == 8
         ), "Signals have incorrect shape"
         self.labels = torch.from_numpy(labels)
         assert self.labels.ndim == 1, "Labels have incorrect shape"
-        assert self.labels.shape[0] == self.signals.shape[1], "Labels and signals have different time dimensions"
+        assert self.labels.numel() == self.signals.size(1), "Labels and signals have different time dimensions"
+        self.signal_window_size = signal_window_size
+        self.prediction_horizon = prediction_horizon
         self.sample_indices = torch.from_numpy(sample_indices)
-        self.signal_window_size = torch.tensor(signal_window_size, dtype=torch.int)
-        self.prediction_horizon = torch.tensor(prediction_horizon, dtype=torch.int)
-
-    def get_signal_statistics(self, skip_mean_stdev: bool = False) -> dict:
-        signal_min = np.inf
-        signal_max = -np.inf
-        for signal_window, _ in self:
-            signal_min = np.min([signal_min, signal_window.min()])
-            signal_max = np.max([signal_max, signal_window.max()])
-        if skip_mean_stdev:
-            return_value = {
-                'min': signal_min.item(),
-                'max': signal_max.item(),
-            }
-        else:
-            n_bins = 80
-            cummulative_hist = np.zeros(n_bins, dtype=int)
-            for signal_window, _ in self:
-                hist, bin_edges = np.histogram(
-                    signal_window,
-                    bins=n_bins,
-                    range=[signal_min, signal_max],
-                )
-                cummulative_hist += hist
-            bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
-            mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
-            stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
-            return_value = {
-                'min': signal_min.item(),
-                'max': signal_max.item(),
-                'mean': mean.item(),
-                'stdev': stdev.item(),
-            }
-        return return_value
-
-    def standardize_signals(
-        self,
-        mean: float,
-        stdev: float,
-        **kwargs,
-    ) -> None:
-        self.signals = (self.signals - mean) / stdev
-
-    def clip_signals(self, clip_n_sigma: float = 6.0) -> dict:
-        sample_indices = self.sample_indices.tolist()
-        for i in range(len(sample_indices)-1, -1, -1):
-            signal_window, _ = self[i]
-            if torch.max(torch.abs(signal_window)) > clip_n_sigma:
-                sample_indices.pop(i)
-        self.sample_indices = torch.tensor(sample_indices, dtype=torch.int)
-        new_stats = self.get_signal_statistics()
-        assert new_stats['min'] >= -clip_n_sigma and new_stats['max'] <= clip_n_sigma
-        return new_stats
+        assert torch.max(self.sample_indices)+self.signal_window_size+self.prediction_horizon-1 <= self.labels.numel()
 
     def __len__(self) -> int:
-        return self.sample_indices.size(dim=0)
+        return self.sample_indices.numel()
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        time_idx = self.sample_indices[idx]
-        # BES signal window data
-        signal_window = self.signals[:, time_idx : time_idx + self.signal_window_size, :, :]
-        # label for signal window
-        label = self.labels[ time_idx + self.signal_window_size + self.prediction_horizon - 1 ]
+    def __getitem__(self, i: int) -> Tuple:
+        i_t0 = self.sample_indices[i]
+        signal_window = self.signals[:, i_t0 : i_t0 + self.signal_window_size, :, :]
+        label = self.labels[ i_t0 + self.signal_window_size + self.prediction_horizon - 1 ]
         return signal_window, label
 

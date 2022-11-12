@@ -40,7 +40,7 @@ class _Base_Trainer_Dataclass:
     save_onnx_model: bool = False  # export ONNX format
     onnx_checkpoint_file: str = 'checkpoint.onnx'  # onnx save file
     logger: logging.Logger = None
-    logger_hash: str = None
+    logger_hash: str | int = None
     log_all_ranks: bool = False
     terminal_output: bool = True  # terminal output if True
     # training parameters
@@ -145,7 +145,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         if self.is_ddp:
             assert self.logger_hash
         if not self.logger_hash:
-            self.logger_hash = str(int(datetime.now().timestamp()))
+            self.logger_hash = int(datetime.now().timestamp())
         self.logger = logging.getLogger(name=f"{__name__}_{self.logger_hash}")
         self.logger.setLevel(logging.INFO)
 
@@ -214,6 +214,8 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             self.device = f'cuda:{self.local_rank}' if torch.cuda.is_available() else 'cpu'
         self.logger.info(f"Device {self.device}  world size {self.world_size}  " +
                          f"world rank {self.world_rank}  local rank {self.local_rank}")
+        if torch.cuda.is_available():
+            self.logger.info(f"Device count: {torch.cuda.device_count()}")
         self.device = torch.device(self.device)
 
         self.model = self.model.to(self.device)
@@ -497,8 +499,8 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         with context:
             for i_batch, (signal_windows, labels) in enumerate(data_loader):
                 if self.is_ddp and torch.cuda.is_available():
-                    signal_windows = signal_windows.to(self.world_rank, non_blocking=True)
-                    labels = labels.to(self.world_rank, non_blocking=True)
+                    signal_windows = signal_windows.to(self.local_rank, non_blocking=True)
+                    labels = labels.to(self.local_rank, non_blocking=True)
                 else:
                     signal_windows = signal_windows.to(self.device, non_blocking=True)
                     labels = labels.to(self.device, non_blocking=True)
