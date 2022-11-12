@@ -339,7 +339,8 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
 
         assert np.log2(self.fft_nbins) % 1 == 0  # ensure power of 2
 
-        self.nfft = self.subwindow_size // self.fft_nbins
+        # self.nfft = self.subwindow_size // self.fft_nbins
+        self.nfft = self.signal_window_size // self.fft_nbins
         self.nfreqs = self.nfft // 2 + 1
 
         filter_size = (
@@ -349,50 +350,76 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
         )
 
         # list of conv. filter banks (each with self.num_kernels) with size self.subwindow_bins
-        self.conv = nn.ModuleList(
-            [
-                nn.Conv3d(
-                    in_channels=1,
-                    out_channels=self.fft_num_kernels,
-                    kernel_size=filter_size,
-                ) for _ in range(self.subwindows)
-            ]
+        self.conv = nn.Conv3d(
+            in_channels=1,
+            out_channels=self.fft_num_kernels,
+            kernel_size=filter_size,
         )
+        # self.conv = nn.ModuleList(
+        #     [
+        #         nn.Conv3d(
+        #             in_channels=1,
+        #             out_channels=self.fft_num_kernels,
+        #             kernel_size=filter_size,
+        #         ) for _ in range(self.subwindows)
+        #     ]
+        # )
 
     def forward(self, x):
         # x = x.to(self.device)  # needed for PowerPC architecture
         x = self._time_interval_and_pooling(x)
-        fft_features_size = [
+        # fft_features_size = [
+        #     x.shape[0],
+        #     # self.subwindows,
+        #     1,
+        #     self.fft_num_kernels,
+        #     1,
+        #     1,
+        #     1,
+        # ]
+        # fft_features = torch.empty(size=fft_features_size, dtype=x.dtype, device=x.device)
+        fft_bins_size = [
             x.shape[0],
-            self.subwindows,
-            self.fft_num_kernels,
-            1,
-            1,
-            1,
+            self.fft_nbins,
+            self.nfreqs,
+            x.shape[3],
+            x.shape[4],
         ]
-        fft_features = torch.empty(size=fft_features_size, dtype=x.dtype, device=x.device)
-        for i_sw in torch.arange(self.subwindows):
-            fft_bins_size = [
-                x.shape[0],
-                self.fft_nbins,
-                self.nfreqs,
-                x.shape[3],
-                x.shape[4],
-            ]
-            fft_bins = torch.empty(size=fft_bins_size, dtype=x.dtype, device=x.device)
-            x_sw = x[:, :, i_sw*self.subwindow_size:(i_sw+1)*self.subwindow_size, :, :]
-            for i_bin in torch.arange(self.fft_nbins):
-                fft_bins[:, i_bin: i_bin + 1, :, :, :] = torch.abs(
-                    torch.fft.rfft(
-                        x_sw[:, :, i_bin * self.nfft:(i_bin+1) * self.nfft, :, :], 
-                        dim=2,
-                    )
+        fft_bins = torch.empty(size=fft_bins_size, dtype=x.dtype, device=x.device)
+        # x_sw = x[:, :, :, :, :]
+        for i_bin in torch.arange(self.fft_nbins):
+            fft_bins[:, i_bin: i_bin + 1, :, :, :] = torch.abs(
+                torch.fft.rfft(
+                    x[:, :, i_bin * self.nfft:(i_bin+1) * self.nfft, :, :], 
+                    dim=2,
                 )
-            fft_sw = torch.mean(fft_bins, dim=1, keepdim=True)
-            fft_sw_features = self.conv[i_sw](fft_sw)
-            fft_features[:, i_sw:i_sw+1, :, :, :, :] = \
-                torch.unsqueeze(fft_sw_features, 1)
-        output_features = self._flatten_activation_dropout(fft_features)
+            )
+        fft_sw = torch.mean(fft_bins, dim=1, keepdim=True)
+        fft_sw_features = self.conv(fft_sw)
+        # fft_features = torch.unsqueeze(fft_sw_features, 1)
+        
+        # for i_sw in torch.arange(self.subwindows):
+        #     fft_bins_size = [
+        #         x.shape[0],
+        #         self.fft_nbins,
+        #         self.nfreqs,
+        #         x.shape[3],
+        #         x.shape[4],
+        #     ]
+        #     fft_bins = torch.empty(size=fft_bins_size, dtype=x.dtype, device=x.device)
+        #     x_sw = x[:, :, i_sw*self.subwindow_size:(i_sw+1)*self.subwindow_size, :, :]
+        #     for i_bin in torch.arange(self.fft_nbins):
+        #         fft_bins[:, i_bin: i_bin + 1, :, :, :] = torch.abs(
+        #             torch.fft.rfft(
+        #                 x_sw[:, :, i_bin * self.nfft:(i_bin+1) * self.nfft, :, :], 
+        #                 dim=2,
+        #             )
+        #         )
+        #     fft_sw = torch.mean(fft_bins, dim=1, keepdim=True)
+        #     fft_sw_features = self.conv[i_sw](fft_sw)
+        #     fft_features[:, i_sw:i_sw+1, :, :, :, :] = \
+        #         torch.unsqueeze(fft_sw_features, 1)
+        output_features = self._flatten_activation_dropout(fft_sw_features)
         return output_features
 
 
