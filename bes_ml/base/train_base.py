@@ -473,6 +473,16 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             self.logger.info(f"End training loop")
             self.logger.info(f"Training time {time.time() - t_start_training:.1f} s")
 
+            if hasattr(self.model, 'fft_features') and self.model.fft_features.fft_histogram:
+                fft_features = self.model.fft_features
+                self.logger.info(f"  FFT min/max:{fft_features.min:.4f}, {fft_features.max:.4f}")
+                bin_center = fft_features.bin_edges[:-1] + (fft_features.bin_edges[1] - fft_features.bin_edges[0]) / 2
+                mean = np.sum(fft_features.cummulative_hist * bin_center) / np.sum(fft_features.cummulative_hist)
+                stdev = np.sqrt(np.sum(fft_features.cummulative_hist * (bin_center - mean) ** 2) / np.sum(fft_features.cummulative_hist))
+                self.logger.info(f"  FFT mean {mean:.4f}  stdev {stdev:.4f}")
+                # for i in range(fft_features.hist_bins):
+                #     self.logger.info(f"  edge {bin_center[i]:.3}:  {fft_features.cummulative_hist[i]}")
+
         for handler in self.logger.handlers[:]:
             handler.close()
             self.logger.removeHandler(handler)

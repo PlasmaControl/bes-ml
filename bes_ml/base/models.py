@@ -32,6 +32,7 @@ class _Base_Features_Dataclass:
     leakyrelu_negative_slope: float = 1e-3  # leaky relu negative slope; ~1e-3
     dropout_rate: float = 0.1  # ~0.1
     logger: logging.Logger = None
+    debug: bool = False  # do some debugging checks
 
 
 @dataclasses.dataclass(eq=False)
@@ -320,6 +321,8 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
         x = self.layer1_maxpool(x)
         x = self.activation(self.dropout(self.layer2_conv(x)))
         x = self.layer2_maxpool(x)
+        if self.debug:
+            assert torch.all(torch.isfinite(x))
         return torch.flatten(x, 1)
 
 
@@ -327,6 +330,11 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
 class _FFT_Features_Dataclass(_Base_Features_Dataclass):
     fft_num_kernels: int = 0
     fft_nbins: int = 4
+    fft_histogram: bool = False
+    fft_mean: float = None
+    fft_stdev: float = None
+    fft_kernel_time_size: int = 5
+    fft_kernel_spatial_size: int = 4
 
 
 @dataclasses.dataclass(eq=False)
@@ -339,87 +347,64 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
 
         assert np.log2(self.fft_nbins) % 1 == 0  # ensure power of 2
 
-        # self.nfft = self.subwindow_size // self.fft_nbins
         self.nfft = self.signal_window_size // self.fft_nbins
         self.nfreqs = self.nfft // 2 + 1
+        self.min = np.inf
+        self.max = -np.inf
+        self.hist_bins = 230
+        self.cummulative_hist = np.zeros(self.hist_bins, dtype=int)
 
-        filter_size = (
-            self.nfreqs, 
-            8 // self.spatial_pool_size,
-            8 // self.spatial_pool_size,
+        kernel_size = (
+            self.fft_kernel_time_size,
+            self.fft_kernel_spatial_size,
+            self.fft_kernel_spatial_size,
         )
 
         # list of conv. filter banks (each with self.num_kernels) with size self.subwindow_bins
         self.conv = nn.Conv3d(
             in_channels=1,
             out_channels=self.fft_num_kernels,
-            kernel_size=filter_size,
+            kernel_size=kernel_size,
         )
-        # self.conv = nn.ModuleList(
-        #     [
-        #         nn.Conv3d(
-        #             in_channels=1,
-        #             out_channels=self.fft_num_kernels,
-        #             kernel_size=filter_size,
-        #         ) for _ in range(self.subwindows)
-        #     ]
-        # )
 
     def forward(self, x):
-        # x = x.to(self.device)  # needed for PowerPC architecture
         x = self._time_interval_and_pooling(x)
-        # fft_features_size = [
-        #     x.shape[0],
-        #     # self.subwindows,
-        #     1,
-        #     self.fft_num_kernels,
-        #     1,
-        #     1,
-        #     1,
-        # ]
-        # fft_features = torch.empty(size=fft_features_size, dtype=x.dtype, device=x.device)
         fft_bins_size = [
             x.shape[0],
             self.fft_nbins,
-            self.nfreqs,
+            self.nfreqs-1,
             x.shape[3],
             x.shape[4],
         ]
         fft_bins = torch.empty(size=fft_bins_size, dtype=x.dtype, device=x.device)
-        # x_sw = x[:, :, :, :, :]
         for i_bin in torch.arange(self.fft_nbins):
-            fft_bins[:, i_bin: i_bin + 1, :, :, :] = torch.abs(
-                torch.fft.rfft(
-                    x[:, :, i_bin * self.nfft:(i_bin+1) * self.nfft, :, :], 
-                    dim=2,
-                )
+            rfft = torch.fft.rfft(
+                x[:, :, i_bin * self.nfft:(i_bin+1) * self.nfft, :, :], 
+                dim=2,
             )
+            fft_bins[:, i_bin: i_bin + 1, :, :, :] = torch.abs(rfft[:, :, 1:, :, :]) ** 2
         fft_sw = torch.mean(fft_bins, dim=1, keepdim=True)
+        # if torch.any(fft_sw<1e-5):
+        #     fft_sw[fft_sw<1e-5] = 1e-5
+        fft_sw = torch.log10(fft_sw)
+        if self.fft_mean and self.fft_stdev:
+            fft_sw = (fft_sw - self.fft_mean) / self.fft_stdev
+            fft_sw[fft_sw<-6] = -6
+            fft_sw[fft_sw>6] = 6
+        if self.fft_histogram:
+            self.min = np.min([fft_sw.min().item(), self.min])
+            self.max = np.max([fft_sw.max().item(), self.min])
+            hist, bin_edges = np.histogram(
+                fft_sw,
+                bins=self.hist_bins,
+                range=[-7,7],
+            )
+            self.cummulative_hist += hist
+            self.bin_edges = bin_edges
         fft_sw_features = self.conv(fft_sw)
-        # fft_features = torch.unsqueeze(fft_sw_features, 1)
-        
-        # for i_sw in torch.arange(self.subwindows):
-        #     fft_bins_size = [
-        #         x.shape[0],
-        #         self.fft_nbins,
-        #         self.nfreqs,
-        #         x.shape[3],
-        #         x.shape[4],
-        #     ]
-        #     fft_bins = torch.empty(size=fft_bins_size, dtype=x.dtype, device=x.device)
-        #     x_sw = x[:, :, i_sw*self.subwindow_size:(i_sw+1)*self.subwindow_size, :, :]
-        #     for i_bin in torch.arange(self.fft_nbins):
-        #         fft_bins[:, i_bin: i_bin + 1, :, :, :] = torch.abs(
-        #             torch.fft.rfft(
-        #                 x_sw[:, :, i_bin * self.nfft:(i_bin+1) * self.nfft, :, :], 
-        #                 dim=2,
-        #             )
-        #         )
-        #     fft_sw = torch.mean(fft_bins, dim=1, keepdim=True)
-        #     fft_sw_features = self.conv[i_sw](fft_sw)
-        #     fft_features[:, i_sw:i_sw+1, :, :, :, :] = \
-        #         torch.unsqueeze(fft_sw_features, 1)
         output_features = self._flatten_activation_dropout(fft_sw_features)
+        if self.debug:
+            assert torch.all(torch.isfinite(output_features))
         return output_features
 
 
@@ -623,12 +608,6 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
             # self.logger.addHandler(logging.StreamHandler())
             self.logger.addHandler(logging.NullHandler())
 
-        self.dense_features = \
-            self.fft_features = \
-            self.dct_features = \
-            self.dwt_features = \
-            self.cnn_features = None
-
         self_parameters = inspect.signature(self.__class__).parameters
 
         def get_feature_class_parameters(feature_class) -> dict:
@@ -639,43 +618,37 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
                     feature_kwargs[param_name] = getattr(self, param_name)
             return feature_kwargs
 
+        self.features = []
         if self.dense_num_kernels > 0:
             feature_kwargs = get_feature_class_parameters(Dense_Features)
             self.dense_features = Dense_Features(**feature_kwargs)
-
+            self.features.append(self.dense_features)
         if self.fft_num_kernels > 0:
             feature_kwargs = get_feature_class_parameters(FFT_Features)
             self.fft_features = FFT_Features(**feature_kwargs)
-
+            self.features.append(self.fft_features)
         if self.dct_num_kernels > 0:
             feature_kwargs = get_feature_class_parameters(DCT_Features)
             self.dct_features = DCT_Features(**feature_kwargs)
-
+            self.features.append(self.dct_features)
         if self.dwt_num_kernels > 0:
             feature_kwargs = get_feature_class_parameters(DWT_Features)
             self.dwt_features = DWT_Features(**feature_kwargs)
-
+            self.features.append(self.dwt_features)
         if self.cnn_layer1_num_kernels > 0 and self.cnn_layer2_num_kernels > 0:
             feature_kwargs = get_feature_class_parameters(CNN_Features)
             self.cnn_features = CNN_Features(**feature_kwargs)
-
-        self.total_features = sum(
-            [
-                features.num_kernels #* features.subwindow_nbins
-                for features in [
-                    self.dense_features,
-                    self.fft_features,
-                    self.dwt_features,
-                    self.dct_features,
-                    self.cnn_features,
-                ]
-                if features is not None
-            ]
-        )
+            self.features.append(self.cnn_features)
+        assert len(self.features) > 0
+        self.total_features = 0
+        for feature in self.features:
+            feature_count = feature.forward(torch.rand([1, 1, feature.time_points, 8, 8])).numel()
+            self.total_features += feature_count
+            self.logger.info(f"{feature.__class__.__name__} with {feature_count} features")
         self.logger.info(f"Total features: {self.total_features}")
 
         hidden_layers = []
-        in_features = self.total_features  # features are input layer to MLP
+        in_features = self.total_features
         for i_layer, layer_size in enumerate(self.mlp_hidden_layers):
             layer = nn.Linear(in_features=in_features, out_features=layer_size)
             layer.bias.data.zero_()
@@ -699,24 +672,15 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
         self.dropout = nn.Dropout(p=self.dropout_rate)
 
     def forward(self, x):
-        dense_features = self.dense_features(x) if self.dense_features else None
-        fft_features = self.fft_features(x) if self.fft_features else None
-        dwt_features = self.dwt_features(x) if self.dwt_features else None
-        dct_features = self.dct_features(x) if self.dct_features else None
-        cnn_features = self.cnn_features(x) if self.cnn_features else None
-
-        all_features = [
-            features
-            for features in [dense_features, fft_features, dwt_features, dct_features, cnn_features]
-            if features is not None
-        ]
-
-        x = torch.cat(all_features, dim=1)
+        all_features = [features(x) for features in self.features]
+        if self.debug:
+            for features in all_features:
+                assert torch.all(torch.isfinite(features))
+        all_features = torch.cat(all_features, dim=1)
         for hidden_layer in self.hidden_layers:
-            x = self.activation(self.dropout(hidden_layer(x)))
-        x = self.output_layer(x)
-
-        return x
+            all_features = self.activation(self.dropout(hidden_layer(all_features)))
+        prediction = self.output_layer(all_features)
+        return prediction
 
     def save_pytorch_model(self, filename: Path | str = None) -> None:
         filename = Path(filename)
@@ -738,27 +702,26 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
     def print_model_summary(self) -> None:
         self.logger.info("MODEL SUMMARY")
         input_shape = (1, 1, self.signal_window_size, 8, 8)
+        input_data = torch.rand(*input_shape)
 
         # catpure torchinfo.summary() output
         tmp_io = io.StringIO()
         sys.stdout = tmp_io
-        print()
-        torchinfo.summary(self, input_size=input_shape, device=torch.device('cpu'))
+        torchinfo.summary(self, input_data=input_data, device=torch.device('cpu'))
         sys.stdout = sys.__stdout__
-        self.logger.info(tmp_io.getvalue())
+        self.logger.info('\n'+tmp_io.getvalue())
         # print model summary
         n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         self.logger.info(f"Model contains {n_params} trainable parameters")
-        test_input = torch.rand(*input_shape).to(torch.device('cpu'))
-        self.logger.info(f'Single input size: {test_input.shape}')
-        test_output = self(test_input)
-        self.logger.info(f"Single output size: {test_output.shape}")
+        self.logger.info(f'Single input size: {input_data.shape}')
+        output = self(input_data)
+        self.logger.info(f"Single output size: {output.shape}")
 
-        # print("Modules:")
-        # for module in self.modules():
-        #     trainable_params = sum(p.numel() for p in module.parameters(recurse=False) if p.requires_grad)
-        #     if trainable_params:
-        #         print(f"  Module: {module._get_name()}  trainable params: {trainable_params}")
+        self.logger.info("Modules:")
+        for module in self.modules():
+            trainable_params = sum(p.numel() for p in module.parameters(recurse=False) if p.requires_grad)
+            if trainable_params:
+                self.logger.info(f"  Module: {module._get_name()}  trainable params: {trainable_params}")
 
 
 if __name__ == '__main__':

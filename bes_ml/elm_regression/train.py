@@ -21,7 +21,7 @@ except ImportError:
 @dataclasses.dataclass(eq=False)
 class Trainer(
     _ELM_Data_Base,  # ELM data
-    _Multi_Features_Model_Dataclass,  # NN model
+    # _Multi_Features_Model_Dataclass,  # NN model
     _Base_Trainer,  # training and output
 ):
     # parameters for ELM regression task
@@ -68,7 +68,7 @@ class Trainer(
             assert valid_t0[first_signal_window_start_index - 1] == 0
             n_valid_t0 = np.min([last_signal_window_start_index+1, self.pre_elm_size])
             assert np.count_nonzero(valid_t0) == n_valid_t0
-        labels = np.arange(n_pre_elm_phase, 0, -1, dtype=np.float32)
+        labels = np.arange(n_pre_elm_phase, 0, -1, dtype=self.label_type)
         assert labels.size == n_pre_elm_phase
         assert labels.min() == 1
         assert labels.max() == n_pre_elm_phase

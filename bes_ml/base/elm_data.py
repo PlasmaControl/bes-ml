@@ -16,26 +16,26 @@ from bes_data.elm_data_tools import bad_elm_indices_csv
 try:
     from .train_base import _Base_Trainer_Dataclass
     from .utilities import merge_pdfs
-    from .models import _Base_Features_Dataclass
+    from .models import _Base_Features_Dataclass, _Multi_Features_Model_Dataclass
 except ImportError:
     from bes_ml.base.train_base import _Base_Trainer_Dataclass
     from bes_ml.base.utilities import merge_pdfs
-    from bes_ml.base.models import _Base_Features_Dataclass
+    from bes_ml.base.models import _Base_Features_Dataclass, _Multi_Features_Model_Dataclass
 
 
 @dataclasses.dataclass(eq=False)
 class _ELM_Data_Base(
     _Base_Trainer_Dataclass,
-    _Base_Features_Dataclass,
+    _Multi_Features_Model_Dataclass,
 ):
     data_location: Union[Path,str] = sample_elm_data_file  # path to data; dir or file depending on task
     batch_size: int = 64  # power of 2, like 16-128
     fraction_validation: float = 0.2  # fraction of dataset for validation
     fraction_test: float = 0.2  # fraction of dataset for testing
     test_data_file: str = 'test_data.pkl'
-    standardize_mean: float = 0.01
-    standardize_stdev: float = 0.221
-    clip_sigma: float = 6.0  # remove signal windows with abs(standardized_signals) > n_sigma
+    standardize_signals: bool = True,
+    standardize_fft: bool = True,
+    clip_sigma: float = 8.0  # remove signal windows with abs(standardized_signals) > n_sigma
     seed: int = None  # RNG seed for deterministic, reproducible shuffling (ELMs, sample indices, etc.)
     data_partition_file: str = 'data_partition.yaml'  # data partition for training, valid., and testing
     max_elms: int = None
@@ -259,20 +259,63 @@ class _ELM_Data_Base(
         )
         self.logger.info(f"  Raw signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
 
-        if self.standardize_mean and self.standardize_stdev:
-            self.logger.info(f'  Standardizing signals with mean {self.standardize_mean:.4f} and stdev {self.standardize_stdev:.4f}')
-            packaged_signals = self._standardize_signals(signals=packaged_signals)
-            if self.clip_sigma:
-                self.logger.info(f"  Removing signal windows with max(abs(signals)) > {self.clip_sigma}")
-                packaged_valid_t0_indices = self._clip_signals(
-                    sample_indices=packaged_valid_t0_indices,
-                    signals=packaged_signals,
-                )
+        if self.clip_sigma:
+            self.logger.info(f"  Clipping signal windows beyond +/- {self.clip_sigma} sigma")
+            mask = []
+            lb = stats['mean'] - self.clip_sigma * stats['stdev']
+            ub = stats['mean'] + self.clip_sigma * stats['stdev']
+            for i in packaged_valid_t0_indices:
+                signal_window = packaged_signals[i: i + self.signal_window_size, :, :]
+                mask.append((signal_window.min() >= lb) and (signal_window.max() <= ub))
+            packaged_valid_t0_indices = packaged_valid_t0_indices[mask]
             stats = self._get_statistics(
                 sample_indices=packaged_valid_t0_indices,
                 signals=packaged_signals,
             )
-            self.logger.info(f"  Modified signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
+            self.logger.info(f"  Clipped signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
+
+        self.results['raw_signal_mean'] = stats['mean']
+        self.results['raw_signal_stdev'] = stats['stdev']
+
+        if self.standardize_signals:
+            self.logger.info(f"  Standardizing signals with mean {stats['mean']:.4f} and stdev {stats['stdev']:.4f}")
+            packaged_signals = (packaged_signals - stats['mean']) / stats['stdev']
+            stats = self._get_statistics(
+                sample_indices=packaged_valid_t0_indices,
+                signals=packaged_signals,
+            )
+            self.logger.info(f"  Standardized signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
+
+        if self.standardize_fft and self.fft_num_kernels:
+            nfft = self.signal_window_size // self.fft_nbins
+            nfreqs = nfft // 2 + 1
+            hist_bins = 230
+            cummulative_hist = np.zeros(hist_bins, dtype=int)
+            fft_bins = np.empty((self.fft_nbins, nfreqs-1, 8, 8), dtype=np.float32)
+            for i in packaged_valid_t0_indices:
+                signal_window = packaged_signals[i: i + self.signal_window_size, :, :]
+                for i_bin in range(self.fft_nbins):
+                    rfft = np.fft.rfft(
+                        signal_window[i_bin * nfft:(i_bin+1) * nfft, :, :], 
+                        axis=0,
+                    )
+                    fft_bins[i_bin: i_bin + 1, :, :, :] = np.abs(rfft[1:, :, :]) ** 2
+                fft_sw = np.mean(fft_bins, axis=0)
+                fft_sw = np.log10(fft_sw)
+                hist, bin_edges = np.histogram(
+                    fft_sw,
+                    bins=hist_bins,
+                    range=[-7,7],
+                )
+                cummulative_hist += hist
+            bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
+            mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
+            stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
+            self.logger.info(f"  Original log10(|FFT|^2) mean {mean:.4f}  stdev {stdev:.4f}")
+            self.logger.info(f"  Standardizing FFT in model")
+            self.model.fft_features.fft_mean = mean
+            self.model.fft_features.fft_stdev = stdev
+
 
         # balance or normalize labels
         if self.is_classification:
@@ -313,7 +356,7 @@ class _ELM_Data_Base(
     def _get_statistics(self, sample_indices: np.ndarray, signals: np.ndarray) -> dict:
         signal_min = np.inf
         signal_max = -np.inf
-        n_bins = 100
+        n_bins = 200
         cummulative_hist = np.zeros(n_bins, dtype=int)
         for i in sample_indices[::32]:
             signal_window = signals[i: i + self.signal_window_size, :, :]
@@ -335,18 +378,6 @@ class _ELM_Data_Base(
             'mean': mean.item(),
             'stdev': stdev.item(),
         }
-
-    def _standardize_signals(self, signals: np.ndarray) -> np.ndarray:
-        return (signals - self.standardize_mean) / self.standardize_stdev
-
-    def _clip_signals(self, sample_indices: np.ndarray, signals: np.ndarray) -> np.ndarray:
-        mask = []
-        for i in sample_indices:
-            signal_window = signals[i: i + self.signal_window_size, :, :]
-            mask.append(
-                (signal_window.max() <= self.clip_sigma) and (signal_window.min() >= -self.clip_sigma)
-            )
-        return sample_indices[mask]
 
     def _apply_label_normalization(self) -> torch.Tensor:
         raise NotImplementedError
