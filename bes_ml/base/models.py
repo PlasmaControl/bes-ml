@@ -64,7 +64,7 @@ class _Base_Features(nn.Module, _Base_Features_Dataclass):
             else:
                 assert False, f"Invalid pool_func: {self.pool_func}"
             self.pooling_layer = pool_func(
-                kernel_size=[self.time_pool_size, self.spatial_pool_size, self.spatial_pool_size],
+                kernel_size=(self.time_pool_size, self.spatial_pool_size, self.spatial_pool_size),
             )
         else:
             self.pooling_layer = None
@@ -191,22 +191,13 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
     def __post_init__(self):
         super().__post_init__()
 
-        # CNN only valid with subwindow_size == time_points == signal_window_size
-        # assert (
-        #     # self.subwindow_size == self.signal_window_size and
-        #     self.time_slice_interval == 1 and
-        #     # self.subwindows == 1 and
-        #     self.time_points == self.signal_window_size and
-        #     self.spatial_pool_size == 1
-        # )
-
         # maxpool sizes must be power of 2
         assert (
             np.log2(self.cnn_layer1_maxpool_spatial_size).is_integer() and
             np.log2(self.cnn_layer2_maxpool_spatial_size).is_integer() and
             np.log2(self.cnn_layer1_maxpool_time_size).is_integer() and
             np.log2(self.cnn_layer2_maxpool_time_size).is_integer()
-        )
+        ), 'Maxpool dims must be power of 2'
 
         # ensure valid maxpool in time dimension
         assert self.cnn_layer1_maxpool_time_size * self.cnn_layer2_maxpool_time_size <= self.time_points, \
@@ -218,7 +209,7 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
             self.cnn_layer2_kernel_time_size % 2 == 1
             # self.cnn_layer1_kernel_spatial_size % 2 == 1 and
             # self.cnn_layer2_kernel_spatial_size % 2 == 1
-        )
+        ), 'Kernel dims must be odd'
 
         input_shape = tuple([1]+list(self._input_size_after_timeslice_pooling))
         self.logger.info(f"CNN input after pre-pooling, pre-slicing: {input_shape}")
@@ -334,7 +325,9 @@ class _FFT_Features_Dataclass(_Base_Features_Dataclass):
     fft_mean: float = None
     fft_stdev: float = None
     fft_kernel_time_size: int = 5
-    fft_kernel_spatial_size: int = 4
+    fft_kernel_spatial_size: int = 3
+    fft_maxpool_time_size: int = 2
+    fft_maxpool_spatial_size: int = 2
 
 
 @dataclasses.dataclass(eq=False)
@@ -345,7 +338,17 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
 
         self.num_kernels = self.fft_num_kernels
 
-        assert np.log2(self.fft_nbins) % 1 == 0  # ensure power of 2
+        assert (
+            np.log2(self.fft_maxpool_time_size).is_integer() and
+            np.log2(self.fft_maxpool_spatial_size).is_integer()
+        ), 'FFT maxpool dims must be power of 2'
+
+        assert(
+            self.fft_kernel_time_size%2 == 1 and
+            self.fft_kernel_spa %2 == 1
+        ), 'FFT kernel dims must be odd'
+
+        assert np.log2(self.fft_nbins).is_integer(), 'FFT nbins must be power of 2'
 
         self.nfft = self.signal_window_size // self.fft_nbins
         self.nfreqs = self.nfft // 2 + 1
@@ -354,17 +357,24 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
         self.hist_bins = 230
         self.cummulative_hist = np.zeros(self.hist_bins, dtype=int)
 
-        kernel_size = (
-            self.fft_kernel_time_size,
-            self.fft_kernel_spatial_size,
-            self.fft_kernel_spatial_size,
-        )
-
         # list of conv. filter banks (each with self.num_kernels) with size self.subwindow_bins
         self.conv = nn.Conv3d(
             in_channels=1,
             out_channels=self.fft_num_kernels,
-            kernel_size=kernel_size,
+            kernel_size=(
+                self.fft_kernel_time_size,
+                self.fft_kernel_spatial_size,
+                self.fft_kernel_spatial_size,
+            ),
+        )
+
+        # maxpool #1
+        self.fft_maxpool = nn.MaxPool3d(
+            kernel_size=(
+                self.fft_maxpool_time_size,
+                self.fft_maxpool_spatial_size,
+                self.fft_maxpool_spatial_size,
+            ),
         )
 
     def forward(self, x):
@@ -384,8 +394,7 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
             )
             fft_bins[:, i_bin: i_bin + 1, :, :, :] = torch.abs(rfft[:, :, 1:, :, :]) ** 2
         fft_sw = torch.mean(fft_bins, dim=1, keepdim=True)
-        # if torch.any(fft_sw<1e-5):
-        #     fft_sw[fft_sw<1e-5] = 1e-5
+        fft_sw[fft_sw<1e-5] = 1e-5
         fft_sw = torch.log10(fft_sw)
         if self.fft_mean and self.fft_stdev:
             fft_sw = (fft_sw - self.fft_mean) / self.fft_stdev
@@ -395,7 +404,7 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
             self.min = np.min([fft_sw.min().item(), self.min])
             self.max = np.max([fft_sw.max().item(), self.min])
             hist, bin_edges = np.histogram(
-                fft_sw,
+                fft_sw.cpu(),
                 bins=self.hist_bins,
                 range=[-7,7],
             )

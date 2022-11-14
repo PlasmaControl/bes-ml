@@ -287,12 +287,16 @@ class _ELM_Data_Base(
             self.logger.info(f"  Standardized signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
 
         if self.standardize_fft and self.fft_num_kernels:
+            self.logger.info(f"  Standardizing FFT in model")
             nfft = self.signal_window_size // self.fft_nbins
             nfreqs = nfft // 2 + 1
             hist_bins = 230
             cummulative_hist = np.zeros(hist_bins, dtype=int)
             fft_bins = np.empty((self.fft_nbins, nfreqs-1, 8, 8), dtype=np.float32)
-            for i in packaged_valid_t0_indices:
+            stat_interval = packaged_valid_t0_indices.size // 4000
+            if stat_interval < 1:
+                stat_interval = 1
+            for i in packaged_valid_t0_indices[::stat_interval]:
                 signal_window = packaged_signals[i: i + self.signal_window_size, :, :]
                 for i_bin in range(self.fft_nbins):
                     rfft = np.fft.rfft(
@@ -301,6 +305,7 @@ class _ELM_Data_Base(
                     )
                     fft_bins[i_bin: i_bin + 1, :, :, :] = np.abs(rfft[1:, :, :]) ** 2
                 fft_sw = np.mean(fft_bins, axis=0)
+                fft_sw[fft_sw<1e-5] = 1e-5
                 fft_sw = np.log10(fft_sw)
                 hist, bin_edges = np.histogram(
                     fft_sw,
@@ -312,10 +317,10 @@ class _ELM_Data_Base(
             mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
             stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
             self.logger.info(f"  Original log10(|FFT|^2) mean {mean:.4f}  stdev {stdev:.4f}")
-            self.logger.info(f"  Standardizing FFT in model")
             self.model.fft_features.fft_mean = mean
             self.model.fft_features.fft_stdev = stdev
-
+            self.results['fft_mean'] = mean
+            self.results['fft_stdev'] = stdev
 
         # balance or normalize labels
         if self.is_classification:
@@ -358,7 +363,10 @@ class _ELM_Data_Base(
         signal_max = -np.inf
         n_bins = 200
         cummulative_hist = np.zeros(n_bins, dtype=int)
-        for i in sample_indices[::32]:
+        stat_interval = sample_indices.size // 4000
+        if stat_interval < 1:
+            stat_interval = 1
+        for i in sample_indices[::stat_interval]:
             signal_window = signals[i: i + self.signal_window_size, :, :]
             signal_min = np.min([signal_min, signal_window.min()])
             signal_max = np.max([signal_max, signal_window.max()])
