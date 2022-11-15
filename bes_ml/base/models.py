@@ -26,8 +26,6 @@ class _Base_Features_Dataclass:
     spatial_pool_size: int = 1  # power of 2; spatial pooling size
     time_pool_size: int = 1  # power of 2; time pooling size
     pool_func: str = 'avg'  # `avg` or `max`
-    # subwindows: int = 1  # power of 2; subwindows
-    # subwindow_size: int = -1  # power of 2, or -1 (default) for full signal window
     activation_name: str = 'LeakyReLU'  # activation function in torch.nn like `LeakyReLu` or `SiLu`
     leakyrelu_negative_slope: float = 1e-3  # leaky relu negative slope; ~1e-3
     dropout_rate: float = 0.1  # ~0.1
@@ -345,7 +343,7 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
 
         assert(
             self.fft_kernel_time_size%2 == 1 and
-            self.fft_kernel_spa %2 == 1
+            self.fft_kernel_spatial_size%2 == 1
         ), 'FFT kernel dims must be odd'
 
         assert np.log2(self.fft_nbins).is_integer(), 'FFT nbins must be power of 2'
@@ -368,7 +366,7 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
             ),
         )
 
-        # maxpool #1
+        # maxpool
         self.fft_maxpool = nn.MaxPool3d(
             kernel_size=(
                 self.fft_maxpool_time_size,
@@ -411,10 +409,11 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
             self.cummulative_hist += hist
             self.bin_edges = bin_edges
         fft_sw_features = self.conv(fft_sw)
-        output_features = self._flatten_activation_dropout(fft_sw_features)
+        output_features = self.activation(self.dropout(fft_sw_features))
+        output_features = self.fft_maxpool(output_features)
         if self.debug:
             assert torch.all(torch.isfinite(output_features))
-        return output_features
+        return torch.flatten(output_features, 1)
 
 
 @dataclasses.dataclass(eq=False)
@@ -591,8 +590,6 @@ class _Multi_Features_Model_Dataclass(
     _DCT_Features_Dataclass,
     _DWT_Features_Dataclass,
 ):
-    # mlp_layer1_size: int = 32  # multi-layer perceptron (mlp)
-    # mlp_layer2_size: int = 16
     mlp_hidden_layers: Iterable = (32, 16)  # size and number of MLP hidden layers
     mlp_output_size: int = 1
 
@@ -649,12 +646,16 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
             self.cnn_features = CNN_Features(**feature_kwargs)
             self.features.append(self.cnn_features)
         assert len(self.features) > 0
+        self.feature_count = {}
         self.total_features = 0
+        self.logger.info('Features')
         for feature in self.features:
             feature_count = feature.forward(torch.rand([1, 1, feature.time_points, 8, 8])).numel()
             self.total_features += feature_count
-            self.logger.info(f"{feature.__class__.__name__} with {feature_count} features")
-        self.logger.info(f"Total features: {self.total_features}")
+            self.logger.info(f"  {feature.__class__.__name__}: {feature_count}")
+            self.feature_count[feature.__class__.__name__] = feature_count
+        self.feature_count['total'] = self.total_features
+        self.logger.info(f"  Total features: {self.total_features}")
 
         hidden_layers = []
         in_features = self.total_features
@@ -679,6 +680,8 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
         else:
             self.activation = self.activation_function()
         self.dropout = nn.Dropout(p=self.dropout_rate)
+
+        self.trainable_parameters = {}
 
     def forward(self, x):
         all_features = [features(x) for features in self.features]
@@ -726,11 +729,20 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
         output = self(input_data)
         self.logger.info(f"Single output size: {output.shape}")
 
-        self.logger.info("Modules:")
-        for module in self.modules():
-            trainable_params = sum(p.numel() for p in module.parameters(recurse=False) if p.requires_grad)
-            if trainable_params:
-                self.logger.info(f"  Module: {module._get_name()}  trainable params: {trainable_params}")
+        self.trainable_parameters = {}
+        self.logger.info("Trainable parameters")
+        feature_parameters = 0
+        for feature in self.features:
+            trainable_params = sum(p.numel() for p in feature.parameters() if p.requires_grad)
+            feature_parameters += trainable_params
+            self.trainable_parameters[feature.__class__.__name__] = trainable_params
+            self.logger.info(f"  {feature.__class__.__name__} parameters: {trainable_params}")
+        total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        mlp_parameters = total_parameters - feature_parameters
+        self.trainable_parameters['mlp'] = mlp_parameters
+        self.logger.info(f"  MLP parameters: {mlp_parameters}")
+        self.trainable_parameters['total'] = total_parameters
+        self.logger.info(f"  Total parameters: {total_parameters}")
 
 
 if __name__ == '__main__':

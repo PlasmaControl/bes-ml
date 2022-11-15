@@ -319,8 +319,8 @@ class _ELM_Data_Base(
             self.logger.info(f"  Original log10(|FFT|^2) mean {mean:.4f}  stdev {stdev:.4f}")
             self.model.fft_features.fft_mean = mean
             self.model.fft_features.fft_stdev = stdev
-            self.results['fft_mean'] = mean
-            self.results['fft_stdev'] = stdev
+            self.results['fft_mean'] = mean.item()
+            self.results['fft_stdev'] = stdev.item()
 
         # balance or normalize labels
         if self.is_classification:

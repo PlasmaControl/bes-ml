@@ -50,7 +50,6 @@ class _Base_Trainer_Dataclass:
     world_size: int = None
     # ddp: bool = None
     n_epochs: int = 2  # training epochs
-    minibatch_print_interval: int = 2000  # print minibatch info
     optimizer_type: str = 'sgd'  # adam (default) or sgd
     sgd_momentum: float = 0.0  # momentum for SGD optimizer, 0-1
     sgd_dampening: float = 0.0  # dampening for SGD optimizer, 0-1
@@ -207,6 +206,8 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         self.model = Multi_Features_Model(**model_kwargs)
         if self.is_main_process:
             self.model.print_model_summary()
+            self.results['trainable_parameters'] = self.model.trainable_parameters.copy()
+            self.results['feature_count'] = self.model.feature_count.copy()
         self._barrier()
 
     def _setup_device(self) -> None:
@@ -295,6 +296,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
 
         if self.is_main_process:
             self.logger.info(f"Training batches per epoch {len(self.train_data_loader)}")
+        self.minibatch_print_interval = len(self.train_data_loader) // 20
         if self.validation_data_loader:
             self.results['valid_loss'] = []
             self.results['valid_score'] = []
