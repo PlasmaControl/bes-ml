@@ -43,6 +43,7 @@ class _Base_Trainer_Dataclass:
     logger_hash: str | int = None
     log_all_ranks: bool = False
     terminal_output: bool = True  # terminal output if True
+    minibatch_print_interval: int = 5000
     # training parameters
     device: str | torch.device = 'auto'  # auto (default), cpu, cuda, or cuda:X
     local_rank: int = None
@@ -296,7 +297,6 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
 
         if self.is_main_process:
             self.logger.info(f"Training batches per epoch {len(self.train_data_loader)}")
-        self.minibatch_print_interval = len(self.train_data_loader) // 20
         if self.validation_data_loader:
             self.results['valid_loss'] = []
             self.results['valid_score'] = []
