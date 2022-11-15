@@ -92,7 +92,7 @@ class _Base_Features(nn.Module, _Base_Features_Dataclass):
         # dropout
         self.dropout = nn.Dropout3d(p=self.dropout_rate)
 
-        self.num_kernels = None  # set in subclass
+        self.features = None  # set in subclass
         self.conv = None  # set in subclass
 
         self._input_size_after_timeslice_pooling = (
@@ -123,11 +123,10 @@ class Dense_Features(_Dense_Features_Dataclass, _Base_Features):
     def __post_init__(self):
         super().__post_init__()
 
-        self.num_kernels = self.dense_num_kernels
+        self.features = self.dense_num_kernels
 
         kernel_size = self._input_size_after_timeslice_pooling
 
-        # list of conv. filter banks (each with self.num_kernels) with size self.subwindow_bins
         # self.conv = nn.ModuleList(
         #     [
         #         nn.Conv3d(
@@ -142,7 +141,6 @@ class Dense_Features(_Dense_Features_Dataclass, _Base_Features):
             out_channels=self.dense_num_kernels,
             kernel_size=kernel_size,
         )
-        self.conv.bias.data.zero_()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self._time_interval_and_pooling(x)
@@ -189,7 +187,6 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
     def __post_init__(self):
         super().__post_init__()
 
-        # maxpool sizes must be power of 2
         assert (
             np.log2(self.cnn_layer1_maxpool_spatial_size).is_integer() and
             np.log2(self.cnn_layer2_maxpool_spatial_size).is_integer() and
@@ -201,16 +198,16 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
         assert self.cnn_layer1_maxpool_time_size * self.cnn_layer2_maxpool_time_size <= self.time_points, \
             f"Maxpool time sizes {self.cnn_layer1_maxpool_time_size} and {self.cnn_layer2_maxpool_time_size} not compatible with time points {self.time_points}"
 
-        # kernel sizes must be odd
         assert (
             self.cnn_layer1_kernel_time_size % 2 == 1 and
             self.cnn_layer2_kernel_time_size % 2 == 1
             # self.cnn_layer1_kernel_spatial_size % 2 == 1 and
             # self.cnn_layer2_kernel_spatial_size % 2 == 1
-        ), 'Kernel dims must be odd'
+        ), 'Kernel time dims must be odd'
 
-        input_shape = tuple([1]+list(self._input_size_after_timeslice_pooling))
-        self.logger.info(f"CNN input after pre-pooling, pre-slicing: {input_shape}")
+        self.logger.info("CNN transformation")
+        data_shape = tuple([1]+list(self._input_size_after_timeslice_pooling))
+        self.logger.info(f"  Input after pre-pooling, pre-slicing: {data_shape}")
 
         def test_bad_shape(shape):
             assert np.all(np.array(shape) >= 1), f"Bad shape: {shape}"
@@ -224,22 +221,20 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
                 self.cnn_layer1_kernel_spatial_size,
                 self.cnn_layer1_kernel_spatial_size,
             ),
-            # stride=(1, 1, 1),
             padding=((self.cnn_layer1_kernel_time_size-1)//2, 0, 0),  # pad time dimension
         )
-        self.layer1_conv.bias.data.zero_()
-        output_shape = [
+        data_shape = [
             self.cnn_layer1_num_kernels,
-            input_shape[1],  # time dim unchanged due to padding
-            input_shape[2]-(self.cnn_layer1_kernel_spatial_size-1),  # contract
-            input_shape[3]-(self.cnn_layer1_kernel_spatial_size-1),
+            data_shape[1],  # time dim unchanged due to padding
+            data_shape[2]-(self.cnn_layer1_kernel_spatial_size-1),
+            data_shape[3]-(self.cnn_layer1_kernel_spatial_size-1),
         ]
-        self.logger.info(f"CNN after conv #1: {output_shape}")
-        assert input_shape[2]-(self.cnn_layer1_kernel_spatial_size-1) > 0, \
-            f"Spatial size {input_shape[2]} not compatible with kernel spatial size {self.cnn_layer1_kernel_spatial_size}  (layer 1)"
-        test_bad_shape(output_shape)
-        assert output_shape[2] % self.cnn_layer1_maxpool_spatial_size == 0, \
-            f"Spatial size {output_shape[2]} not compatible with maxpool spatial {self.cnn_layer1_maxpool_spatial_size} (layer 1)"
+        self.logger.info(f"  After conv #1: {data_shape}")
+        assert data_shape[2]-(self.cnn_layer1_kernel_spatial_size-1) > 0, \
+            f"Spatial size {data_shape[2]} not compatible with kernel spatial size {self.cnn_layer1_kernel_spatial_size}  (layer 1)"
+        test_bad_shape(data_shape)
+        assert data_shape[2] % self.cnn_layer1_maxpool_spatial_size == 0, \
+            f"Spatial size {data_shape[2]} not compatible with maxpool spatial {self.cnn_layer1_maxpool_spatial_size} (layer 1)"
 
         # maxpool #1
         self.layer1_maxpool = nn.MaxPool3d(
@@ -249,14 +244,14 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
                 self.cnn_layer1_maxpool_spatial_size,
             ),
         )
-        output_shape = [
-            output_shape[0],
-            output_shape[1] // self.cnn_layer1_maxpool_time_size,
-            output_shape[2] // self.cnn_layer1_maxpool_spatial_size,
-            output_shape[3] // self.cnn_layer1_maxpool_spatial_size,
+        data_shape = [
+            data_shape[0],
+            data_shape[1] // self.cnn_layer1_maxpool_time_size,
+            data_shape[2] // self.cnn_layer1_maxpool_spatial_size,
+            data_shape[3] // self.cnn_layer1_maxpool_spatial_size,
         ]
-        self.logger.info(f"CNN after maxpool #1: {output_shape}")
-        test_bad_shape(output_shape)
+        self.logger.info(f"  After maxpool #1: {data_shape}")
+        test_bad_shape(data_shape)
 
         # conv #2
         self.layer2_conv = nn.Conv3d(
@@ -267,22 +262,20 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
                 self.cnn_layer2_kernel_spatial_size,
                 self.cnn_layer2_kernel_spatial_size,
             ),
-            stride=(1, 1, 1),
             padding=((self.cnn_layer2_kernel_time_size-1)//2, 0, 0),
         )
-        self.layer2_conv.bias.data.zero_()
-        output_shape = [
+        data_shape = [
             self.cnn_layer2_num_kernels,
-            output_shape[1],
-            output_shape[2] - (self.cnn_layer2_kernel_spatial_size-1),
-            output_shape[3] - (self.cnn_layer2_kernel_spatial_size-1),
+            data_shape[1],
+            data_shape[2] - (self.cnn_layer2_kernel_spatial_size-1),
+            data_shape[3] - (self.cnn_layer2_kernel_spatial_size-1),
         ]
-        self.logger.info(f"CNN after conv #2: {output_shape}")
-        assert output_shape[2]-(self.cnn_layer2_kernel_spatial_size-1) > 0, \
-            f"Spatial size {output_shape[2]} not compatible with kernel spatial size {self.cnn_layer2_kernel_spatial_size} (layer 2)"
-        test_bad_shape(output_shape)
-        assert output_shape[2] % self.cnn_layer2_maxpool_spatial_size == 0, \
-            f"Spatial size {output_shape[2]} not compatible with maxpool spatial {self.cnn_layer2_maxpool_spatial_size}  (layer 2)"
+        self.logger.info(f"  After conv #2: {data_shape}")
+        assert data_shape[2]-(self.cnn_layer2_kernel_spatial_size-1) > 0, \
+            f"Spatial size {data_shape[2]} not compatible with kernel spatial size {self.cnn_layer2_kernel_spatial_size} (layer 2)"
+        test_bad_shape(data_shape)
+        assert data_shape[2] % self.cnn_layer2_maxpool_spatial_size == 0, \
+            f"Spatial size {data_shape[2]} not compatible with maxpool spatial {self.cnn_layer2_maxpool_spatial_size}  (layer 2)"
 
         # maxpool #2
         self.layer2_maxpool = nn.MaxPool3d(
@@ -292,17 +285,16 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
                 self.cnn_layer2_maxpool_spatial_size,
             ),
         )
-        output_shape = [
-            output_shape[0],
-            output_shape[1] // self.cnn_layer2_maxpool_time_size,
-            output_shape[2] // self.cnn_layer2_maxpool_spatial_size,
-            output_shape[3] // self.cnn_layer2_maxpool_spatial_size,
+        data_shape = [
+            data_shape[0],
+            data_shape[1] // self.cnn_layer2_maxpool_time_size,
+            data_shape[2] // self.cnn_layer2_maxpool_spatial_size,
+            data_shape[3] // self.cnn_layer2_maxpool_spatial_size,
         ]
-        self.logger.info(f"CNN after maxpool #2 (output): {output_shape}")
-        test_bad_shape(output_shape)
+        self.logger.info(f"  After maxpool #2 (output): {data_shape}")
+        test_bad_shape(data_shape)
 
-        self.num_kernels = np.prod(output_shape, dtype=int)
-        self.logger.info(f"CNN output shape: {output_shape}")
+        self.features = np.prod(data_shape, dtype=int)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self._time_interval_and_pooling(x)
@@ -324,7 +316,7 @@ class _FFT_Features_Dataclass(_Base_Features_Dataclass):
     fft_stdev: float = None
     fft_kernel_time_size: int = 5
     fft_kernel_spatial_size: int = 3
-    fft_maxpool_time_size: int = 2
+    fft_maxpool_freq_size: int = 2
     fft_maxpool_spatial_size: int = 2
 
 
@@ -334,10 +326,8 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
     def __post_init__(self):
         super().__post_init__()
 
-        self.num_kernels = self.fft_num_kernels
-
         assert (
-            np.log2(self.fft_maxpool_time_size).is_integer() and
+            np.log2(self.fft_maxpool_freq_size).is_integer() and
             np.log2(self.fft_maxpool_spatial_size).is_integer()
         ), 'FFT maxpool dims must be power of 2'
 
@@ -355,7 +345,19 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
         self.hist_bins = 230
         self.cummulative_hist = np.zeros(self.hist_bins, dtype=int)
 
-        # list of conv. filter banks (each with self.num_kernels) with size self.subwindow_bins
+        self.logger.info("FFT transformation")
+
+        data_shape = tuple([1]+list(self._input_size_after_timeslice_pooling))
+        self.logger.info(f"  Input after pre-pooling, pre-slicing: {data_shape}")
+
+        data_shape = [
+            self.fft_num_kernels,
+            self.nfreqs-1,
+            data_shape[2],
+            data_shape[3],
+        ]
+        self.logger.info(f"  After FFT: {data_shape}")
+
         self.conv = nn.Conv3d(
             in_channels=1,
             out_channels=self.fft_num_kernels,
@@ -365,15 +367,31 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
                 self.fft_kernel_spatial_size,
             ),
         )
+        data_shape = [
+            data_shape[0],
+            data_shape[1] - (self.fft_kernel_time_size-1),
+            data_shape[2]-(self.fft_kernel_spatial_size-1),
+            data_shape[3]-(self.fft_kernel_spatial_size-1),
+        ]
+        self.logger.info(f"  After conv: {data_shape}")
 
         # maxpool
         self.fft_maxpool = nn.MaxPool3d(
             kernel_size=(
-                self.fft_maxpool_time_size,
+                self.fft_maxpool_freq_size,
                 self.fft_maxpool_spatial_size,
                 self.fft_maxpool_spatial_size,
             ),
         )
+        data_shape = [
+            data_shape[0],
+            data_shape[1] // self.fft_maxpool_freq_size,
+            data_shape[2] // self.fft_maxpool_spatial_size,
+            data_shape[3] // self.fft_maxpool_spatial_size,
+        ]
+        self.logger.info(f"  After maxpool: {data_shape}")
+
+        self.features = np.prod(data_shape, dtype=int)
 
     def forward(self, x):
         x = self._time_interval_and_pooling(x)
@@ -428,8 +446,6 @@ class DCT_Features(_DCT_Features_Dataclass, _Base_Features):
     def __post_init__(self):
         super().__post_init__()
 
-        self.num_kernels = self.dct_num_kernels
-
         assert np.log2(self.dct_nbins) % 1 == 0  # ensure power of 2
 
         self.ndct = self.subwindow_size // self.dct_nbins
@@ -442,7 +458,6 @@ class DCT_Features(_DCT_Features_Dataclass, _Base_Features):
             8 // self.spatial_pool_size,
         )
 
-        # list of conv. filter banks (each with self.num_kernels) with size self.subwindow_bins
         self.conv = nn.ModuleList(
             [
                 nn.Conv3d(
@@ -500,7 +515,7 @@ class DWT_Features(_DWT_Features_Dataclass, _Base_Features):
     def __post_init__(self):
         super().__post_init__()
 
-        self.num_kernels = self.dwt_num_kernels
+        # self.features = self.dwt_num_kernels
 
         max_level = pywt.dwt_max_level(
             self.subwindow_size, 
@@ -530,7 +545,6 @@ class DWT_Features(_DWT_Features_Dataclass, _Base_Features):
             8 // self.spatial_pool_size,
         )
 
-        # list of conv. filter banks (each with self.num_kernels) with size self.subwindow_bins
         self.conv = nn.ModuleList(
             [
                 nn.Conv3d(
@@ -606,7 +620,7 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
             self.dct_num_kernels == 0 and
             self.dwt_num_kernels == 0 and
             (self.cnn_layer1_num_kernels == 0 and self.cnn_layer2_num_kernels == 0)
-        ) is False
+        ) is False, "All features are inactive"
 
         if self.logger is None:
             self.logger = logging.getLogger(__name__)
@@ -646,22 +660,22 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
             self.cnn_features = CNN_Features(**feature_kwargs)
             self.features.append(self.cnn_features)
         assert len(self.features) > 0
+
         self.feature_count = {}
-        self.total_features = 0
+        total_features = 0
         self.logger.info('Features')
         for feature in self.features:
             feature_count = feature.forward(torch.rand([1, 1, feature.time_points, 8, 8])).numel()
-            self.total_features += feature_count
+            total_features += feature_count
             self.logger.info(f"  {feature.__class__.__name__}: {feature_count}")
             self.feature_count[feature.__class__.__name__] = feature_count
-        self.feature_count['total'] = self.total_features
-        self.logger.info(f"  Total features: {self.total_features}")
+        self.feature_count['total'] = total_features
+        self.logger.info(f"  Total features: {total_features}")
 
         hidden_layers = []
-        in_features = self.total_features
+        in_features = total_features
         for i_layer, layer_size in enumerate(self.mlp_hidden_layers):
             layer = nn.Linear(in_features=in_features, out_features=layer_size)
-            layer.bias.data.zero_()
             hidden_layers.append(layer)
             in_features = layer_size
             self.logger.info(f"MLP layer {i_layer+1} size: {layer_size}")
@@ -670,7 +684,6 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
         self.output_layer = nn.Linear(
             in_features=in_features, 
             out_features=self.mlp_output_size, 
-            # bias=False,
         )
         self.logger.info(f"MLP output size: {self.mlp_output_size}")
 
@@ -713,8 +726,8 @@ class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
 
     def print_model_summary(self) -> None:
         self.logger.info("MODEL SUMMARY")
-        input_shape = (1, 1, self.signal_window_size, 8, 8)
-        input_data = torch.rand(*input_shape)
+        data_shape = (1, 1, self.signal_window_size, 8, 8)
+        input_data = torch.rand(*data_shape)
 
         # catpure torchinfo.summary() output
         tmp_io = io.StringIO()

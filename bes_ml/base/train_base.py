@@ -175,7 +175,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         self_fields_dict = dataclasses.asdict(self)
         assert set([field.name for field in cls_fields]) == set(self_fields_dict.keys())
         for field in cls_fields:
-            if field.name == 'logger':
+            if field.name in ['logger', '_barrier']:
                 continue
             if self_fields_dict[field.name] == field.default:
                 tmp = f"  {field.name}: {self_fields_dict[field.name]}"
