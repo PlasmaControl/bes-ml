@@ -46,9 +46,9 @@ class _Base_Trainer_Dataclass:
     minibatch_print_interval: int = 5000
     # training parameters
     device: str | torch.device = 'auto'  # auto (default), cpu, cuda, or cuda:X
-    local_rank: int = None
-    world_rank: int = None
-    world_size: int = None
+    world_size: int = 1
+    world_rank: int = 0
+    local_rank: int = 0
     # ddp: bool = None
     n_epochs: int = 2  # training epochs
     optimizer_type: str = 'sgd'  # adam (default) or sgd
@@ -87,12 +87,10 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         self.output_dir = Path(self.output_dir).resolve()
         self.output_dir.mkdir(exist_ok=True, parents=True)
 
-        if self.world_size is None and self.local_rank is None:
-            self.world_size = int(os.environ.get('SLURM_NTASKS', 1))
-            self.local_rank = int(os.environ.get('SLURM_LOCALID', 0))
-        self.world_rank = int(os.environ.get('SLURM_PROCID', self.local_rank))
-        if self.world_rank < self.local_rank:
-            self.world_rank = self.local_rank
+        if self.world_size > 1:
+            self.world_rank = int(os.environ.get('SLURM_PROCID', self.world_rank))
+            self.local_rank = int(os.environ.get('SLURM_LOCALID', self.local_rank))
+        assert self.local_rank <= self.world_rank
 
         self.is_ddp = self.world_size > 1
         self.is_main_process = self.world_rank == 0
@@ -105,6 +103,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             )
 
         print(f"World size {self.world_size}  world rank {self.world_rank}  local rank {self.local_rank}")
+        self._barrier()
 
         self._create_logger()
 
@@ -224,8 +223,8 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         if self.is_ddp:
             self.ddp_model = DDP(
                 self.model,
-                device_ids=[self.world_rank] if self.device.type == 'cuda' else None,
-                output_device=self.world_rank if self.device.type == 'cuda' else None,
+                device_ids=[self.local_rank] if self.device.type == 'cuda' else None,
+                output_device=self.local_rank if self.device.type == 'cuda' else None,
             )
             self._model_alias = self.ddp_model
         else:
