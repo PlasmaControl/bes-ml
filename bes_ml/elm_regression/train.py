@@ -10,11 +10,11 @@ import torch.multiprocessing as mp
 
 try:
     from ..base.elm_data import _ELM_Data_Base
-    from ..base.models import _Multi_Features_Model_Dataclass
+    # from ..base.models import _Multi_Features_Model_Dataclass
     from ..base.train_base import _Base_Trainer
 except ImportError:
     from bes_ml.base.elm_data import _ELM_Data_Base
-    from bes_ml.base.models import _Multi_Features_Model_Dataclass
+    # from bes_ml.base.models import _Multi_Features_Model_Dataclass
     from bes_ml.base.train_base import _Base_Trainer
 
 
@@ -124,18 +124,19 @@ class Trainer(
 
 def main(rank: int = None, world_size: int = None, **kwargs):
     Trainer(
-        data_location = Path.home() / 'ml/scratch/data/labeled_elm_events.hdf5',
+        # data_location = Path.home() / 'ml/scratch/data/labeled_elm_events.hdf5',
         local_rank=rank,
+        world_rank=rank,
         world_size=world_size,
         do_train=True,
         dense_num_kernels=128,
         signal_window_size=128,
-        max_elms=50,
+        max_elms=5,
         n_epochs=2,
         fraction_test=0,
         # fraction_validation=0,
         seed = 0,
-        # pre_elm_size=2000,
+        pre_elm_size=2000,
         logger_hash=str(int(datetime.now().timestamp())),
         **kwargs,
     )
@@ -152,5 +153,5 @@ def main_mp_spawn(world_size: int = None):
 
 
 if __name__=='__main__':
-    main()
-    # main_mp_spawn(world_size=4)
+    # main()
+    main_mp_spawn(world_size=2)

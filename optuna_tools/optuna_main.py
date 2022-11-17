@@ -52,7 +52,7 @@ def run_optuna(
         study_dir: str|Path = None,
         study_name: str = None,
         n_gpus: int = None,
-        n_workers_per_gpu: int = 1,
+        n_workers_per_device: int = 1,
         n_trials_per_worker: int = 1000,
         analyzer_class: Callable = None,
         sampler_startup_trials: int = 100000,  # random startup trials before activating sampler
@@ -132,10 +132,7 @@ def run_optuna(
     }
     if n_gpus is None:
         n_gpus = torch.cuda.device_count()
-    if n_gpus:
-        n_workers = n_gpus * n_workers_per_gpu
-    else:
-        n_workers = n_workers_per_gpu
+    n_workers = n_gpus * n_workers_per_device if n_gpus else n_workers_per_device
     if n_workers > 1:
         mp_context = mp.get_context('spawn')
         with concurrent.futures.ProcessPoolExecutor(
@@ -144,12 +141,9 @@ def run_optuna(
         ) as executor:
             futures = []
             for i_worker in range(n_workers):
-                if n_gpus:
-                    i_gpu = i_worker % n_gpus
-                else:
-                    i_gpu = 'auto'
+                i_gpu = i_worker % n_gpus if n_gpus else 'auto'
                 print(f'Launching worker {i_worker+1} '
-                      f'(of {n_workers}) on gpu {i_gpu} '
+                      f'(of {n_workers}) on gpu/device {i_gpu} '
                       f'and running {n_trials_per_worker} trials')
                 future = executor.submit(
                     subprocess_worker,  # callable that calls study.optimize()
@@ -170,7 +164,7 @@ def run_optuna(
     else:
         print("Starting trial")
         subprocess_worker(
-            i_gpu=0,
+            i_gpu=0 if n_gpus else 'auto',
             **subprocess_kwargs,
         )
 
@@ -277,11 +271,7 @@ def launch_trial(
             print(f"Trial {trial.number} failed: {repr(e)}")
             result = np.NAN
         else:
-            assert isinstance(outputs, dict) and 'train_loss' in outputs
-            if maximize_score:
-                result = outputs['valid_score'][-1]
-            else:
-                result = outputs['train_loss'][-1]
+            result = outputs['valid_score'][-1] if maximize_score else outputs['train_loss'][-1]
             if analyzer_class is not None:
                 analysis = analyzer_class(
                     output_dir=input_kwargs['output_dir'],
@@ -289,9 +279,8 @@ def launch_trial(
                     verbose=False,
                 )
                 analysis.plot_training(save=True)
-
-    sys.stdout = sys.__stdout__
-    sys.stderr = sys.__stderr__
+            sys.stdout = sys.__stdout__
+            sys.stderr = sys.__stderr__
 
     return result
 
