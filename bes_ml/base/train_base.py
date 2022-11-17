@@ -44,12 +44,12 @@ class _Base_Trainer_Dataclass:
     log_all_ranks: bool = False
     terminal_output: bool = True  # terminal output if True
     minibatch_print_interval: int = 5000
+    # Pytorch DDP
+    world_size: int = None
+    world_rank: int = None
+    local_rank: int = None
     # training parameters
     device: str | torch.device = 'auto'  # auto (default), cpu, cuda, or cuda:X
-    world_size: int = 1
-    world_rank: int = 0
-    local_rank: int = 0
-    # ddp: bool = None
     n_epochs: int = 2  # training epochs
     optimizer_type: str = 'sgd'  # adam (default) or sgd
     sgd_momentum: float = 0.0  # momentum for SGD optimizer, 0-1
@@ -87,9 +87,14 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         self.output_dir = Path(self.output_dir).resolve()
         self.output_dir.mkdir(exist_ok=True, parents=True)
 
-        if self.world_size > 1:
-            self.world_rank = int(os.environ.get('SLURM_PROCID', self.world_rank))
-            self.local_rank = int(os.environ.get('SLURM_LOCALID', self.local_rank))
+        if self.world_size:
+            if self.world_rank is None:
+                self.world_rank = int(os.environ['SLURM_PROCID'])
+            if self.local_rank is None:
+                self.local_rank = int(os.environ['SLURM_LOCALID'])
+        else:
+            self.world_size = 1
+            self.world_rank = self.local_rank = 0
         assert self.local_rank <= self.world_rank
 
         self.is_ddp = self.world_size > 1
