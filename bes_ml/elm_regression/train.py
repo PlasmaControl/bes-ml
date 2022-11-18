@@ -153,5 +153,5 @@ def main_mp_spawn(world_size: int = None):
 
 
 if __name__=='__main__':
-    # main()
-    main_mp_spawn(world_size=2)
+    main()
+    # main_mp_spawn(world_size=2)

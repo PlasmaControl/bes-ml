@@ -35,11 +35,11 @@ class Trainer(
 
         self.mlp_output_size = 4
 
-        super().__post_init__()
-
         self.is_regression = False
         self.is_classification = not self.is_regression
         self.turbulence_dataset = None
+
+        super().__post_init__()
 
         self._make_model()
         self.finish_subclass_initialization()
