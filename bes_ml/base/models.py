@@ -70,18 +70,6 @@ class _Base_Features(nn.Module, _Base_Features_Dataclass):
         self.time_points = self.time_points // self.time_pool_size
         assert np.log2(self.time_points).is_integer()
 
-        # subwindows
-        # assert np.log2(self.subwindows).is_integer() and self.subwindow_size < self.time_points
-        # self.subwindow_size = self.time_points // self.subwindow_size
-        # assert np.log2(self.subwindow_size).is_integer()
-
-        # if self.subwindow_size == -1:
-        #     self.subwindow_size = self.time_points
-        # assert np.log2(self.subwindow_size).is_integer()  # ensure power of 2
-        # assert self.subwindow_size <= self.time_points
-        # self.subwindows = self.time_points // self.subwindow_size
-        # assert self.subwindows >= 1
-        
         # activation function
         self.activation_function = getattr(nn, self.activation_name)
         if self.activation_name == 'LeakyReLu':
@@ -127,15 +115,6 @@ class Dense_Features(_Dense_Features_Dataclass, _Base_Features):
 
         kernel_size = self._input_size_after_timeslice_pooling
 
-        # self.conv = nn.ModuleList(
-        #     [
-        #         nn.Conv3d(
-        #             in_channels=1,
-        #             out_channels=self.dense_num_kernels,
-        #             kernel_size=kernel_size,
-        #         ) for _ in range(self.subwindows)
-        #     ]
-        # )
         self.conv = nn.Conv3d(
             in_channels=1,
             out_channels=self.dense_num_kernels,
@@ -144,25 +123,7 @@ class Dense_Features(_Dense_Features_Dataclass, _Base_Features):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self._time_interval_and_pooling(x)
-        # if self.subwindows == 1:
         x = self.conv(x)
-        # else:
-        #     x_new_size = [
-        #         x.shape[0],
-        #         self.dense_num_kernels,
-        #         self.subwindows,
-        #         1,
-        #         1,
-        #     ]
-        #     x_new = torch.empty(size=x_new_size, dtype=x.dtype, device=x.device)
-        #     for i_bin in range(self.subwindows):
-        #         i_start = i_bin * self.subwindow_size
-        #         i_stop = (i_bin+1) * self.subwindow_size
-        #         # if torch.any(torch.isnan(self.conv[i_bin].weight)) or torch.any(torch.isnan(self.conv[i_bin].bias)):
-        #         #     assert False
-        #         x_new[:, :, i_bin:i_bin+1, :, :] = self.conv[i_bin](
-        #             x[:, :, i_start:i_stop, :, :]
-        #         )
         x = self._flatten_activation_dropout(x)
         return x
 
@@ -469,7 +430,6 @@ class DCT_Features(_DCT_Features_Dataclass, _Base_Features):
         )
 
     def forward(self, x):
-        # x = x.to(self.device)  # needed for PowerPC architecture
         x = self._time_interval_and_pooling(x)
         dct_features_size = [
             x.shape[0],
