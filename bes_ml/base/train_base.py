@@ -30,24 +30,21 @@ except ImportError:
 
 
 @dataclasses.dataclass(eq=False)
-class _Base_Trainer_Dataclass:
+class Trainer_Base_Dataclass:
     # output parameters
     output_dir: Path | str = Path('run_dir')  # path to output dir.
     results_file: str = 'results.yaml'  # output training results
-    # log_file: str = 'log.txt'  # output log file
     inputs_file: str = 'inputs.yaml'  # save inputs to yaml
     checkpoint_file: str = 'checkpoint.pytorch'  # pytorch save file
     save_onnx_model: bool = False  # export ONNX format
     onnx_checkpoint_file: str = 'checkpoint.onnx'  # onnx save file
-    logger: logging.Logger = None
     logger_hash: str | int = None
-    log_all_ranks: bool = False
     terminal_output: bool = True  # terminal output if True
-    minibatch_print_interval: int = 5000
-    # Pytorch DDP
+    # Pytorch DDP (multi-GPU training)
     world_size: int = None
     world_rank: int = None
     local_rank: int = None
+    log_all_ranks: bool = False
     # training parameters
     device: str | torch.device = 'auto'  # auto (default), cpu, cuda, or cuda:X
     n_epochs: int = 2  # training epochs
@@ -61,10 +58,12 @@ class _Base_Trainer_Dataclass:
     lr_scheduler_threshold: float = 1e-3  # threshold for *relative* decrease in loss to *not* trigger LR scheduler
     low_score_patience: int = 20  # epochs to wait before aborting due to low score
     weight_decay: float = 1e-3  # optimizer L2 regularization factor
+    minibatch_print_interval: int = 5000
     do_train: bool = False  # if True, start training at end of init
     # optuna integration
     optuna_trial: Any = None  # optuna trial
     # non-init attributes visible to subclasses
+    logger: logging.Logger = dataclasses.field(default=None, init=False)
     is_regression: bool = dataclasses.field(default=None, init=False)
     is_classification: bool = dataclasses.field(default=None, init=False)
     is_ddp: bool = dataclasses.field(default=None, init=False)
@@ -73,11 +72,11 @@ class _Base_Trainer_Dataclass:
     train_data_loader: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
     validation_data_loader: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
     results: dict = dataclasses.field(default=None, init=False)
-    _barrier: callable = dataclasses.field(default=None, init=False)
+    _ddp_barrier: callable = dataclasses.field(default=None, init=False)
 
 
 @dataclasses.dataclass(eq=False)
-class _Base_Trainer(_Base_Trainer_Dataclass):
+class Trainer_Base(Trainer_Base_Dataclass):
     """Base class for model trainer"""
 
     def __post_init__(self):
@@ -108,7 +107,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             )
 
         print(f"World size {self.world_size}  world rank {self.world_rank}  local rank {self.local_rank}")
-        self._barrier()
+        self._ddp_barrier()
 
         self._create_logger()
 
@@ -117,7 +116,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             self.logger.info(f"Using DDP: {self.is_ddp}")
             self._print_inputs()
             self._save_inputs_to_yaml()
-        self._barrier()
+        self._ddp_barrier()
 
         # subclass must set is_regression XOR is_classification
         assert self.is_regression ^ self.is_classification  # XOR
@@ -127,7 +126,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         self._make_model()
         self._setup_device()
         self._make_optimizer_scheduler()
-        self._prepare_data()
+        self._prepare_data()  # implement in data class; e.g. ELMs, confinement mode, velocimetry
 
         # validate data loaders
         for data_loader in [self.train_data_loader, self.validation_data_loader]:
@@ -138,7 +137,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         if self.do_train:
             self.train()
 
-    def _barrier(self):
+    def _ddp_barrier(self):
         if self.is_ddp:
             dist.barrier()
 
@@ -156,7 +155,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         log_file = self.output_dir / f'log.txt'
         log_file.unlink(missing_ok=True)
         formatter = logging.Formatter(f"Rank {self.world_rank}: %(message)s")
-        self._barrier()
+        self._ddp_barrier()
         if self.is_main_process or self.log_all_ranks:
             # logs to log file
             f_handler = logging.FileHandler(log_file)
@@ -171,7 +170,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         else:
             # null logger if not main process
             self.logger.addHandler(logging.NullHandler())
-        self._barrier()
+        self._ddp_barrier()
 
     def _print_inputs(self):
         cls = self.__class__
@@ -180,7 +179,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         self_fields_dict = dataclasses.asdict(self)
         assert set([field.name for field in cls_fields]) == set(self_fields_dict.keys())
         for field in cls_fields:
-            if field.name in ['logger', '_barrier']:
+            if field.name in ['logger', '_ddp_barrier']:
                 continue
             if self_fields_dict[field.name] == field.default:
                 tmp = f"  {field.name}: {self_fields_dict[field.name]}"
@@ -191,7 +190,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
     def _save_inputs_to_yaml(self):
         filename = Path(self.output_dir / self.inputs_file)
         self_fields_dict = dataclasses.asdict(self)
-        for skip_key in ['logger', 'optuna_trial', '_barrier']:
+        for skip_key in ['logger', 'optuna_trial', '_ddp_barrier']:
             self_fields_dict.pop(skip_key)
         for key in self_fields_dict:
             if isinstance(self_fields_dict[key], Path):
@@ -213,7 +212,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             self.model.print_model_summary()
             self.results['trainable_parameters'] = self.model.trainable_parameters.copy()
             self.results['feature_count'] = self.model.feature_count.copy()
-        self._barrier()
+        self._ddp_barrier()
 
     def _setup_device(self) -> None:
         if self.device == 'auto':
@@ -234,7 +233,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             self._model_alias = self.ddp_model
         else:
             self._model_alias = self.model
-        self._barrier()
+        self._ddp_barrier()
 
     def _make_optimizer_scheduler(self) -> None:
         assert self.optimizer_type in ['adam', 'sgd']
@@ -267,14 +266,14 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             mode='min',
             verbose=True,
         )
-        self._barrier()
+        self._ddp_barrier()
 
     def _prepare_data(self) -> None:
         # implement in subclass
         # must generate self.train_data_loader and self.validation_data_loader
         raise NotImplementedError
 
-    def train(self) -> dict:
+    def _setup_train(self) -> None:
 
         self.results['completed_epochs'] = 0
         self.results['train_loss'] = []
@@ -309,6 +308,10 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
             if self.is_main_process:
                 self.logger.info(f"Validation batches per epoch {len(self.validation_data_loader)}")
 
+    def train(self) -> dict:
+
+        self._setup_train()
+
         best_score = -np.inf
         best_epoch = 0
         do_optuna_prune = False
@@ -326,7 +329,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                     [True, False],
                     [self.train_data_loader, self.validation_data_loader],
             ):
-                self._barrier()
+                self._ddp_barrier()
                 if data_loader is None:
                     continue  # skip if validation data is empty
                 # loss and predictions
@@ -473,7 +476,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                 self.logger.info("==> Score is < 95% best score; breaking")
                 break
 
-        self._barrier()
+        self._ddp_barrier()
 
         if self.is_main_process:
             self.logger.info(f"End training loop")
@@ -537,7 +540,7 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
                     predictions.squeeze(),
                     labels,
                 )
-                sample_losses = self._apply_loss_weight(sample_losses, labels)
+                sample_losses = self._apply_label_weights(sample_losses, labels)
                 batch_loss = sample_losses.mean()  # batch loss
                 if is_train:
                     batch_loss.backward()
@@ -560,13 +563,14 @@ class _Base_Trainer(_Base_Trainer_Dataclass):
         all_labels = np.concatenate(all_labels)
         return epoch_loss, all_predictions, all_labels
 
-    def _apply_loss_weight(
+    def _apply_label_weights(
             self,
             losses: torch.Tensor,
             labels: torch.Tensor,
     ) -> torch.Tensor:
+        # override in subclass to allow for sample weights
         return losses
 
 
 if __name__ == '__main__':
-    m = _Base_Trainer(dense_num_kernels=8)
+    m = Trainer_Base(dense_num_kernels=8)

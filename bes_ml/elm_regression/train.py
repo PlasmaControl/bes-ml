@@ -1,30 +1,20 @@
-from typing import Tuple
 import dataclasses
-import os
-from datetime import datetime
-from pathlib import Path
-
 import numpy as np
 import torch
-import torch.multiprocessing as mp
 
 try:
-    from ..base.elm_data import _ELM_Data_Base
-    # from ..base.models import _Multi_Features_Model_Dataclass
-    from ..base.train_base import _Base_Trainer
+    from ..base.train_base import Trainer_Base
+    from ..base.elm_data import ELM_Data
 except ImportError:
-    from bes_ml.base.elm_data import _ELM_Data_Base
-    # from bes_ml.base.models import _Multi_Features_Model_Dataclass
-    from bes_ml.base.train_base import _Base_Trainer
+    from bes_ml.base.train_base import Trainer_Base
+    from bes_ml.base.elm_data import ELM_Data
 
 
 @dataclasses.dataclass(eq=False)
 class Trainer(
-    _ELM_Data_Base,  # ELM data
-    # _Multi_Features_Model_Dataclass,  # NN model
-    _Base_Trainer,  # training and output
+    ELM_Data,  # ELM data
+    Trainer_Base,  # training and output
 ):
-    # parameters for ELM regression task
     log_time: bool = False  # if True, use label = log(time_to_elm_onset)
     inverse_weight_label: bool = False  # if True, weight losses by 1/label
     normalize_labels: bool = True  # if True, normalize labels to max/min = +/- 1
@@ -40,13 +30,13 @@ class Trainer(
 
         self.raw_label_minmax = None
 
-        super().__post_init__()  # _Base_Trainer.__post_init__()
+        super().__post_init__()  # Trainer_Base.__post_init__()
 
     def _get_valid_indices(
         self,
         labels: np.ndarray = None,
         signals: np.ndarray = None,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         active_elm_indices = np.nonzero(labels == 1)[0]
         active_elm_start_index = active_elm_indices[0]  # first active ELM index
         n_pre_elm_phase = active_elm_start_index  # length of pre-ELM phase
@@ -81,7 +71,7 @@ class Trainer(
             assert labels.min() == 0
         return labels, signals, valid_t0
 
-    def _apply_loss_weight(
+    def _apply_label_weights(
             self,
             losses: torch.Tensor,
             labels: torch.Tensor,
@@ -122,36 +112,12 @@ class Trainer(
         return labels
 
 
-def main(rank: int = None, world_size: int = None, **kwargs):
+if __name__=='__main__':
     Trainer(
-        # data_location = Path.home() / 'ml/scratch/data/labeled_elm_events.hdf5',
-        local_rank=rank,
-        world_rank=rank,
-        world_size=world_size,
-        do_train=True,
-        dense_num_kernels=128,
-        signal_window_size=128,
+        dense_num_kernels=8,
         max_elms=5,
         n_epochs=2,
         fraction_test=0,
-        # fraction_validation=0,
-        seed = 0,
         pre_elm_size=2000,
-        logger_hash=str(int(datetime.now().timestamp())),
-        **kwargs,
+        do_train=True,
     )
-
-
-def main_mp_spawn(world_size: int = None):
-    if 'MASTER_ADDR' not in os.environ:
-        os.environ["MASTER_ADDR"] = "localhost"
-    if 'MASTER_PORT' not in os.environ:
-        os.environ["MASTER_PORT"] = "29500"
-    if world_size is None:
-        world_size = int(os.environ.get('$SLURM_NTASKS', 1))
-    mp.spawn(main, args=(world_size,), nprocs=world_size, join=True)
-
-
-if __name__=='__main__':
-    main()
-    # main_mp_spawn(world_size=2)

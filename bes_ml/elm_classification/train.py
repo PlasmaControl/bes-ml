@@ -1,26 +1,18 @@
-from typing import Tuple
 import dataclasses
-import os
-
 import numpy as np
-import torch.multiprocessing as mp
-
 
 try:
-    from ..base.elm_data import _ELM_Data_Base
-    from ..base.models import _Multi_Features_Model_Dataclass
-    from ..base.train_base import _Base_Trainer
+    from ..base.train_base import Trainer_Base
+    from ..base.elm_data import ELM_Data
 except ImportError:
-    from bes_ml.base.elm_data import _ELM_Data_Base
-    from bes_ml.base.models import _Multi_Features_Model_Dataclass
-    from bes_ml.base.train_base import _Base_Trainer
+    from bes_ml.base.train_base import Trainer_Base
+    from bes_ml.base.elm_data import ELM_Data
 
 
 @dataclasses.dataclass(eq=False)
 class Trainer(
-    _ELM_Data_Base,  # ELM data
-    _Multi_Features_Model_Dataclass,  # NN model
-    _Base_Trainer,  # training and output
+    ELM_Data,  # ELM data
+    Trainer_Base,  # training and output
 ):
     prediction_horizon: int = 200  # prediction horizon in time samples
     threshold: float = 0.5  # threshold for binary classification
@@ -30,17 +22,15 @@ class Trainer(
     def __post_init__(self):
         self.is_classification = True
         self.is_regression = not self.is_classification
-
         if self.one_hot_encoding:
             self.mlp_output_size = 2
-
-        super().__post_init__()  # _Base_Trainer.__post_init__()
+        super().__post_init__()  # Trainer_Base.__post_init__()
 
     def _get_valid_indices(
         self,
         labels: np.ndarray = None,
         signals: np.ndarray = None,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         # indices for active elm times in each elm event
         active_elm_indices = np.nonzero(labels == 1)[0]
         active_elm_start_index = active_elm_indices[0]
@@ -120,33 +110,11 @@ class Trainer(
         return packaged_valid_t0_indices
 
 
-def main(rank: int = None, world_size: int = None):
+if __name__=='__main__':
     Trainer(
         dense_num_kernels=8,
         max_elms=5,
-        # n_epochs=20,
+        n_epochs=2,
         fraction_test=0,
-        # fraction_validation=0,
-        seed = 0,
-        bad_elm_indices_csv=True,  # read bad ELMs from CSV in bes_data.elm_data_tools
-        # ELM classification parameters,
-        prediction_horizon=100,
-        oversample_active_elm=True,
-        one_hot_encoding=True,
         do_train=True,
-        world_rank=rank,
-        world_size=world_size,
-        logger_hash=__name__ + str(np.random.randint(1e12)),
     )
-
-
-def ddp_main():
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "29500"
-    world_size = 2
-    mp.spawn(main, args=(world_size,), nprocs=world_size, join=True)
-
-
-if __name__=='__main__':
-    # main()
-    ddp_main()

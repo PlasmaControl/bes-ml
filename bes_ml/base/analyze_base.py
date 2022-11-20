@@ -21,7 +21,7 @@ except ImportError:
 
 
 @dataclasses.dataclass
-class _Analyzer_Base(
+class Analyzer_Base(
     # _Multi_Features_Model_Dataclass,
 ):
     output_dir: Union[str,Path] = 'run_dir'

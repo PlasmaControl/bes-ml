@@ -11,16 +11,16 @@ from torch.utils.data import DataLoader, BatchSampler
 from bes_ml.base.utilities import merge_pdfs
 
 try:
-    from ..base.analyze_base import _Analyzer_Base
+    from ..base.analyze_base import Analyzer_Base
     from ..base.sampler import RandomBatchSampler, SequentialBatchSampler
     from ...bes_data.confinement_data_tools.dataset import ConfinementDataset
 except ImportError:
-    from bes_ml.base.analyze_base import _Analyzer_Base
+    from bes_ml.base.analyze_base import Analyzer_Base
     from bes_ml.base.sampler import RandomBatchSampler, SequentialBatchSampler
     from bes_data.confinement_data_tools.dataset import ConfinementDataset
 
 @dataclasses.dataclass
-class Analyzer(_Analyzer_Base):
+class Analyzer(Analyzer_Base):
 
     def __post_init__(self) -> None:
         super().__post_init__()

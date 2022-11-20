@@ -1,13 +1,13 @@
 import dataclasses
 
 try:
-    from ..base.analyze_base import _Analyzer_Base
+    from ..base.analyze_base import Analyzer_Base
 except ImportError:
     from bes_ml.base.analyze_base import _Analyzer_Base
 
 
 @dataclasses.dataclass
-class Analyzer(_Analyzer_Base):
+class Analyzer(Analyzer_Base):
 
     def __post_init__(self):
         super().__post_init__()

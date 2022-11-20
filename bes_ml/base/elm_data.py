@@ -1,7 +1,5 @@
-import logging
 from pathlib import Path
 import dataclasses
-from typing import Union,Iterable, Tuple
 import pickle
 
 import numpy as np
@@ -14,36 +12,36 @@ import matplotlib.pyplot as plt
 from bes_data.sample_data import sample_elm_data_file
 from bes_data.elm_data_tools import bad_elm_indices_csv
 try:
-    from .train_base import _Base_Trainer_Dataclass
+    from .train_base import Trainer_Base_Dataclass
+    from .models import Multi_Features_Model_Dataclass
     from .utilities import merge_pdfs
-    from .models import _Base_Features_Dataclass, _Multi_Features_Model_Dataclass
 except ImportError:
-    from bes_ml.base.train_base import _Base_Trainer_Dataclass
+    from bes_ml.base.train_base import Trainer_Base_Dataclass
+    from bes_ml.base.models import Multi_Features_Model_Dataclass
     from bes_ml.base.utilities import merge_pdfs
-    from bes_ml.base.models import _Base_Features_Dataclass, _Multi_Features_Model_Dataclass
 
 
 @dataclasses.dataclass(eq=False)
-class _ELM_Data_Base(
-    _Base_Trainer_Dataclass,
-    _Multi_Features_Model_Dataclass,
+class ELM_Data(
+    Trainer_Base_Dataclass,
+    Multi_Features_Model_Dataclass,
 ):
-    data_location: Union[Path,str] = sample_elm_data_file  # path to data; dir or file depending on task
+    data_location: Path|str = sample_elm_data_file  # path to data; dir or file depending on task
     batch_size: int = 64  # power of 2, like 16-128
     fraction_validation: float = 0.2  # fraction of dataset for validation
     fraction_test: float = 0.2  # fraction of dataset for testing
+    num_workers: int = None  # number of subprocess workers for pytorch dataloader
+    pin_memory: bool = True  # data loader pinned memory
+    seed: int = None  # RNG seed for deterministic, reproducible shuffling (ELMs, sample indices, etc.)
+    label_type: np.int8 | np.float32 = dataclasses.field(default=None, init=False)
     test_data_file: str = 'test_data.pkl'
     standardize_signals: bool = True,
     standardize_fft: bool = True,
     clip_sigma: float = 8.0  # remove signal windows with abs(standardized_signals) > n_sigma
-    seed: int = None  # RNG seed for deterministic, reproducible shuffling (ELMs, sample indices, etc.)
     data_partition_file: str = 'data_partition.yaml'  # data partition for training, valid., and testing
     max_elms: int = None
-    num_workers: int = 0  # number of subprocess workers for pytorch dataloader
-    pin_memory: bool = True  # data loader pinned memory
-    bad_elm_indices: Iterable = None  # iterable of ELM indices to skip when reading data
+    bad_elm_indices: list = None  # iterable of ELM indices to skip when reading data
     bad_elm_indices_csv: str | bool = True  # CSV file to read bad ELM indices
-    label_type: np.int8 | np.float32 = dataclasses.field(default=None, init=False)
 
     def _prepare_data(self) -> None:
 
@@ -59,8 +57,8 @@ class _ELM_Data_Base(
             # int labels for classification
             self.label_type = np.int8
 
-        if self.device.type == 'cuda':
-            self.num_workers = 2
+        if self.num_workers is None:
+            self.num_workers = 2 if self.device.type == 'cuda' else 0
         self.logger.info(f"Subprocess workers per data loader: {self.num_workers}")
 
         self._get_data()
@@ -136,7 +134,7 @@ class _ELM_Data_Base(
             shuffle_indices=True,
             oversample_active_elm=self.oversample_active_elm if self.is_classification else False,
         )
-        self._barrier()
+        self._ddp_barrier()
 
         if n_validation_elms:
             self.logger.info(f"Validation ELM events: {validation_elms.size}")
@@ -147,7 +145,7 @@ class _ELM_Data_Base(
         else:
             self.logger.info("Skipping validation data")
             self.validation_data = None
-        self._barrier()
+        self._ddp_barrier()
 
         if n_test_elms:
             self.logger.info(f"Test ELM events: {test_elms.size}")
@@ -172,7 +170,7 @@ class _ELM_Data_Base(
         else:
             self.logger.info("Skipping test data")
             self.test_data = None
-        self._barrier()
+        self._ddp_barrier()
 
     def _preprocess_data(
         self,
@@ -407,7 +405,7 @@ class _ELM_Data_Base(
             signal_window_size = self.signal_window_size,
             prediction_horizon=self.prediction_horizon if hasattr(self, 'prediction_horizon') else 0,
         )
-        self._barrier()
+        self._ddp_barrier()
 
         self.validation_dataset = ELM_Dataset(
             signals=self.validation_data[0],
@@ -416,7 +414,7 @@ class _ELM_Data_Base(
             signal_window_size = self.signal_window_size,
             prediction_horizon=self.prediction_horizon if hasattr(self, 'prediction_horizon') else 0,
         ) if self.validation_data else None
-        self._barrier()
+        self._ddp_barrier()
 
     def _make_data_loaders(self) -> None:
         train_sampler = torch.utils.data.DistributedSampler(
@@ -450,7 +448,7 @@ class _ELM_Data_Base(
                 drop_last=True,
                 persistent_workers=True if self.num_workers > 0 else False,
             )
-        self._barrier()
+        self._ddp_barrier()
 
 
 # TODO: make dataclass
@@ -482,7 +480,7 @@ class ELM_Dataset(torch.utils.data.Dataset):
     def __len__(self) -> int:
         return self.sample_indices.numel()
 
-    def __getitem__(self, i: int) -> Tuple:
+    def __getitem__(self, i: int) -> tuple:
         i_t0 = self.sample_indices[i]
         signal_window = self.signals[:, i_t0 : i_t0 + self.signal_window_size, :, :]
         label = self.labels[ i_t0 + self.signal_window_size + self.prediction_horizon - 1 ]

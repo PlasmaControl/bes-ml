@@ -597,7 +597,7 @@ class DWT_Features(_DWT_Features_Dataclass, _Base_Features):
 
 
 @dataclasses.dataclass(eq=False)
-class _Multi_Features_Model_Dataclass(
+class Multi_Features_Model_Dataclass(
     _Dense_Features_Dataclass,
     _CNN_Features_Dataclass,
     _FFT_Features_Dataclass,
@@ -609,7 +609,10 @@ class _Multi_Features_Model_Dataclass(
 
 
 @dataclasses.dataclass(eq=False)
-class Multi_Features_Model(nn.Module, _Multi_Features_Model_Dataclass):
+class Multi_Features_Model(
+    nn.Module, 
+    Multi_Features_Model_Dataclass,
+):
 
     def __post_init__(self):
         super().__init__()  # nn.Module.__init__()

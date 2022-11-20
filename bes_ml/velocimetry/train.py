@@ -9,7 +9,7 @@ from bes_data.sample_data import sample_data_dir
 from bes_data.velocimetry_data_tools.dataset import VelocimetryDataset
 try:
     from ..base.elm_data import MultiSourceDataset
-    from ..base.train_base import _Base_Trainer
+    from ..base.train_base import Trainer_Base
     from ..base.sampler import RandomBatchSampler
 except ImportError:
     from bes_ml.base.elm_data import MultiSourceDataset
@@ -18,7 +18,7 @@ except ImportError:
 
 
 @dataclasses.dataclass(eq=False)
-class Trainer(_Base_Trainer):
+class Trainer(Trainer_Base):
     data_location: Union[Path,str] = sample_data_dir / 'velocimetry_data' #location of stored data
     dataset_to_ram: bool = True # Load datasets to ram
 
@@ -84,7 +84,7 @@ class Trainer(_Base_Trainer):
         )
 
     def _create_data_class_inputs(self, locals_copy: dict = None) -> dict:
-        assert self.__class__ is not _Base_Trainer
+        assert self.__class__ is not Trainer_Base
         kwargs_for_data_class = {}
         for cls in [VelocimetryDataset, MultiSourceDataset]:
             class_parameters = inspect.signature(cls).parameters
