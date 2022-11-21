@@ -10,9 +10,9 @@ from bes_data.sample_data import sample_data_dir
 from bes_data.confinement_data_tools.dataset import ConfinementDataset
 
 try:
-    from ..base.train_base import _Base_Trainer
+    from ..base.train_base import Trainer_Base
     from ..base.sampler import RandomBatchSampler
-    from ..base.models import _Multi_Features_Model_Dataclass
+    from ..base.models import Multi_Features_Model_Dataclass
     from ..base.multisource_data import MultiSourceDataset, _MultiSource_Data_Base
 except ImportError:
     from bes_ml.base.train_base import _Base_Trainer
@@ -24,8 +24,8 @@ except ImportError:
 @dataclasses.dataclass(eq=False)
 class Trainer(
     _MultiSource_Data_Base,  # multi-source data
-    _Multi_Features_Model_Dataclass,  # NN model
-    _Base_Trainer,  # training and output
+    Multi_Features_Model_Dataclass,  # NN model
+    Trainer_Base,  # training and output
 ):
     dataset_to_ram: bool = True # Load datasets to ram
     data_location: str = sample_data_dir / 'turbulence_data' #location of stored data
@@ -35,11 +35,11 @@ class Trainer(
 
         self.mlp_output_size = 4
 
-        super().__post_init__()
-
         self.is_regression = False
         self.is_classification = not self.is_regression
         self.turbulence_dataset = None
+
+        super().__post_init__()
 
         self._make_model()
         self.finish_subclass_initialization()
@@ -80,7 +80,7 @@ class Trainer(
 
 
     def _create_data_class_inputs(self, locals_copy: dict = None) -> dict:
-        assert self.__class__ is not _Base_Trainer
+        assert self.__class__ is not Trainer_Base
         kwargs_for_data_class = {}
         for cls in [ConfinementDataset, MultiSourceDataset]:
             class_parameters = inspect.signature(cls).parameters

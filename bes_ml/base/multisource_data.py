@@ -14,14 +14,14 @@ import torch.utils.data
 
 from bes_data.sample_data import sample_elm_data_file
 try:
-    from .train_base import _Base_Trainer_Dataclass
+    from .train_base import Trainer_Base_Dataclass
     from .utilities import merge_pdfs
 except ImportError:
     from bes_ml.base.train_base import _Base_Trainer_Dataclass
     from bes_ml.base.utilities import merge_pdfs
 
 @dataclasses.dataclass(eq=False)
-class _MultiSource_Data_Base(_Base_Trainer_Dataclass):
+class _MultiSource_Data_Base(Trainer_Base_Dataclass):
     batch_size: int = 64  # power of 2, like 16-128
     fraction_validation: float = 0.2  # fraction of dataset for validation
     fraction_test: float = 0.2  # fraction of dataset for testing

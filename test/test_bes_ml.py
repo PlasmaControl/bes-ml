@@ -8,7 +8,7 @@ from bes_ml import elm_classification
 from bes_ml import elm_regression
 # from bes_ml import velocimetry
 # from bes_ml import confinement_classification
-from bes_ml.base.analyze_base import _Analyzer_Base
+from bes_ml.base.analyze_base import Analyzer_Base
 
 
 RUN_DIR = Path('run_dir')
@@ -210,7 +210,7 @@ def test_elm_regression_cnn_features():
 #     )
 #     _common_analysis(analyzer)
 
-def _common_analysis(analyzer: _Analyzer_Base):
+def _common_analysis(analyzer: Analyzer_Base):
     analyzer.plot_training(save=True)
     assert (analyzer.output_dir/'training.pdf').exists()
     analyzer.plot_inference(save=True)

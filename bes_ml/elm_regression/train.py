@@ -1,29 +1,23 @@
-from typing import Tuple
 import dataclasses
-
 import numpy as np
 import torch
 
 try:
-    from ..base.elm_data import _ELM_Data_Base
-    from ..base.models import _Multi_Features_Model_Dataclass
-    from ..base.train_base import _Base_Trainer
+    from ..base.train_base import Trainer_Base
+    from ..base.elm_data import ELM_Data
 except ImportError:
-    from bes_ml.base.elm_data import _ELM_Data_Base
-    from bes_ml.base.models import _Multi_Features_Model_Dataclass
-    from bes_ml.base.train_base import _Base_Trainer
+    from bes_ml.base.train_base import Trainer_Base
+    from bes_ml.base.elm_data import ELM_Data
 
 
 @dataclasses.dataclass(eq=False)
 class Trainer(
-    _ELM_Data_Base,  # ELM data
-    _Multi_Features_Model_Dataclass,  # NN model
-    _Base_Trainer,  # training and output
+    ELM_Data,  # ELM data
+    Trainer_Base,  # training and output
 ):
-    # parameters for ELM regression task
     log_time: bool = False  # if True, use label = log(time_to_elm_onset)
     inverse_weight_label: bool = False  # if True, weight losses by 1/label
-    normalize_labels: bool = True  # if True, normalize labels to min/max = +/- 1
+    normalize_labels: bool = True  # if True, normalize labels to max/min = +/- 1
     pre_elm_size: int = None  # maximum pre-ELM window in time frames
 
     def __post_init__(self):
@@ -36,13 +30,13 @@ class Trainer(
 
         self.raw_label_minmax = None
 
-        super().__post_init__()  # _Base_Trainer.__post_init__()
+        super().__post_init__()  # Trainer_Base.__post_init__()
 
     def _get_valid_indices(
         self,
         labels: np.ndarray = None,
         signals: np.ndarray = None,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         active_elm_indices = np.nonzero(labels == 1)[0]
         active_elm_start_index = active_elm_indices[0]  # first active ELM index
         n_pre_elm_phase = active_elm_start_index  # length of pre-ELM phase
@@ -64,7 +58,7 @@ class Trainer(
             assert valid_t0[first_signal_window_start_index - 1] == 0
             n_valid_t0 = np.min([last_signal_window_start_index+1, self.pre_elm_size])
             assert np.count_nonzero(valid_t0) == n_valid_t0
-        labels = np.arange(n_pre_elm_phase, 0, -1, dtype=np.float32)
+        labels = np.arange(n_pre_elm_phase, 0, -1, dtype=self.label_type)
         assert labels.size == n_pre_elm_phase
         assert labels.min() == 1
         assert labels.max() == n_pre_elm_phase
@@ -77,7 +71,11 @@ class Trainer(
             assert labels.min() == 0
         return labels, signals, valid_t0
 
-    def _apply_loss_weight(self, losses: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    def _apply_label_weights(
+            self,
+            losses: torch.Tensor,
+            labels: torch.Tensor,
+    ) -> torch.Tensor:
         if self.inverse_weight_label:
             return torch.div(losses, labels)
         else:
@@ -114,30 +112,12 @@ class Trainer(
         return labels
 
 
-
 if __name__=='__main__':
-    model = Trainer(
-        # model parameters
+    Trainer(
         dense_num_kernels=8,
-        signal_window_size=32,
-        activation_name='SiLU',
-        dropout_rate=0.1,
-        # ELM dataset parameters
-        normalize_signals=True,
-        batch_size=128,
-        fraction_validation=0.0,
-        fraction_test=0.0,
         max_elms=5,
-        bad_elm_indices_csv=True,  # read bad ELMs from CSV in bes_data.elm_data_tools
-        # _Base_Trainer parameters
-        n_epochs=4,
-        optimizer_type='sgd',
-        sgd_momentum=0.5,
-        learning_rate=1e-3,
-        lr_scheduler_patience=3,
-        weight_decay=1e-3,
-        # ELM regression parameters,
-        normalize_labels=True,
+        n_epochs=2,
+        fraction_test=0,
         pre_elm_size=2000,
+        do_train=True,
     )
-    model.train()

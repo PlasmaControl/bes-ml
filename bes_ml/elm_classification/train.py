@@ -1,23 +1,18 @@
-from typing import Tuple
 import dataclasses
-
 import numpy as np
 
 try:
-    from ..base.elm_data import _ELM_Data_Base
-    from ..base.models import _Multi_Features_Model_Dataclass
-    from ..base.train_base import _Base_Trainer
+    from ..base.train_base import Trainer_Base
+    from ..base.elm_data import ELM_Data
 except ImportError:
-    from bes_ml.base.elm_data import _ELM_Data_Base
-    from bes_ml.base.models import _Multi_Features_Model_Dataclass
-    from bes_ml.base.train_base import _Base_Trainer
+    from bes_ml.base.train_base import Trainer_Base
+    from bes_ml.base.elm_data import ELM_Data
 
 
 @dataclasses.dataclass(eq=False)
 class Trainer(
-    _ELM_Data_Base,  # ELM data
-    _Multi_Features_Model_Dataclass,  # NN model
-    _Base_Trainer,  # training and output
+    ELM_Data,  # ELM data
+    Trainer_Base,  # training and output
 ):
     prediction_horizon: int = 200  # prediction horizon in time samples
     threshold: float = 0.5  # threshold for binary classification
@@ -27,17 +22,15 @@ class Trainer(
     def __post_init__(self):
         self.is_classification = True
         self.is_regression = not self.is_classification
-
         if self.one_hot_encoding:
             self.mlp_output_size = 2
-
-        super().__post_init__()  # _Base_Trainer.__post_init__()
+        super().__post_init__()  # Trainer_Base.__post_init__()
 
     def _get_valid_indices(
         self,
         labels: np.ndarray = None,
         signals: np.ndarray = None,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         # indices for active elm times in each elm event
         active_elm_indices = np.nonzero(labels == 1)[0]
         active_elm_start_index = active_elm_indices[0]
@@ -118,29 +111,10 @@ class Trainer(
 
 
 if __name__=='__main__':
-    model = Trainer(
-        # model parameters
+    Trainer(
         dense_num_kernels=8,
-        signal_window_size=32,
-        activation_name='SiLU',
-        dropout_rate=0.1,
-        # ELM dataset parameters
-        normalize_signals=True,
-        batch_size=128,
-        fraction_validation=0.0,
-        fraction_test=0.0,
         max_elms=5,
-        bad_elm_indices_csv=True,  # read bad ELMs from CSV in bes_data.elm_data_tools
-        # _Base_Trainer parameters
-        n_epochs=4,
-        optimizer_type='sgd',
-        sgd_momentum=0.5,
-        learning_rate=1e-3,
-        lr_scheduler_patience=3,
-        weight_decay=1e-3,
-        # ELM classification parameters,
-        prediction_horizon=100,
-        oversample_active_elm=True,
-        one_hot_encoding=True,
+        n_epochs=2,
+        fraction_test=0,
+        do_train=True,
     )
-    model.train()

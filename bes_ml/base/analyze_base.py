@@ -21,12 +21,13 @@ except ImportError:
 
 
 @dataclasses.dataclass
-class _Analyzer_Base(
+class Analyzer_Base(
     # _Multi_Features_Model_Dataclass,
 ):
     output_dir: Union[str,Path] = 'run_dir'
     inputs_file: Union[str,Path] = 'inputs.yaml'
     device: str = 'auto'  # auto (default), cpu, cuda, or cuda:X
+    verbose: bool = True
 
     def __post_init__(self):
         self.output_dir = Path(self.output_dir).resolve()
@@ -39,15 +40,17 @@ class _Analyzer_Base(
         self.inputs = {}
         with self.inputs_file.open('r') as inputs_file:
             self.inputs.update(yaml.safe_load(inputs_file))
-        print(f"Inputs from inputs file {self.inputs_file}")
-        for key in self.inputs:
-            print(f"  {key}: {self.inputs[key]}")
+        if self.verbose:
+            print(f"Inputs from inputs file {self.inputs_file}")
+            for key in self.inputs:
+                print(f"  {key}: {self.inputs[key]}")
 
         # setup device
         if self.device == 'auto':
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device = torch.device(self.device)
-        print(f"Using device: {self.device}")
+        if self.verbose:
+            print(f"Using device: {self.device}")
 
         # instantiate model, send to device, and load model parameters
         fields = list(dataclasses.fields(Multi_Features_Model))
@@ -227,7 +230,8 @@ class _Analyzer_Base(
         plt.tight_layout()
         if save:
             filepath = self.output_dir / "training.pdf"
-            print(f'Saving training plot: {filepath}')
+            if self.verbose:
+                print(f'Saving training plot: {filepath}')
             plt.savefig(filepath, format='pdf', transparent=True)
         return
 
@@ -275,7 +279,8 @@ class _Analyzer_Base(
                 plt.tight_layout()
                 if save:
                     filepath = self.output_dir / f'inference_{i_page:02d}.pdf'
-                    print(f'Saving inference file: {filepath}')
+                    if self.verbose:
+                        print(f'Saving inference file: {filepath}')
                     plt.savefig(filepath, format='pdf', transparent=True)
                     i_page += 1
         if save:
