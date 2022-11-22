@@ -349,7 +349,7 @@ class ConfinementDataset(torch.utils.data.Dataset):
 
         # Adjust index relative to specific HDF5
         idx_offset = self.valid_indices[(self.valid_indices <= index[0])][-1].astype(int)
-        hf_index = [i - idx_offset + self.signal_window_size for i in index]
+        hf_index = [i - idx_offset + self.signal_window_size for i in index[:-1]]
         hf_index = list(range(hf_index[0] - self.signal_window_size, hf_index[0])) + hf_index
 
         signal_windows = self._roll_window(hf[hf_index], self.signal_window_size, self.batch_size)
