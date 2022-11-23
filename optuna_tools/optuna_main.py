@@ -106,9 +106,10 @@ def run_optuna(
         if world_size is None:
             world_size = int(os.environ['WORLD_SIZE'])
         if world_rank is None:
-            world_rank = int(os.environ['WORLD_RANK'])
-        assert local_rank == world_rank
+            world_rank = int(os.environ.get('WORLD_RANK', local_rank))
+        assert local_rank <= world_rank
         assert world_rank < world_size
+        assert world_rank == torch.distributed.get_rank()
 
     if fail_stale_trials:
         # FAIL any zombie trials that are stuck in `RUNNING` state
@@ -142,6 +143,9 @@ def run_optuna(
         'pruner_patience': pruner_patience,
         'maximize_score': maximize_score,
         'constant_liar': constant_liar,
+        'local_rank': local_rank,
+        'world_rank': world_rank,
+        'world_size': world_size,
     }
     if local_rank is None:
         if n_gpus is None:
@@ -182,24 +186,9 @@ def run_optuna(
                     print(e.args)
     else:
         print(f"Starting worker to run {n_trials_per_worker} trials")
-        if local_rank is None:
-            print(f"Launching single worker without DPP")
-            worker(**worker_kwargs)
-        else:
-            print(f"Launching DDP worker")
-            torch.distributed.init_process_group(
-                backend='nccl',
-                world_size=world_size,
-                rank=world_rank,
-            )
+        if local_rank is not None:
             torch.distributed.barrier()
-            assert world_rank == torch.distributed.get_rank()
-            worker(
-                local_rank=local_rank,
-                world_rank=world_rank,
-                world_size=world_size,
-                **worker_kwargs,
-            )
+        worker(**worker_kwargs)
 
 
 def worker(
@@ -258,8 +247,8 @@ def worker(
             analyzer_class=analyzer_class,
             maximize_score=maximize_score,
             world_rank=world_rank,
-            local_rank=local_rank,
             world_size=world_size,
+            local_rank=local_rank,
         )
 
     if local_rank is None or local_rank == 0:
@@ -307,16 +296,17 @@ def objective(
         sys.stderr = f
 
         input_kwargs = trial_generator(trial)
-        input_kwargs['n_epochs'] = n_epochs
-        input_kwargs['output_dir'] = trial_dir.as_posix()
-        input_kwargs['device'] = f'cuda:{i_gpu:d}' if isinstance(i_gpu, int) else i_gpu
 
         try:
+            print(f"Launching trial {trial.number}")
             trainer = trainer_class(
                 optuna_trial=trial,
                 world_size=world_size,
                 world_rank=world_rank,
                 local_rank=local_rank,
+                n_epochs=n_epochs,
+                output_dir=trial_dir.as_posix(),
+                device=f'cuda:{i_gpu:d}' if isinstance(i_gpu, int) else i_gpu,
                 **input_kwargs,
             )
             outputs = trainer.train()
