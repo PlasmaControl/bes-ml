@@ -99,13 +99,6 @@ class Trainer_Base(Trainer_Base_Dataclass):
         self.is_ddp = self.world_size > 1
         self.is_main_process = self.world_rank == 0
 
-        if self.is_ddp:
-            dist.init_process_group(
-                'nccl' if torch.cuda.is_available() else 'gloo',
-                rank=self.world_rank,
-                world_size=self.world_size,
-            )
-
         print(f"World size {self.world_size}  world rank {self.world_rank}  local rank {self.local_rank}")
         self._ddp_barrier()
 
