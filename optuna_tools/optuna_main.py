@@ -73,10 +73,10 @@ def run_optuna(
 
     if db_name:
         if study_dir is None:
-            study_dir = Path(db_name)
+            study_dir = Path(db_name).resolve()
             study_name = db_name
         else:
-            study_dir = Path(study_dir)
+            study_dir = Path(study_dir).resolve()
             if not study_name:
                 study_name = 'study'
         db_file = study_dir / f'{db_name}.db'
@@ -84,6 +84,7 @@ def run_optuna(
     else:
         study_dir = Path(study_name)
 
+    print(db_url, study_name, study_dir)
     assert db_url and study_name and study_dir
 
     study_dir.mkdir(exist_ok=True)
@@ -106,7 +107,7 @@ def run_optuna(
             world_size = int(os.environ['WORLD_SIZE'])
         if world_rank is None:
             world_rank = int(os.environ['WORLD_RANK'])
-        assert local_rank <= world_rank
+        assert local_rank == world_rank
         assert world_rank < world_size
 
     if fail_stale_trials:
@@ -196,6 +197,7 @@ def run_optuna(
             worker(
                 local_rank=local_rank,
                 world_rank=world_rank,
+                world_size=world_size,
                 **worker_kwargs,
             )
 
@@ -219,6 +221,7 @@ def worker(
         constant_liar: bool = False,
         local_rank: int = None,
         world_rank: int = None,
+        world_size: int = None,
 ) -> None:
 
     sampler = optuna.samplers.TPESampler(
@@ -255,6 +258,8 @@ def worker(
             analyzer_class=analyzer_class,
             maximize_score=maximize_score,
             world_rank=world_rank,
+            local_rank=local_rank,
+            world_size=world_size,
         )
 
     if local_rank is None or local_rank == 0:

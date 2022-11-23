@@ -140,7 +140,7 @@ class ELM_Data(
             self.logger.info(f"Validation ELM events: {validation_elms.size}")
             self.validation_data = self._preprocess_data(
                 elm_indices=validation_elms,
-                save_filename='validation_elms',
+                # save_filename='validation_elms',
             )
         else:
             self.logger.info("Skipping validation data")
@@ -151,7 +151,7 @@ class ELM_Data(
             self.logger.info(f"Test ELM events: {test_elms.size}")
             self.test_data = self._preprocess_data(
                 elm_indices=test_elms,
-                save_filename='test_elms',
+                # save_filename='test_elms',
             )
             test_data_file = self.output_dir / self.test_data_file
             self.logger.info(f"Test data file: {test_data_file}")

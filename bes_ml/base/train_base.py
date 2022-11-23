@@ -60,6 +60,7 @@ class Trainer_Base_Dataclass:
     weight_decay: float = 1e-3  # optimizer L2 regularization factor
     minibatch_print_interval: int = 5000
     do_train: bool = False  # if True, start training at end of init
+    maximum_parameters: int = None
     # optuna integration
     optuna_trial: Any = None  # optuna trial
     # non-init attributes visible to subclasses
@@ -99,14 +100,19 @@ class Trainer_Base(Trainer_Base_Dataclass):
         self.is_ddp = self.world_size > 1
         self.is_main_process = self.world_rank == 0
 
+
         if self.is_ddp:
+            print(
+                f"World rank {self.world_rank}  local rank {self.local_rank}  world size {self.world_size}  is_ddp {self.is_ddp}  is_main_process {self.is_main_process}")
+            if self.optuna_trial:
+                print(f"Trial: {self.optuna_trial.number}")
             dist.init_process_group(
                 'nccl' if torch.cuda.is_available() else 'gloo',
                 rank=self.world_rank,
                 world_size=self.world_size,
             )
+            print(f"Wolrd rank {self.world_rank} - process group init complete")
 
-        print(f"World size {self.world_size}  world rank {self.world_rank}  local rank {self.local_rank}")
         self._ddp_barrier()
 
         self._create_logger()
@@ -212,6 +218,9 @@ class Trainer_Base(Trainer_Base_Dataclass):
             self.model.print_model_summary()
             self.results['trainable_parameters'] = self.model.trainable_parameters.copy()
             self.results['feature_count'] = self.model.feature_count.copy()
+        if self.maximum_parameters:
+            total_parameters = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            assert total_parameters <= self.maximum_parameters, f'Model is too large with {total_parameters} parameters'
         self._ddp_barrier()
 
     def _setup_device(self) -> None:

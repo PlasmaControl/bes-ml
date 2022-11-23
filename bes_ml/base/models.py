@@ -692,15 +692,15 @@ class Multi_Features_Model(
         data_shape = (1, 1, self.signal_window_size, 8, 8)
         input_data = torch.rand(*data_shape)
 
-        # catpure torchinfo.summary() output
+        # capture torchinfo.summary() output
         tmp_io = io.StringIO()
         sys.stdout = tmp_io
         torchinfo.summary(self, input_data=input_data, device=torch.device('cpu'))
         sys.stdout = sys.__stdout__
         self.logger.info('\n'+tmp_io.getvalue())
         # print model summary
-        n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        self.logger.info(f"Model contains {n_params} trainable parameters")
+        total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        self.logger.info(f"Model contains {total_parameters} trainable parameters")
         self.logger.info(f'Single input size: {input_data.shape}')
         output = self(input_data)
         self.logger.info(f"Single output size: {output.shape}")
@@ -713,7 +713,6 @@ class Multi_Features_Model(
             feature_parameters += trainable_params
             self.trainable_parameters[feature.__class__.__name__] = trainable_params
             self.logger.info(f"  {feature.__class__.__name__} parameters: {trainable_params}")
-        total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
         mlp_parameters = total_parameters - feature_parameters
         self.trainable_parameters['mlp'] = mlp_parameters
         self.logger.info(f"  MLP parameters: {mlp_parameters}")
