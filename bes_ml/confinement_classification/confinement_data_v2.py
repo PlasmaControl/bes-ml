@@ -173,7 +173,7 @@ class Confinement_Data_v2(
             self.valid_dataset.load_datasets()
 
     def _make_data_loaders(self):
-        self.train_data_loader = DataLoader(
+        self.train_loader = DataLoader(
             self.train_dataset,
             batch_size=None,  # must be disabled when using samplers
             sampler=BatchSampler(
@@ -186,7 +186,7 @@ class Confinement_Data_v2(
                 drop_last=True,
             )
         )
-        self.validation_data_loader = DataLoader(
+        self.validation_loader = DataLoader(
             self.valid_dataset,
             batch_size=None,  # must be disabled when using samplers
             sampler=BatchSampler(

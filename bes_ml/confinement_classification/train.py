@@ -60,7 +60,7 @@ class Trainer(
         return
 
     def _make_data_loaders(self) -> None:
-        self.train_data_loader = DataLoader(self.train_dataset,
+        self.train_loader = DataLoader(self.train_dataset,
                                             batch_size=None,  # must be disabled when using samplers
                                             sampler=BatchSampler(RandomBatchSampler(self.train_dataset,
                                                                                     self.batch_size,
@@ -69,7 +69,7 @@ class Trainer(
                                                                  drop_last=True)
                                       )
 
-        self.validation_data_loader = DataLoader(self.validation_dataset,
+        self.validation_loader = DataLoader(self.validation_dataset,
                                                  batch_size=None,  # must be disabled when using samplers
                                                  sampler=BatchSampler(RandomBatchSampler(self.validation_dataset,
                                                                                          self.batch_size,

@@ -56,7 +56,7 @@ class Trainer(Trainer_Base):
         self.test_dataset = test_set
 
     def _make_data_loaders(self) -> None:
-        self.train_data_loader = DataLoader(
+        self.train_loader = DataLoader(
             self.train_dataset,
             batch_size=None,  # must be disabled when using samplers
             sampler=BatchSampler(
@@ -69,7 +69,7 @@ class Trainer(Trainer_Base):
                 drop_last=True,
             )
         )
-        self.validation_data_loader = DataLoader(
+        self.validation_loader = DataLoader(
             self.validation_dataset,
             batch_size=None,  # must be disabled when using samplers
             sampler=BatchSampler(

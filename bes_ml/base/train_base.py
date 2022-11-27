@@ -2,7 +2,6 @@
 import contextlib
 import logging
 from pathlib import Path
-from typing import Union, Tuple, Any
 import dataclasses
 from datetime import datetime
 import time
@@ -62,7 +61,7 @@ class Trainer_Base_Dataclass:
     do_train: bool = False  # if True, start training at end of init
     maximum_parameters: int = None
     # optuna integration
-    optuna_trial: Any = None  # optuna trial
+    optuna_trial = None  # optuna trial
     # non-init attributes visible to subclasses
     logger: logging.Logger = dataclasses.field(default=None, init=False)
     is_regression: bool = dataclasses.field(default=None, init=False)
@@ -70,8 +69,10 @@ class Trainer_Base_Dataclass:
     is_ddp: bool = dataclasses.field(default=None, init=False)
     is_main_process: bool = dataclasses.field(default=None, init=False)
     model: Multi_Features_Model = dataclasses.field(default=None, init=False)
-    train_data_loader: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
-    validation_data_loader: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
+    train_loader: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
+    validation_loader: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
+    train_sampler: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
+    validation_sampler: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
     results: dict = dataclasses.field(default=None, init=False)
     _ddp_barrier: callable = dataclasses.field(default=None, init=False)
 
@@ -123,8 +124,9 @@ class Trainer_Base(Trainer_Base_Dataclass):
         self._prepare_data()  # implement in data class; e.g. ELMs, confinement mode, velocimetry
 
         # validate data loaders
-        for data_loader in [self.train_data_loader, self.validation_data_loader]:
-            assert isinstance(data_loader, torch.utils.data.DataLoader) or data_loader is None
+        for data_loader in [self.train_loader, self.validation_loader]:
+            if data_loader:
+                assert isinstance(data_loader, torch.utils.data.DataLoader)
 
         self.logger.info(f"Setup time {time.time() - t_start_setup:.1f} s")
 
@@ -296,14 +298,14 @@ class Trainer_Base(Trainer_Base_Dataclass):
                 self.loss_function = torch.nn.CrossEntropyLoss(reduction="none")
 
         if self.is_main_process:
-            self.logger.info(f"Training batches per epoch {len(self.train_data_loader)}")
-        if self.validation_data_loader:
+            self.logger.info(f"Training batches per epoch {len(self.train_loader)}")
+        if self.validation_loader:
             self.results['valid_loss'] = []
             self.results['valid_score'] = []
             if self.is_classification:
                 self.results['valid_roc'] = []
             if self.is_main_process:
-                self.logger.info(f"Validation batches per epoch {len(self.validation_data_loader)}")
+                self.logger.info(f"Validation batches per epoch {len(self.validation_loader)}")
 
     def train(self) -> dict:
 
@@ -321,9 +323,12 @@ class Trainer_Base(Trainer_Base_Dataclass):
             self.logger.info(f"Ep {i_epoch + 1:03d}: begin")
             self.logger.info(f"Rank {self.world_rank} at epoch {i_epoch+1} start")
             self.results['lr'].append(self.optimizer.param_groups[0]['lr'])
+            if self.is_ddp:
+                self.train_sampler.set_epoch(i_epoch)
+                self.validation_sampler.set_epoch(i_epoch)
             for is_train, data_loader in zip(
                     [True, False],
-                    [self.train_data_loader, self.validation_data_loader],
+                    [self.train_loader, self.validation_loader],
             ):
                 self._ddp_barrier()
                 if data_loader is None:
@@ -523,7 +528,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
             self,
             is_train: bool = True,  # True for train, False for evaluation/inference
             data_loader: torch.utils.data.DataLoader = None,  # train or validation data loader
-    ) -> Union[np.ndarray, Tuple]:
+    ) -> np.ndarray|tuple:
         batch_losses = []
         all_predictions = []
         all_labels = []

@@ -417,14 +417,14 @@ class ELM_Data(
         self._ddp_barrier()
 
     def _make_data_loaders(self) -> None:
-        train_sampler = torch.utils.data.DistributedSampler(
+        self.train_sampler = torch.utils.data.DistributedSampler(
             self.train_dataset,
             shuffle=True if self.seed is None else False,
             drop_last=True,
         ) if self.is_ddp else None
-        self.train_data_loader = torch.utils.data.DataLoader(
+        self.train_loader = torch.utils.data.DataLoader(
             dataset=self.train_dataset,
-            sampler= train_sampler,
+            sampler=self.train_sampler,
             batch_size=self.batch_size,
             shuffle=True if (self.seed is None and self.is_ddp is False) else False,
             num_workers=self.num_workers,
@@ -433,14 +433,14 @@ class ELM_Data(
             persistent_workers=True if self.num_workers > 0 else False,
         )
         if self.validation_dataset:
-            validation_sampler = torch.utils.data.DistributedSampler(
+            self.validation_sampler = torch.utils.data.DistributedSampler(
                 self.validation_dataset,
                 shuffle=False,
                 drop_last=True,
             ) if self.is_ddp else None
-            self.validation_data_loader = torch.utils.data.DataLoader(
+            self.validation_loader = torch.utils.data.DataLoader(
                 dataset=self.validation_dataset,
-                sampler=validation_sampler,
+                sampler=self.validation_sampler,
                 batch_size=self.batch_size,
                 shuffle=False,
                 num_workers=self.num_workers,
