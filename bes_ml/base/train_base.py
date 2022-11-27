@@ -14,7 +14,7 @@ import numpy as np
 from sklearn import metrics
 import torch
 import torch.utils.data
-import torch.distributed as dist
+import torch.distributed
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 try:
@@ -133,7 +133,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
 
     def _ddp_barrier(self):
         if self.is_ddp:
-            dist.barrier()
+            torch.distributed.barrier()
 
     def _create_logger(self):
         """
@@ -314,13 +314,12 @@ class Trainer_Base(Trainer_Base_Dataclass):
         do_optuna_prune = False
 
         # loop over epochs
-        if self.is_main_process:
-            self.logger.info(f"Begin training loop over {self.n_epochs} epochs")
+        self.logger.info(f"Begin training loop over {self.n_epochs} epochs")
         t_start_training = time.time()
         for i_epoch in range(self.n_epochs):
             t_start_epoch = time.time()
-            if self.is_main_process:
-                self.logger.info(f"Ep {i_epoch + 1:03d}: begin")
+            self.logger.info(f"Ep {i_epoch + 1:03d}: begin")
+            self.logger.info(f"Rank {self.world_rank} at epoch {i_epoch+1} start")
             self.results['lr'].append(self.optimizer.param_groups[0]['lr'])
             for is_train, data_loader in zip(
                     [True, False],
@@ -330,6 +329,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
                 if data_loader is None:
                     continue  # skip if validation data is empty
                 # loss and predictions
+                self.logger.info(f"Here 1")
                 loss, predictions, labels = self._single_epoch_loop(
                     is_train=is_train,
                     data_loader=data_loader,
@@ -356,6 +356,19 @@ class Trainer_Base(Trainer_Base_Dataclass):
                             labels=[0, 1, 2, 3],
                         )
 
+                if self.is_ddp:
+                    # torch.distributed.all_reduce(loss)
+                    self.logger.info(f"{score}")
+                    tmp = torch.tensor([score], device=self.device)
+                    torch.distributed.all_reduce(tmp)
+                    score = tmp.cpu().numpy()
+                    self.logger.info(f"{score}")
+                    if self.is_classification:
+                        tmp = torch.tensor([roc], device=self.device)
+                        torch.distributed.all_reduce(tmp)
+                        roc = tmp.cpu().numpy()
+                    # self._ddp_barrier()
+
                 if is_train:
                     self.results['train_loss'].append(loss := (train_loss := loss.item()))
                     self.results['train_score'].append(score := (train_score := score.item()))
@@ -367,12 +380,12 @@ class Trainer_Base(Trainer_Base_Dataclass):
                     if self.is_classification:
                         self.results['valid_roc'].append(valid_roc := roc.item())
 
+            self._ddp_barrier()
+
             # step LR scheduler
             self.lr_scheduler.step(loss)
 
-            if not self.is_main_process:
-                # skip remainder if not main process
-                continue
+            self.logger.info(f"Rank {self.world_rank} at LR scheduler step in epoch {i_epoch+1}")
 
             # log training time
             self.results['epoch_time'].append(time.time() - t_start_epoch)
@@ -408,14 +421,15 @@ class Trainer_Base(Trainer_Base_Dataclass):
                     ):
                         self.results[module_attr_name][stat_name].append(stat_value.item())
 
-            # save results to yaml
-            with (self.output_dir / self.results_file).open('w') as results_file:
-                yaml.dump(
-                    self.results,
-                    results_file,
-                    default_flow_style=False,
-                    sort_keys=False,
-                )
+            if self.is_main_process:
+                # save results to yaml
+                with (self.output_dir / self.results_file).open('w') as results_file:
+                    yaml.dump(
+                        self.results,
+                        results_file,
+                        default_flow_style=False,
+                        sort_keys=False,
+                    )
 
             # print epoch summary
             status = f"Ep {i_epoch + 1:03d}: "
@@ -432,7 +446,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
             self.logger.info(status)
 
             # best score and save model
-            if score > best_score:
+            if score > best_score and self.is_main_process:
                 best_score = score
                 best_epoch = i_epoch
                 self.logger.info(f"  Best score: {best_score:.4f}")
@@ -442,52 +456,59 @@ class Trainer_Base(Trainer_Base_Dataclass):
 
             # optuna integration; report epoch result to optuna
             if optuna is not None and self.optuna_trial is not None:
+                self.logger.info(f"Rank {self.world_rank} epoch {i_epoch+1} loss {loss} score {score}")
                 # save results dict in trial user attributes
+                self.logger.info(f"{self.results}")
                 for stat_name in self.results:
+                    self.logger.info(f"Here 1: {stat_name}")
                     self.optuna_trial.set_user_attr(stat_name, self.results[stat_name])
+                self.logger.info("Here 2")
                 report_value = score if self.optuna_trial.user_attrs['maximize_score'] else loss
+                self.logger.info("Here 3")
                 assert np.isfinite(report_value)
+                self.logger.info("Here 4")
                 report_successful = False
-                tries = 1
-                while report_successful is False and tries <= 10:
+                report_attempts = 1
+                while report_successful is False and report_attempts <= 10:
                     try:
+                        self.logger.info(f"Rank {self.world_rank} epoch {i_epoch + 1}")
                         self.optuna_trial.report(report_value, i_epoch)
+                        self.logger.info(f"Rank {self.world_rank} epoch {i_epoch + 1}")
                     except:
                         self.logger.info("Failed optuna report, trying again...")
-                        tries += 1
+                        report_attempts += 1
                         time.sleep(2)
                     else:
+                        self.logger.info(f"Rank {self.world_rank} epoch {i_epoch + 1}")
                         report_successful = True
+                        self.logger.info("Report successful")
                 # break loop if report fails
                 if report_successful is False:
                     self.logger.info("==> Failed Optuna report, exiting training loop")
                     break
-                # break loop if pruning
-                if self.optuna_trial.should_prune():
-                    do_optuna_prune = True
-                    self.logger.info("==> Pruning trial with Optuna")
-                    break  # exit epoch training loop
+                self.logger.info(f"Finished optuna trial reporting in world_rank {self.world_rank} in epoch {i_epoch+1}")
+
+            self._ddp_barrier()
 
             # break loop if score stops improving
             if (i_epoch > 20) and (i_epoch > best_epoch + self.low_score_patience) and (score < 0.95 * best_score):
                 self.logger.info("==> Score is < 95% best score; breaking")
                 break
 
-        self._ddp_barrier()
+            self.logger.info(f"Rank {self.world_rank} end epoch {i_epoch+1}")
 
-        if self.is_main_process:
-            self.logger.info(f"End training loop")
-            self.logger.info(f"Training time {time.time() - t_start_training:.1f} s")
+        self.logger.info(f"End training loop")
+        self.logger.info(f"Training time {time.time() - t_start_training:.1f} s")
 
-            if hasattr(self.model, 'fft_features') and self.model.fft_features.fft_histogram:
-                fft_features = self.model.fft_features
-                self.logger.info(f"  FFT min/max:{fft_features.min:.4f}, {fft_features.max:.4f}")
-                bin_center = fft_features.bin_edges[:-1] + (fft_features.bin_edges[1] - fft_features.bin_edges[0]) / 2
-                mean = np.sum(fft_features.cummulative_hist * bin_center) / np.sum(fft_features.cummulative_hist)
-                stdev = np.sqrt(np.sum(fft_features.cummulative_hist * (bin_center - mean) ** 2) / np.sum(fft_features.cummulative_hist))
-                self.logger.info(f"  FFT mean {mean:.4f}  stdev {stdev:.4f}")
-                # for i in range(fft_features.hist_bins):
-                #     self.logger.info(f"  edge {bin_center[i]:.3}:  {fft_features.cummulative_hist[i]}")
+        if hasattr(self.model, 'fft_features') and self.model.fft_features.fft_histogram:
+            fft_features = self.model.fft_features
+            self.logger.info(f"  FFT min/max:{fft_features.min:.4f}, {fft_features.max:.4f}")
+            bin_center = fft_features.bin_edges[:-1] + (fft_features.bin_edges[1] - fft_features.bin_edges[0]) / 2
+            mean = np.sum(fft_features.cummulative_hist * bin_center) / np.sum(fft_features.cummulative_hist)
+            stdev = np.sqrt(np.sum(fft_features.cummulative_hist * (bin_center - mean) ** 2) / np.sum(fft_features.cummulative_hist))
+            self.logger.info(f"  FFT mean {mean:.4f}  stdev {stdev:.4f}")
+            # for i in range(fft_features.hist_bins):
+            #     self.logger.info(f"  edge {bin_center[i]:.3}:  {fft_features.cummulative_hist[i]}")
 
         for handler in self.logger.handlers[:]:
             handler.close()
@@ -539,13 +560,25 @@ class Trainer_Base(Trainer_Base_Dataclass):
                 )
                 sample_losses = self._apply_label_weights(sample_losses, labels)
                 batch_loss = sample_losses.mean()  # batch loss
+
+                if self.is_ddp:
+                    self.logger.info(f" before all_reduce loss {batch_loss}")
+                    torch.distributed.all_reduce(
+                        batch_loss,
+                        op=torch.distributed.ReduceOp.SUM,
+                    )
+                    batch_loss = batch_loss/4
+                    self.logger.info(f" after all_reduce loss {batch_loss}")
+
                 if is_train:
                     batch_loss.backward()
                     self.optimizer.step()
+                    self.logger.info(f" after backward and optimize.step")
 
-                batch_losses.append(batch_loss.item())  # accumulate batch losses
-                all_labels.append(labels.cpu().numpy())
+                batch_losses.append(batch_loss.detach().cpu().item())  # accumulate batch losses
+                all_labels.append(labels.detach().cpu().numpy())
                 all_predictions.append(predictions.detach().cpu().numpy())
+                self.logger.info("after appends")
 
                 # minibatch status
                 if (i_batch + 1) % self.minibatch_print_interval == 0 and self.is_main_process:
@@ -554,6 +587,8 @@ class Trainer_Base(Trainer_Base_Dataclass):
                     status += f"(ep loss {np.mean(batch_losses):.3f})  "
                     status += f"minibatch time {time.time() - t_start_minibatch:.3f} s"
                     self.logger.info(status)
+
+                self.logger.info("end batch")
 
         epoch_loss = np.mean(batch_losses)
         all_predictions = np.concatenate(all_predictions)
