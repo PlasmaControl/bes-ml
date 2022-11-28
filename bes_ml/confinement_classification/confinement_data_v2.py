@@ -186,7 +186,7 @@ class Confinement_Data_v2(
                 drop_last=True,
             )
         )
-        self.validation_loader = DataLoader(
+        self.valid_loader = DataLoader(
             self.valid_dataset,
             batch_size=None,  # must be disabled when using samplers
             sampler=BatchSampler(

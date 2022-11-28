@@ -69,7 +69,7 @@ class Trainer(Trainer_Base):
                 drop_last=True,
             )
         )
-        self.validation_loader = DataLoader(
+        self.valid_loader = DataLoader(
             self.validation_dataset,
             batch_size=None,  # must be disabled when using samplers
             sampler=BatchSampler(

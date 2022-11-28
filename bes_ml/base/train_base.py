@@ -14,6 +14,7 @@ import numpy as np
 from sklearn import metrics
 import torch
 import torch.utils.data
+import torch.utils.data.distributed
 import torch.distributed
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -71,9 +72,9 @@ class Trainer_Base_Dataclass:
     is_main_process: bool = dataclasses.field(default=None, init=False)
     model: Multi_Features_Model = dataclasses.field(default=None, init=False)
     train_loader: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
-    validation_loader: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
+    valid_loader: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
     train_sampler: torch.utils.data.distributed.DistributedSampler = dataclasses.field(default=None, init=False)
-    validation_sampler: torch.utils.data.distributed.DistributedSampler = dataclasses.field(default=None, init=False)
+    valid_sampler: torch.utils.data.distributed.DistributedSampler = dataclasses.field(default=None, init=False)
     results: dict = dataclasses.field(default=None, init=False)
     _ddp_barrier: callable = dataclasses.field(default=None, init=False)
 
@@ -89,30 +90,25 @@ class Trainer_Base(Trainer_Base_Dataclass):
         self.output_dir = Path(self.output_dir).resolve()
         self.output_dir.mkdir(exist_ok=True, parents=True)
 
-        if self.world_size:
-            if self.world_rank is None:
-                self.world_rank = int(os.environ['SLURM_PROCID'])
-            if self.local_rank is None:
-                self.local_rank = int(os.environ['SLURM_LOCALID'])
-        else:
-            self.world_size = 1
-            self.world_rank = self.local_rank = 0
+        if self.world_size is None:
+            self.world_size = int(os.environ.get('WORLD_SIZE', 1))
+        if self.world_rank is None:
+            self.world_rank = int(os.environ.get('WORLD_RANK', 0))
+        if self.local_rank is None:
+            self.local_rank = int(os.environ.get('LOCAL_RANK', 0))
         assert self.local_rank <= self.world_rank
+        assert self.world_rank < self.world_size
 
         self.is_ddp = self.world_size > 1
         self.is_main_process = self.world_rank == 0
 
-        print(f"World size {self.world_size}  world rank {self.world_rank}  local rank {self.local_rank}")
-        self._ddp_barrier()
-
         self._create_logger()
 
+        self.logger.info(f"Using DDP: {self.is_ddp}")
         if self.is_main_process:
             self.logger.info(f"In main process with world rank {self.world_rank}")
-            self.logger.info(f"Using DDP: {self.is_ddp}")
             self._print_inputs()
             self._save_inputs_to_yaml()
-        self._ddp_barrier()
 
         # subclass must set is_regression XOR is_classification
         assert self.is_regression ^ self.is_classification  # XOR
@@ -125,7 +121,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
         self._prepare_data()  # implement in data class; e.g. ELMs, confinement mode, velocimetry
 
         # validate data loaders
-        for data_loader in [self.train_loader, self.validation_loader]:
+        for data_loader in [self.train_loader, self.valid_loader]:
             if data_loader:
                 assert isinstance(data_loader, torch.utils.data.DataLoader)
 
@@ -142,6 +138,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
         """
         Use python's logging to allow simultaneous print to console and log file.
         """
+        self._ddp_barrier()
         if self.is_ddp:
             assert self.logger_hash
         if not self.logger_hash:
@@ -151,8 +148,10 @@ class Trainer_Base(Trainer_Base_Dataclass):
 
         log_file = self.output_dir / f'log.txt'
         log_file.unlink(missing_ok=True)
-        formatter = logging.Formatter(f"Rank {self.world_rank}: %(message)s")
-        self._ddp_barrier()
+        if self.is_ddp:
+            formatter = logging.Formatter(f"Rank {self.world_rank}: %(message)s")
+        else:
+            formatter = logging.Formatter(f"%(message)s")
         if self.is_main_process or self.log_all_ranks:
             # logs to log file
             f_handler = logging.FileHandler(log_file)
@@ -167,11 +166,10 @@ class Trainer_Base(Trainer_Base_Dataclass):
         else:
             # null logger if not main process
             self.logger.addHandler(logging.NullHandler())
-        self._ddp_barrier()
 
     def _print_inputs(self):
         cls = self.__class__
-        self.logger.info(f"Class `{cls.__name__}` parameters:")
+        self.logger.info(f"Class {cls.__name__} parameters:")
         cls_fields = sorted(dataclasses.fields(cls), key=lambda field: field.name)
         self_fields_dict = dataclasses.asdict(self)
         assert set([field.name for field in cls_fields]) == set(self_fields_dict.keys())
@@ -179,10 +177,10 @@ class Trainer_Base(Trainer_Base_Dataclass):
             if field.name in ['logger', '_ddp_barrier']:
                 continue
             if self_fields_dict[field.name] == field.default:
-                tmp = f"  {field.name}: {self_fields_dict[field.name]}"
+                field_str = f"  {field.name}: {self_fields_dict[field.name]}"
             else:
-                tmp = f"  {field.name}: {self_fields_dict[field.name]}  (default {field.default})"
-            self.logger.info(tmp)
+                field_str = f"  {field.name}: {self_fields_dict[field.name]}  (default {field.default})"
+            self.logger.info(field_str)
 
     def _save_inputs_to_yaml(self):
         filename = Path(self.output_dir / self.inputs_file)
@@ -200,6 +198,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
             )
 
     def _make_model(self) -> None:
+        self._ddp_barrier()
         model_kwargs = {
             field.name: getattr(self, field.name)
             for field in dataclasses.fields(Multi_Features_Model)
@@ -207,14 +206,12 @@ class Trainer_Base(Trainer_Base_Dataclass):
         self.model = Multi_Features_Model(**model_kwargs)
         if self.is_main_process:
             self.model.print_model_summary()
-            self.results['trainable_parameters'] = self.model.trainable_parameters.copy()
-            self.results['feature_count'] = self.model.feature_count.copy()
         if self.maximum_parameters:
             total_parameters = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
             assert total_parameters <= self.maximum_parameters, f'Model is too large with {total_parameters} parameters'
-        self._ddp_barrier()
 
     def _setup_device(self) -> None:
+        self._ddp_barrier()
         if self.device == 'auto':
             self.device = f'cuda:{self.local_rank}' if torch.cuda.is_available() else 'cpu'
         self.logger.info(f"Device {self.device}  world size {self.world_size}  " +
@@ -233,9 +230,9 @@ class Trainer_Base(Trainer_Base_Dataclass):
             self._model_alias = self.ddp_model
         else:
             self._model_alias = self.model
-        self._ddp_barrier()
 
     def _make_optimizer_scheduler(self) -> None:
+        self._ddp_barrier()
         assert self.optimizer_type in ['adam', 'sgd']
         if self.optimizer_type == 'adam':
             self.optimizer = torch.optim.Adam(
@@ -252,11 +249,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
                 dampening=self.sgd_dampening,
                 nesterov=self.sgd_nesterov,
             )
-        self.logger.info(
-            f"Optimizer {self.optimizer_type.upper()} " +
-            f"with learning rate {self.learning_rate:.1e} " +
-            f"and weight decay {self.weight_decay:.1e}"
-        )
+        self.logger.info(f"Optimizer {self.optimizer_type.upper()} lr {self.learning_rate:.1e}")
         self.lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
             factor=self.lr_scheduler_factor,
@@ -265,11 +258,10 @@ class Trainer_Base(Trainer_Base_Dataclass):
             mode='min',
             verbose=True,
         )
-        self._ddp_barrier()
+        self.logger.info(f"LR scheduler with patience {self.lr_scheduler_patience}")
 
     def _prepare_data(self) -> None:
-        # implement in subclass
-        # must generate self.train_data_loader and self.validation_data_loader
+        # subclass must generate self.train_loader and self.validation_loader
         raise NotImplementedError
 
     def _setup_train(self) -> None:
@@ -279,6 +271,8 @@ class Trainer_Base(Trainer_Base_Dataclass):
         self.results['train_score'] = []
         self.results['epoch_time'] = []
         self.results['lr'] = []
+        self.results['trainable_parameters'] = self.model.trainable_parameters
+        self.results['feature_count'] = self.model.feature_count
 
         if self.is_regression:
             self.results['score_function_name'] = 'R2'
@@ -290,23 +284,22 @@ class Trainer_Base(Trainer_Base_Dataclass):
             if self.model.mlp_output_size == 1:
                 assert hasattr(self, 'threshold')  # binary classification must specify threshold
                 self.results['loss_function_name'] = 'BCEWithLogitsLoss'
-                # labels are binary [0,1]; predictions are logits [-inf,inf]
                 self.loss_function = torch.nn.BCEWithLogitsLoss(reduction="none")
             else:
                 self.results['loss_function_name'] = 'CrossEntropyLoss'
-                # labels are true class C; predictions are scores for all classes
                 self.loss_function = torch.nn.CrossEntropyLoss(reduction="none")
 
         self.logger.info(f"Training batches per epoch {len(self.train_loader)}")
-        if self.validation_loader:
+        if self.valid_loader:
             self.results['valid_loss'] = []
             self.results['valid_score'] = []
             if self.is_classification:
                 self.results['valid_roc'] = []
-            self.logger.info(f"Validation batches per epoch {len(self.validation_loader)}")
+            self.logger.info(f"Validation batches per epoch {len(self.valid_loader)}")
 
     def train(self) -> dict:
 
+        self._ddp_barrier()
         self._setup_train()
 
         best_score = -np.inf
@@ -320,20 +313,15 @@ class Trainer_Base(Trainer_Base_Dataclass):
             t_start_epoch = time.time()
             self.logger.info(f"Ep {i_epoch + 1:03d}: begin")
             self.results['lr'].append(self.optimizer.param_groups[0]['lr'])
-            if self.is_ddp:
-                self.logger.info(f"sample set_epoch()")
-                self.train_sampler.set_epoch(i_epoch)
-                self.validation_sampler.set_epoch(i_epoch)
-                self.logger.info(f"end sample set_epoch()")
             for is_train, data_loader in zip(
                     [True, False],
-                    [self.train_loader, self.validation_loader],
+                    [self.train_loader, self.valid_loader],
             ):
-                self.logger.info(f"before barrier 1")
                 self._ddp_barrier()
-                self.logger.info(f"after barrier 1")
                 if data_loader is None:
                     continue  # skip if validation data is empty
+                if self.is_ddp:
+                    data_loader.set_epoch(i_epoch)
                 # loss and predictions
                 loss, predictions, labels = self._single_epoch_loop(
                     is_train=is_train,
@@ -362,35 +350,42 @@ class Trainer_Base(Trainer_Base_Dataclass):
                         )
 
                 if self.is_ddp:
-                    # torch.distributed.all_reduce(loss)
                     self._ddp_barrier()
-                    self.logger.info(f"{score}")
                     tmp = torch.tensor([score], device=self.device)
-                    torch.distributed.all_reduce(tmp)
+                    torch.distributed.all_reduce(
+                        tmp,
+                        op=torch.distributed.ReduceOp.AVG,
+                    )
                     score = tmp.cpu().numpy()
-                    self.logger.info(f"{score}")
                     if self.is_classification:
                         tmp = torch.tensor([roc], device=self.device)
-                        torch.distributed.all_reduce(tmp)
+                        torch.distributed.all_reduce(
+                            tmp,
+                            op=torch.distributed.ReduceOp.AVG,
+                        )
                         roc = tmp.cpu().numpy()
 
                 if is_train:
-                    self.results['train_loss'].append(loss := (train_loss := loss.item()))
-                    self.results['train_score'].append(score := (train_score := score.item()))
+                    train_loss = loss
+                    train_score = score
+                    self.results['train_loss'].append(train_loss)
+                    self.results['train_score'].append(train_score)
                     if self.is_classification:
-                        self.results['train_roc'].append(train_roc := roc.item())
+                        train_roc = roc
+                        self.results['train_roc'].append(train_roc)
                 else:
-                    self.results['valid_loss'].append(loss := (valid_loss := loss.item()))
-                    self.results['valid_score'].append(score := (valid_score := score.item()))
+                    valid_loss = loss
+                    valid_score = score
+                    self.results['valid_loss'].append(valid_loss)
+                    self.results['valid_score'].append(valid_score)
                     if self.is_classification:
-                        self.results['valid_roc'].append(valid_roc := roc.item())
+                        valid_roc = roc
+                        self.results['valid_roc'].append(valid_roc)
 
-            # self._ddp_barrier()
+            self._ddp_barrier()
 
             # step LR scheduler
             self.lr_scheduler.step(loss)
-
-            self.logger.info(f"Rank {self.world_rank} at LR scheduler step in epoch {i_epoch+1}")
 
             # log training time
             self.results['epoch_time'].append(time.time() - t_start_epoch)
@@ -405,11 +400,11 @@ class Trainer_Base(Trainer_Base_Dataclass):
                     attr = getattr(module, attr_name)
                     if attr is None or attr.numel() < 3:
                         continue
-                    mean = attr.mean()
-                    stdev = torch.sqrt(torch.mean((attr - mean) ** 2))
+                    mean = attr.mean().item()
+                    stdev = torch.sqrt(torch.mean((attr - mean) ** 2)).item()
                     scores = (attr - mean) / stdev
-                    skew = torch.mean(scores ** 3)
-                    kurt = torch.mean(scores ** 4) - 3
+                    skew = torch.mean(scores ** 3).item()
+                    kurt = (torch.mean(scores ** 4) - 3).item()
                     module_attr_name = f"{module_name}.{attr_name}"
                     if module_attr_name not in self.results:
                         self.results[module_attr_name] = {
@@ -424,7 +419,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
                             [mean, stdev, skew, kurt],
                             ['mean', 'stdev', 'skew', 'kurt'],
                     ):
-                        self.results[module_attr_name][stat_name].append(stat_value.item())
+                        self.results[module_attr_name][stat_name].append(stat_value)
 
             if self.is_main_process:
                 # save results to yaml
@@ -462,34 +457,24 @@ class Trainer_Base(Trainer_Base_Dataclass):
 
             # optuna integration; report epoch result to optuna
             if optuna is not None and self.optuna_trial is not None:
-                self.logger.info(f"Rank {self.world_rank} epoch {i_epoch+1} loss {loss} score {score}")
                 # save results dict in trial user attributes
                 # for stat_name in self.results:
                 #     self.optuna_trial.set_user_attr(stat_name, self.results[stat_name])
-                #     self._ddp_barrier()
                 # report_value = score if self.optuna_trial.user_attrs['maximize_score'] else loss
-                report_value = score
-                assert np.isfinite(report_value)
+                self._ddp_barrier()
+                assert np.isfinite(score)
                 report_successful = False
                 report_attempts = 1
-                while report_successful is False and report_attempts <= 10:
+                while report_successful is False:
                     try:
-                        # self.logger.info(f"Rank {self.world_rank} epoch {i_epoch + 1}")
-                        self.optuna_trial.report(report_value, i_epoch)
-                        # self.logger.info(f"Rank {self.world_rank} epoch {i_epoch + 1}")
+                        self.optuna_trial.report(score, i_epoch)
+                        report_successful = True
                     except:
-                        # self.logger.info("Failed optuna report, trying again...")
                         report_attempts += 1
                         time.sleep(2)
-                    else:
-                        # self.logger.info(f"Rank {self.world_rank} epoch {i_epoch + 1}")
-                        report_successful = True
-                        # self.logger.info("Report successful")
-                # break loop if report fails
-                if report_successful is False:
-                    self.logger.info("==> Failed Optuna report, exiting training loop")
-                    break
-                self.logger.info(f"Finished optuna trial reporting in world_rank {self.world_rank} in epoch {i_epoch+1}")
+                        if report_attempts >= 10:
+                            self.logger.info("==> Failed Optuna report, exiting training loop")
+                            break
 
             self._ddp_barrier()
 
@@ -498,7 +483,6 @@ class Trainer_Base(Trainer_Base_Dataclass):
                 self.logger.info("==> Score is < 95% best score; breaking")
                 break
 
-            # self.logger.info(f"Rank {self.world_rank} end epoch {i_epoch+1}")
 
         self.logger.info(f"End training loop")
         self.logger.info(f"Training time {time.time() - t_start_training:.1f} s")
@@ -566,24 +550,20 @@ class Trainer_Base(Trainer_Base_Dataclass):
                 batch_loss = sample_losses.mean()  # batch loss
 
                 if self.is_ddp:
-                    self.logger.info(f" before all_reduce loss {batch_loss}")
                     self._ddp_barrier()
                     torch.distributed.all_reduce(
                         batch_loss,
                         op=torch.distributed.ReduceOp.AVG,
                     )
                     # batch_loss = batch_loss/4
-                    self.logger.info(f" after all_reduce loss {batch_loss}")
 
                 if is_train:
                     batch_loss.backward()
                     self.optimizer.step()
-                    self.logger.info(f" after backward and optimize.step")
 
                 batch_losses.append(batch_loss.detach().cpu().item())  # accumulate batch losses
                 all_labels.append(labels.detach().cpu().numpy())
                 all_predictions.append(predictions.detach().cpu().numpy())
-                self.logger.info("after appends")
 
                 # minibatch status
                 if (i_batch + 1) % self.minibatch_print_interval == 0:
@@ -592,8 +572,6 @@ class Trainer_Base(Trainer_Base_Dataclass):
                     status += f"(ep loss {np.mean(batch_losses):.3f})  "
                     status += f"minibatch time {time.time() - t_start_minibatch:.3f} s"
                     self.logger.info(status)
-
-                self.logger.info("end batch")
 
         epoch_loss = np.mean(batch_losses)
         all_predictions = np.concatenate(all_predictions)

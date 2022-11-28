@@ -66,6 +66,7 @@ class ELM_Data(
         self._make_data_loaders()
 
     def _get_data(self) -> None:
+        self._ddp_barrier()
         self.logger.info(f"Data file: {self.data_location}")
 
         with h5py.File(self.data_location, "r") as data_file:
@@ -128,15 +129,16 @@ class ELM_Data(
                 sort_keys=False,
             )
 
+        self._ddp_barrier()
         self.logger.info(f"Training ELM events: {training_elms.size}")
         self.train_data = self._preprocess_data(
             elm_indices=training_elms,
             shuffle_indices=True,
             oversample_active_elm=self.oversample_active_elm if self.is_classification else False,
         )
-        self._ddp_barrier()
 
         if n_validation_elms:
+            self._ddp_barrier()
             self.logger.info(f"Validation ELM events: {validation_elms.size}")
             self.validation_data = self._preprocess_data(
                 elm_indices=validation_elms,
@@ -145,9 +147,9 @@ class ELM_Data(
         else:
             self.logger.info("Skipping validation data")
             self.validation_data = None
-        self._ddp_barrier()
 
         if n_test_elms:
+            self._ddp_barrier()
             self.logger.info(f"Test ELM events: {test_elms.size}")
             self.test_data = self._preprocess_data(
                 elm_indices=test_elms,
@@ -170,7 +172,6 @@ class ELM_Data(
         else:
             self.logger.info("Skipping test data")
             self.test_data = None
-        self._ddp_barrier()
 
     def _preprocess_data(
         self,
@@ -397,6 +398,7 @@ class ELM_Data(
         raise NotImplementedError
 
     def _make_datasets(self) -> None:
+        self._ddp_barrier()
         self.logger.info('Making datasets')
         self.train_dataset = ELM_Dataset(
             signals=self.train_data[0],
@@ -405,8 +407,8 @@ class ELM_Data(
             signal_window_size = self.signal_window_size,
             prediction_horizon=self.prediction_horizon if hasattr(self, 'prediction_horizon') else 0,
         )
-        self._ddp_barrier()
 
+        self._ddp_barrier()
         self.validation_dataset = ELM_Dataset(
             signals=self.validation_data[0],
             labels=self.validation_data[1],
@@ -414,9 +416,9 @@ class ELM_Data(
             signal_window_size = self.signal_window_size,
             prediction_horizon=self.prediction_horizon if hasattr(self, 'prediction_horizon') else 0,
         ) if self.validation_data else None
-        self._ddp_barrier()
 
     def _make_data_loaders(self) -> None:
+        self._ddp_barrier()
         self.train_sampler = torch.utils.data.DistributedSampler(
             self.train_dataset,
             shuffle=True if self.seed is None else False,
@@ -433,14 +435,15 @@ class ELM_Data(
             persistent_workers=True if self.num_workers > 0 else False,
         )
         if self.validation_dataset:
-            self.validation_sampler = torch.utils.data.DistributedSampler(
+            self._ddp_barrier()
+            self.valid_sampler = torch.utils.data.DistributedSampler(
                 self.validation_dataset,
                 shuffle=False,
                 drop_last=True,
             ) if self.is_ddp else None
-            self.validation_loader = torch.utils.data.DataLoader(
+            self.valid_loader = torch.utils.data.DataLoader(
                 dataset=self.validation_dataset,
-                sampler=self.validation_sampler,
+                sampler=self.valid_sampler,
                 batch_size=self.batch_size,
                 shuffle=False,
                 num_workers=self.num_workers,
@@ -448,10 +451,8 @@ class ELM_Data(
                 drop_last=True,
                 persistent_workers=True if self.num_workers > 0 else False,
             )
-        self._ddp_barrier()
 
 
-# TODO: make dataclass
 class ELM_Dataset(torch.utils.data.Dataset):
 
     def __init__(
