@@ -2,6 +2,7 @@
 import contextlib
 import logging
 from pathlib import Path
+import typing
 import dataclasses
 from datetime import datetime
 import time
@@ -61,7 +62,7 @@ class Trainer_Base_Dataclass:
     do_train: bool = False  # if True, start training at end of init
     maximum_parameters: int = None
     # optuna integration
-    optuna_trial = None  # optuna trial
+    optuna_trial: typing.Any = None  # optuna trial
     # non-init attributes visible to subclasses
     logger: logging.Logger = dataclasses.field(default=None, init=False)
     is_regression: bool = dataclasses.field(default=None, init=False)
@@ -71,8 +72,8 @@ class Trainer_Base_Dataclass:
     model: Multi_Features_Model = dataclasses.field(default=None, init=False)
     train_loader: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
     validation_loader: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
-    train_sampler: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
-    validation_sampler: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
+    train_sampler: torch.utils.data.distributed.DistributedSampler = dataclasses.field(default=None, init=False)
+    validation_sampler: torch.utils.data.distributed.DistributedSampler = dataclasses.field(default=None, init=False)
     results: dict = dataclasses.field(default=None, init=False)
     _ddp_barrier: callable = dataclasses.field(default=None, init=False)
 
@@ -251,7 +252,6 @@ class Trainer_Base(Trainer_Base_Dataclass):
                 dampening=self.sgd_dampening,
                 nesterov=self.sgd_nesterov,
             )
-        # if self.is_main_process:
         self.logger.info(
             f"Optimizer {self.optimizer_type.upper()} " +
             f"with learning rate {self.learning_rate:.1e} " +
@@ -297,15 +297,13 @@ class Trainer_Base(Trainer_Base_Dataclass):
                 # labels are true class C; predictions are scores for all classes
                 self.loss_function = torch.nn.CrossEntropyLoss(reduction="none")
 
-        if self.is_main_process:
-            self.logger.info(f"Training batches per epoch {len(self.train_loader)}")
+        self.logger.info(f"Training batches per epoch {len(self.train_loader)}")
         if self.validation_loader:
             self.results['valid_loss'] = []
             self.results['valid_score'] = []
             if self.is_classification:
                 self.results['valid_roc'] = []
-            if self.is_main_process:
-                self.logger.info(f"Validation batches per epoch {len(self.validation_loader)}")
+            self.logger.info(f"Validation batches per epoch {len(self.validation_loader)}")
 
     def train(self) -> dict:
 
@@ -321,20 +319,22 @@ class Trainer_Base(Trainer_Base_Dataclass):
         for i_epoch in range(self.n_epochs):
             t_start_epoch = time.time()
             self.logger.info(f"Ep {i_epoch + 1:03d}: begin")
-            self.logger.info(f"Rank {self.world_rank} at epoch {i_epoch+1} start")
             self.results['lr'].append(self.optimizer.param_groups[0]['lr'])
             if self.is_ddp:
+                self.logger.info(f"sample set_epoch()")
                 self.train_sampler.set_epoch(i_epoch)
                 self.validation_sampler.set_epoch(i_epoch)
+                self.logger.info(f"end sample set_epoch()")
             for is_train, data_loader in zip(
                     [True, False],
                     [self.train_loader, self.validation_loader],
             ):
+                self.logger.info(f"before barrier 1")
                 self._ddp_barrier()
+                self.logger.info(f"after barrier 1")
                 if data_loader is None:
                     continue  # skip if validation data is empty
                 # loss and predictions
-                self.logger.info(f"Here 1")
                 loss, predictions, labels = self._single_epoch_loop(
                     is_train=is_train,
                     data_loader=data_loader,
@@ -363,6 +363,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
 
                 if self.is_ddp:
                     # torch.distributed.all_reduce(loss)
+                    self._ddp_barrier()
                     self.logger.info(f"{score}")
                     tmp = torch.tensor([score], device=self.device)
                     torch.distributed.all_reduce(tmp)
@@ -372,7 +373,6 @@ class Trainer_Base(Trainer_Base_Dataclass):
                         tmp = torch.tensor([roc], device=self.device)
                         torch.distributed.all_reduce(tmp)
                         roc = tmp.cpu().numpy()
-                    # self._ddp_barrier()
 
                 if is_train:
                     self.results['train_loss'].append(loss := (train_loss := loss.item()))
@@ -385,7 +385,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
                     if self.is_classification:
                         self.results['valid_roc'].append(valid_roc := roc.item())
 
-            self._ddp_barrier()
+            # self._ddp_barrier()
 
             # step LR scheduler
             self.lr_scheduler.step(loss)
@@ -397,7 +397,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
             self.results['completed_epochs'] += 1
 
             # record layer statistics
-            for module_name, module in self._model_alias.named_modules():
+            for module_name, module in self.model.named_modules():
                 n_params = sum(p.numel() for p in module.parameters(recurse=False) if p.requires_grad)
                 if n_params == 0:
                     continue
@@ -451,42 +451,40 @@ class Trainer_Base(Trainer_Base_Dataclass):
             self.logger.info(status)
 
             # best score and save model
-            if score > best_score and self.is_main_process:
+            if score > best_score:
                 best_score = score
                 best_epoch = i_epoch
                 self.logger.info(f"  Best score: {best_score:.4f}")
-                self.model.save_pytorch_model(filename=self.output_dir / self.checkpoint_file)
-                if self.save_onnx_model:
-                    self.model.save_onnx_model(filename=self.output_dir / self.onnx_checkpoint_file)
+                if self.is_main_process:
+                    self.model.save_pytorch_model(filename=self.output_dir / self.checkpoint_file)
+                    if self.save_onnx_model:
+                        self.model.save_onnx_model(filename=self.output_dir / self.onnx_checkpoint_file)
 
             # optuna integration; report epoch result to optuna
             if optuna is not None and self.optuna_trial is not None:
                 self.logger.info(f"Rank {self.world_rank} epoch {i_epoch+1} loss {loss} score {score}")
                 # save results dict in trial user attributes
-                self.logger.info(f"{self.results}")
-                for stat_name in self.results:
-                    self.logger.info(f"Here 1: {stat_name}")
-                    self.optuna_trial.set_user_attr(stat_name, self.results[stat_name])
-                self.logger.info("Here 2")
-                report_value = score if self.optuna_trial.user_attrs['maximize_score'] else loss
-                self.logger.info("Here 3")
+                # for stat_name in self.results:
+                #     self.optuna_trial.set_user_attr(stat_name, self.results[stat_name])
+                #     self._ddp_barrier()
+                # report_value = score if self.optuna_trial.user_attrs['maximize_score'] else loss
+                report_value = score
                 assert np.isfinite(report_value)
-                self.logger.info("Here 4")
                 report_successful = False
                 report_attempts = 1
                 while report_successful is False and report_attempts <= 10:
                     try:
-                        self.logger.info(f"Rank {self.world_rank} epoch {i_epoch + 1}")
+                        # self.logger.info(f"Rank {self.world_rank} epoch {i_epoch + 1}")
                         self.optuna_trial.report(report_value, i_epoch)
-                        self.logger.info(f"Rank {self.world_rank} epoch {i_epoch + 1}")
+                        # self.logger.info(f"Rank {self.world_rank} epoch {i_epoch + 1}")
                     except:
-                        self.logger.info("Failed optuna report, trying again...")
+                        # self.logger.info("Failed optuna report, trying again...")
                         report_attempts += 1
                         time.sleep(2)
                     else:
-                        self.logger.info(f"Rank {self.world_rank} epoch {i_epoch + 1}")
+                        # self.logger.info(f"Rank {self.world_rank} epoch {i_epoch + 1}")
                         report_successful = True
-                        self.logger.info("Report successful")
+                        # self.logger.info("Report successful")
                 # break loop if report fails
                 if report_successful is False:
                     self.logger.info("==> Failed Optuna report, exiting training loop")
@@ -500,7 +498,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
                 self.logger.info("==> Score is < 95% best score; breaking")
                 break
 
-            self.logger.info(f"Rank {self.world_rank} end epoch {i_epoch+1}")
+            # self.logger.info(f"Rank {self.world_rank} end epoch {i_epoch+1}")
 
         self.logger.info(f"End training loop")
         self.logger.info(f"Training time {time.time() - t_start_training:.1f} s")
@@ -548,6 +546,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
                     labels = labels.to(self.device, non_blocking=True)
                 if i_batch % self.minibatch_print_interval == 0:
                     t_start_minibatch = time.time()
+                self._ddp_barrier()
                 if is_train:
                     self.optimizer.zero_grad()
                 # predictions are floats: regression scalars or classification logits
@@ -568,11 +567,12 @@ class Trainer_Base(Trainer_Base_Dataclass):
 
                 if self.is_ddp:
                     self.logger.info(f" before all_reduce loss {batch_loss}")
+                    self._ddp_barrier()
                     torch.distributed.all_reduce(
                         batch_loss,
-                        op=torch.distributed.ReduceOp.SUM,
+                        op=torch.distributed.ReduceOp.AVG,
                     )
-                    batch_loss = batch_loss/4
+                    # batch_loss = batch_loss/4
                     self.logger.info(f" after all_reduce loss {batch_loss}")
 
                 if is_train:
@@ -586,7 +586,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
                 self.logger.info("after appends")
 
                 # minibatch status
-                if (i_batch + 1) % self.minibatch_print_interval == 0 and self.is_main_process:
+                if (i_batch + 1) % self.minibatch_print_interval == 0:
                     status = f"  {mode} batch {i_batch + 1:05d}/{len(data_loader):05d}  "
                     status += f"batch loss {batch_loss:.3f} "
                     status += f"(ep loss {np.mean(batch_losses):.3f})  "
