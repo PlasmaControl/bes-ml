@@ -1,7 +1,7 @@
 import dataclasses
 import numpy as np
 import torch
-import torch.distributed
+# import torch.distributed
 
 try:
     from ..base.train_base import Trainer_Base
@@ -86,23 +86,8 @@ class Trainer(
     ) -> np.ndarray:
         raw_label_min = labels[valid_indices+self.signal_window_size].min()
         raw_label_max = labels[valid_indices+self.signal_window_size].max()
-        if self.is_ddp:
-            self.logger.info(f"  Before reduce min {raw_label_min:.4f} max {raw_label_max:.4f}")
-            tmp = torch.tensor(raw_label_min, dtype=torch.float)
-            torch.distributed.all_reduce(
-                tmp,
-                op=torch.distributed.ReduceOp.MIN,
-            )
-            raw_label_min = tmp.numpy()
-            tmp = torch.tensor(raw_label_max, dtype=torch.float)
-            torch.distributed.all_reduce(
-                tmp,
-                op=torch.distributed.ReduceOp.MAX,
-            )
-            raw_label_max = tmp.numpy()
-            self.logger.info(f"  After reduce min {raw_label_min:.4f} max {raw_label_max:.4f}")
-        self.results['raw_label_min'] = raw_label_min
-        self.results['raw_label_max'] = raw_label_max
+        self.results['raw_label_min'] = raw_label_min.item()
+        self.results['raw_label_max'] = raw_label_max.item()
         self.logger.info(f"  Raw label min/max: {raw_label_min:.4e}, {raw_label_max:.4e}")
         if self.normalize_labels:
             self.logger.info(f"  Normalizing labels to min/max = -/+ 1")

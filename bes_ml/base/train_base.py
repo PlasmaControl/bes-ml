@@ -313,15 +313,16 @@ class Trainer_Base(Trainer_Base_Dataclass):
             t_start_epoch = time.time()
             self.logger.info(f"Ep {i_epoch + 1:03d}: begin")
             self.results['lr'].append(self.optimizer.param_groups[0]['lr'])
-            for is_train, data_loader in zip(
-                    [True, False],
-                    [self.train_loader, self.valid_loader],
+            for is_train, data_loader, sampler in zip(
+                [True, False],
+                [self.train_loader, self.valid_loader],
+                [self.train_sampler, self.valid_sampler],
             ):
                 self._ddp_barrier()
                 if data_loader is None:
                     continue  # skip if validation data is empty
-                if self.is_ddp:
-                    data_loader.set_epoch(i_epoch)
+                if sampler is not None:
+                    sampler.set_epoch(i_epoch)
                 # loss and predictions
                 loss, predictions, labels = self._single_epoch_loop(
                     is_train=is_train,
@@ -329,15 +330,15 @@ class Trainer_Base(Trainer_Base_Dataclass):
                 )
                 # scores
                 if self.is_regression:
-                    score = metrics.r2_score(labels, predictions)
+                    score = metrics.r2_score(labels, predictions).item()
                 elif self.is_classification:
                     if self.model.mlp_output_size == 1:
                         modified_predictions = (predictions > self.threshold).astype(int)
-                        score = metrics.f1_score(labels, modified_predictions, average='binary')
-                        roc = metrics.roc_auc_score(labels, predictions)
+                        score = metrics.f1_score(labels, modified_predictions, average='binary').item()
+                        roc = metrics.roc_auc_score(labels, predictions).item()
                     else:
                         modified_predictions = predictions.argmax(axis=1)  # select class with highest score
-                        score = metrics.f1_score(labels, modified_predictions, average='weighted')
+                        score = metrics.f1_score(labels, modified_predictions, average='weighted').item()
                         one_hot_labels = np.zeros_like(predictions)
                         for i, j in zip(one_hot_labels, labels):
                             i[j] = 1
@@ -347,7 +348,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
                             multi_class='ovo',
                             average='macro',
                             labels=[0, 1, 2, 3],
-                        )
+                        ).item()
 
                 if self.is_ddp:
                     self._ddp_barrier()
@@ -356,17 +357,17 @@ class Trainer_Base(Trainer_Base_Dataclass):
                         tmp,
                         op=torch.distributed.ReduceOp.AVG,
                     )
-                    score = tmp.cpu().numpy()
+                    score = tmp.cpu().item()
                     if self.is_classification:
                         tmp = torch.tensor([roc], device=self.device)
                         torch.distributed.all_reduce(
                             tmp,
                             op=torch.distributed.ReduceOp.AVG,
                         )
-                        roc = tmp.cpu().numpy()
+                        roc = tmp.cpu().item()
 
                 if is_train:
-                    train_loss = loss
+                    train_loss = loss.item()
                     train_score = score
                     self.results['train_loss'].append(train_loss)
                     self.results['train_score'].append(train_score)
@@ -374,7 +375,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
                         train_roc = roc
                         self.results['train_roc'].append(train_roc)
                 else:
-                    valid_loss = loss
+                    valid_loss = loss.item()
                     valid_score = score
                     self.results['valid_loss'].append(valid_loss)
                     self.results['valid_score'].append(valid_score)
@@ -420,6 +421,9 @@ class Trainer_Base(Trainer_Base_Dataclass):
                             ['mean', 'stdev', 'skew', 'kurt'],
                     ):
                         self.results[module_attr_name][stat_name].append(stat_value)
+
+            training_time = time.time() - t_start_training
+            self.results['training_time'] = training_time
 
             if self.is_main_process:
                 # save results to yaml
@@ -485,7 +489,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
 
 
         self.logger.info(f"End training loop")
-        self.logger.info(f"Training time {time.time() - t_start_training:.1f} s")
+        self.logger.info(f"Training time {training_time/60:.1f} min")
 
         if hasattr(self.model, 'fft_features') and self.model.fft_features.fft_histogram:
             fft_features = self.model.fft_features

@@ -5,11 +5,14 @@ import concurrent.futures
 import time
 from typing import Callable
 import multiprocessing as mp
+import warnings
 
 import numpy as np
 import torch
 import torch.distributed
 import optuna
+
+warnings.filterwarnings(action='ignore', module='optuna')
 
 
 def fail_stale_trials(
@@ -85,7 +88,6 @@ def run_optuna(
     else:
         study_dir = Path(study_name)
 
-    print(db_url, study_name, study_dir)
     assert db_url and study_name and study_dir
 
     study_dir.mkdir(exist_ok=True)
@@ -294,38 +296,36 @@ def objective(
     trial.set_user_attr('maximize_score', maximize_score)
 
     if world_rank in [None, 0]:
-        print(f"Trial {trial.number} starting with i_gpu {i_gpu} and world_rank {world_rank}")
-        print(dry_run)
+        print(f"Trial {trial.number} starting")
 
     with open(os.devnull, 'w') as f:
         sys.stdout = f
         sys.stderr = f
 
         input_kwargs = trial_generator(trial)
+        input_kwargs['output_dir'] = trial_dir.as_posix()
+        input_kwargs['device'] = f'cuda:{i_gpu:d}' if isinstance(i_gpu, int) else i_gpu
 
         try:
-            if dry_run is True:
-                assert False, "dry_run is True"
             trainer = trainer_class(
                 optuna_trial=trial,
                 world_size=world_size,
                 world_rank=world_rank,
                 local_rank=local_rank,
-                output_dir=trial_dir.as_posix(),
-                device=f'cuda:{i_gpu:d}' if isinstance(i_gpu, int) else i_gpu,
                 logger_hash=logger_hash,
                 **input_kwargs,
             )
+            if dry_run is True:
+                assert False, "dry_run is True"
             outputs = trainer.train()
         except Exception as e:
             sys.stdout = sys.__stdout__
             sys.stderr = sys.__stderr__
-            # if world_rank in [None, 0]:
-            print(f"Trial {trial.number} failed: {repr(e)}")
-            raise e
+            if world_rank in [None, 0]:
+                print(f"Trial {trial.number} failed: {repr(e)}")
             result = np.NAN
         else:
-            if world_rank is None or world_rank == 0:
+            if world_rank in [None, 0]:
                 result = outputs['valid_score'][-1] if maximize_score else outputs['train_loss'][-1]
                 if analyzer_class is not None:
                     analysis = analyzer_class(
@@ -337,40 +337,6 @@ def objective(
             sys.stdout = sys.__stdout__
             sys.stderr = sys.__stderr__
             if world_rank in [None, 0]:
-                print(f"Trial {trial.number} finished on world_rank {world_rank}")
+                print(f"Trial {trial.number} finished with final/min score {outputs['valid_score'][-1]:.3f}/{np.min(outputs['valid_score']):.3f} and training time {outputs['training_time']/60:.1f} min")
 
     return result
-
-
-# def study_example(
-#         trial: Union[optuna.trial.Trial, optuna.trial.FrozenTrial],
-# ) -> dict:
-#     input_kwargs = {
-#         'fraction_test': 0.0,
-#         'fraction_validation': 0.0,
-#         'log_time': False,
-#         'inverse_weight_label': False,
-#         'learning_rate': 10 ** trial.suggest_int('lr_exp', -6, -2),
-#         'cnn_layer1_num_kernels': 10 * trial.suggest_int('cnn_layer1_num_kernels_factor_10', 1, 8),
-#         'cnn_layer2_num_kernels': 5 * trial.suggest_int('cnn_layer2_num_kernels_factor_5', 1, 8),
-#     }
-#     return input_kwargs
-#
-#
-# if __name__ == '__main__':
-#
-#     run_optuna(
-#         db_name=study_example.__name__,
-#         n_gpus=2,  # <=2 for head node, <=4 for compute node, ==1 if run_on_cpu
-#         n_workers_per_gpu=2,  # max 3 for V100
-#         n_trials_per_worker=5,
-#         objective_func=study_example,
-#         trainer_class=elm_regression.Trainer,
-#         sampler_startup_trials=60,
-#         pruner_startup_trials=10,
-#         pruner_warmup_epochs=6,
-#         pruner_minimum_trials_at_epoch=20,
-#         pruner_patience=4,
-#         maximize_score=False,
-#         constant_liar=True,
-#     )

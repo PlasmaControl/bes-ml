@@ -5,7 +5,7 @@ import pickle
 import numpy as np
 import torch
 import torch.utils.data
-import torch.distributed
+# import torch.distributed
 import h5py
 import yaml
 import matplotlib.pyplot as plt
@@ -316,21 +316,16 @@ class ELM_Data(
             bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
             mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
             stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
-            if self.is_ddp:
-                self.logger.info(f"  FFT before all_reduce mean {mean:.4f} stdev {stdev:.4f}")
-                tmp = torch.tensor(mean, dtype=torch.float)
-                torch.distributed.all_reduce(
-                    tmp,
-                    op=torch.distributed.ReduceOp.AVG,
-                )
-                mean = tmp.numpy()
-                tmp = torch.tensor(stdev, dtype=torch.float)
-                torch.distributed.all_reduce(
-                    tmp,
-                    op=torch.distributed.ReduceOp.AVG,
-                )
-                stdev = tmp.numpy()
-                self.logger.info(f"  FFT after all_reduce mean {mean:.4f} stdev {stdev:.4f}")
+            # if self.is_ddp:
+            #     self.logger.info(f"  Before broadcast FFT mean {mean:.4f} stdev {stdev:.4f}")
+            #     if self.is_main_process:
+            #         object_list = [mean, stdev]
+            #         torch.distributed.broadcast_object_list(object_list=object_list)
+            #     else:
+            #         object_list = [None] * 2
+            #         torch.distributed.broadcast_object_list(object_list=object_list)
+            #         mean, stdev = object_list
+            #     self.logger.info(f"  After broadcast FFT {mean:.4f} stdev {stdev:.4f}")
             self.logger.info(f"  Original log10(|FFT|^2) mean {mean:.4f}  stdev {stdev:.4f}")
             self.model.fft_features.fft_mean = mean
             self.model.fft_features.fft_stdev = stdev
@@ -374,11 +369,11 @@ class ELM_Data(
         return return_tuple
 
     def _get_statistics(self, sample_indices: np.ndarray, signals: np.ndarray) -> dict:
-        signal_min = np.inf
-        signal_max = -np.inf
+        signal_min = np.array(np.inf)
+        signal_max = np.array(-np.inf)
         n_bins = 200
         cummulative_hist = np.zeros(n_bins, dtype=int)
-        count = sample_indices.size
+        count = np.array(sample_indices.size)
         stat_interval = sample_indices.size // 2000
         if stat_interval < 1:
             stat_interval = 1
@@ -395,41 +390,19 @@ class ELM_Data(
         bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
         mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
         stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
-        if self.is_ddp:
-            self.logger.info(f"  Before reduce {count} min {signal_min:.4f} max {signal_max:.4f} mean {mean:.4f} stdev {stdev:.4f}")
-            tmp = torch.tensor(count, dtype=torch.int)
-            torch.distributed.all_reduce(
-                tmp,
-                op=torch.distributed.ReduceOp.SUM,
-            )
-            count = tmp.numpy()
-            tmp = torch.tensor(signal_min, dtype=torch.float)
-            torch.distributed.all_reduce(
-                tmp,
-                op=torch.distributed.ReduceOp.MIN,
-            )
-            signal_min = tmp.numpy()
-            tmp = torch.tensor(signal_max, dtype=torch.float)
-            torch.distributed.all_reduce(
-                tmp,
-                op=torch.distributed.ReduceOp.MAX,
-            )
-            signal_max = tmp.numpy()
-            tmp = torch.tensor(mean, dtype=torch.float)
-            torch.distributed.all_reduce(
-                tmp,
-                op=torch.distributed.ReduceOp.AVG,
-            )
-            mean = tmp.numpy()
-            tmp = torch.tensor(stdev, dtype=torch.float)
-            torch.distributed.all_reduce(
-                tmp,
-                op=torch.distributed.ReduceOp.AVG,
-            )
-            stdev = tmp.numpy()
-            self.logger.info(f"  After reduce {count} min {signal_min:.4f} max {signal_max:.4f} mean {mean:.4f} stdev {stdev:.4f}")
+        # if self.is_ddp:
+        #     self.logger.info(f"  Before signal broadcast count {count} min {signal_min:.4f} max {signal_max:.4f} mean {mean:.4f} stdev {stdev:.4f}")
+        #     if self.is_main_process:
+        #         object_list = [count, signal_min, signal_max, mean, stdev]
+        #         torch.distributed.broadcast_object_list(object_list=object_list)
+        #     else:
+        #         object_list = [None] * 5
+        #         torch.distributed.broadcast_object_list(object_list=object_list)
+        #         count, signal_min, signal_max, mean, stdev = object_list
+        self.logger.info(
+            f"  Signal stats count {count} min {signal_min:.4f} max {signal_max:.4f} mean {mean:.4f} stdev {stdev:.4f}")
         return {
-            'count': sample_indices.size,
+            'count': count.item(),
             'min': signal_min.item(),
             'max': signal_max.item(),
             'mean': mean.item(),
