@@ -23,10 +23,22 @@ def fail_stale_trials(
     assert db_file.exists()
     db_url = f'sqlite:///{db_file.as_posix()}'
 
-    storage = optuna.storages.RDBStorage(
-        url=db_url,
-    )
+    # connect to optuna database
+    success = False
+    attempts = 0
+    while success is False:
+        try:
+            storage = optuna.storages.RDBStorage(
+                url=db_url,
+            )
+            success = True
+        except:
+            attempts += 1
+            time.sleep(1)
+            if attempts >= 10:
+                assert False, "Failed DB connection"
 
+    # create/load optuna study
     study = optuna.load_study(
         study_name='study',
         storage=storage,
@@ -63,7 +75,7 @@ def run_optuna(
         pruner_warmup_epochs: int = 10,  # initial epochs before pruning
         pruner_minimum_trials_at_epoch: int = 20,  # minimum trials at each epoch before pruning
         pruner_patience: int = 10,  # epochs to wait for improvement before pruning
-        maximize_score: bool = True,  #  True (default) to maximize validation score; False to minimize training loss
+        # maximize_score: bool = True,  #  True (default) to maximize validation score; False to minimize training loss
         fail_stale_trials: bool = False,  # if True, fail any stale trials
         constant_liar: bool = False,  # if True, add penalty to running trials to avoid redundant sampling
         world_size: int = None,
@@ -92,7 +104,21 @@ def run_optuna(
 
     study_dir.mkdir(exist_ok=True)
 
-    storage = optuna.storages.RDBStorage(url=db_url)
+    # connect to optuna database
+    success = False
+    attempts = 0
+    while success is False:
+        try:
+            storage = optuna.storages.RDBStorage(
+                url=db_url,
+            )
+            success = True
+        except:
+            attempts += 1
+            time.sleep(1)
+            if attempts >= 10:
+                assert False, "Failed DB connection"
+
     if world_rank in [None, 0]:
         print(f'Existing studies in storage:')
         for study in optuna.get_all_study_summaries(db_url):
@@ -104,7 +130,7 @@ def run_optuna(
         study_name=study_name,
         storage=storage,
         load_if_exists=True,
-        direction='maximize' if maximize_score else 'minimize',
+        direction='maximize',
     )
 
     if None not in [world_size, world_rank, local_rank]:
@@ -141,7 +167,7 @@ def run_optuna(
         'pruner_warmup_epochs': pruner_warmup_epochs,
         'pruner_minimum_trials_at_epoch': pruner_minimum_trials_at_epoch,
         'pruner_patience': pruner_patience,
-        'maximize_score': maximize_score,
+        # 'maximize_score': maximize_score,
         'constant_liar': constant_liar,
         'local_rank': local_rank,
         'world_rank': world_rank,
@@ -206,7 +232,7 @@ def worker(
         pruner_warmup_epochs: int = 10,
         pruner_minimum_trials_at_epoch: int = 20,
         pruner_patience: int = 10,
-        maximize_score: bool = True,
+        # maximize_score: bool = True,
         constant_liar: bool = False,
         local_rank: int = None,
         world_rank: int = None,
@@ -246,7 +272,7 @@ def worker(
             trial_generator=trial_generator,
             trainer_class=trainer_class,
             analyzer_class=analyzer_class,
-            maximize_score=maximize_score,
+            # maximize_score=maximize_score,
             world_rank=world_rank,
             world_size=world_size,
             local_rank=local_rank,
@@ -280,7 +306,7 @@ def objective(
         trial_generator: Callable,
         trainer_class: Callable,
         analyzer_class: Callable = None,
-        maximize_score: bool = True,
+        # maximize_score: bool = True,
         i_gpu: int | str = 'auto',
         world_size: int = None,
         world_rank: int = None,
@@ -293,7 +319,7 @@ def objective(
     assert study_dir.exists()
     trial_dir = study_dir / f'trial_{trial.number:04d}'
 
-    trial.set_user_attr('maximize_score', maximize_score)
+    # trial.set_user_attr('maximize_score', maximize_score)
 
     if world_rank in [None, 0]:
         print(f"Trial {trial.number} starting")
@@ -323,10 +349,11 @@ def objective(
             sys.stderr = sys.__stderr__
             if world_rank in [None, 0]:
                 print(f"Trial {trial.number} failed: {repr(e)}")
-            result = np.NAN
+            objective_value = np.NAN
         else:
             if world_rank in [None, 0]:
-                result = outputs['valid_score'][-1] if maximize_score else outputs['train_loss'][-1]
+                scores = outputs['valid_score'] if 'valid_score' in outputs else outputs['train_score']
+                objective_value = np.max(scores)
                 if analyzer_class is not None:
                     analysis = analyzer_class(
                         output_dir=input_kwargs['output_dir'],
@@ -337,6 +364,6 @@ def objective(
             sys.stdout = sys.__stdout__
             sys.stderr = sys.__stderr__
             if world_rank in [None, 0]:
-                print(f"Trial {trial.number} finished with final/min score {outputs['valid_score'][-1]:.3f}/{np.min(outputs['valid_score']):.3f} and training time {outputs['training_time']/60:.1f} min")
+                print(f"Trial {trial.number} finished with final/max score {scores[-1]:.3f}/{objective_value:.3f} and training time {outputs['training_time']/60:.1f} min")
 
-    return result
+    return objective_value

@@ -136,6 +136,7 @@ class ELM_Data(
             elm_indices=training_elms,
             shuffle_indices=True,
             oversample_active_elm=self.oversample_active_elm if self.is_classification else False,
+            is_train_data=True,
         )
 
         if n_validation_elms:
@@ -180,6 +181,7 @@ class ELM_Data(
         shuffle_indices: bool = False,
         oversample_active_elm: bool = False,
         save_filename: str = '',
+        is_train_data: bool = False,
     ) -> tuple:
         if save_filename and self.is_main_process:
             plt.ioff()
@@ -252,39 +254,41 @@ class ELM_Data(
         packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
         packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
 
-        # standardize/clip signals
+        # get signal stats
         stats = self._get_statistics(
             sample_indices=packaged_valid_t0_indices,
             signals=packaged_signals,
         )
         self.logger.info(f"  Raw signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
+        if is_train_data:
+            self.results['raw_signal_mean'] = stats['mean']
+            self.results['raw_signal_stdev'] = stats['stdev']
 
-        if self.clip_sigma:
-            self.logger.info(f"  Clipping signal windows beyond +/- {self.clip_sigma} sigma")
-            mask = []
-            lb = stats['mean'] - self.clip_sigma * stats['stdev']
-            ub = stats['mean'] + self.clip_sigma * stats['stdev']
-            for i in packaged_valid_t0_indices:
-                signal_window = packaged_signals[i: i + self.signal_window_size, :, :]
-                mask.append((signal_window.min() >= lb) and (signal_window.max() <= ub))
-            packaged_valid_t0_indices = packaged_valid_t0_indices[mask]
-            stats = self._get_statistics(
-                sample_indices=packaged_valid_t0_indices,
-                signals=packaged_signals,
-            )
-            self.logger.info(f"  Clipped signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
-
-        self.results['raw_signal_mean'] = stats['mean']
-        self.results['raw_signal_stdev'] = stats['stdev']
-
+        # standardize signals with mean~0 and stdev~1
         if self.standardize_signals:
-            self.logger.info(f"  Standardizing signals with mean {stats['mean']:.4f} and stdev {stats['stdev']:.4f}")
-            packaged_signals = (packaged_signals - stats['mean']) / stats['stdev']
+            assert self.results['raw_signal_mean'] and self.results['raw_signal_stdev']
+            mean = self.results['raw_signal_mean']
+            stdev = self.results['raw_signal_stdev']
+            self.logger.info(f"  Standardizing signals with mean {mean:.4f} and stdev {stdev:.4f}")
+            packaged_signals = (packaged_signals - mean) / stdev
             stats = self._get_statistics(
                 sample_indices=packaged_valid_t0_indices,
                 signals=packaged_signals,
             )
             self.logger.info(f"  Standardized signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
+            # clip at +/- sigma
+            if self.clip_sigma:
+                self.logger.info(f"  Clipping signal windows beyond +/- {self.clip_sigma} sigma")
+                mask = []
+                for i in packaged_valid_t0_indices:
+                    signal_window = packaged_signals[i: i + self.signal_window_size, :, :]
+                    mask.append((signal_window.min() >= -self.clip_sigma) and (signal_window.max() <= self.clip_sigma))
+                packaged_valid_t0_indices = packaged_valid_t0_indices[mask]
+                stats = self._get_statistics(
+                    sample_indices=packaged_valid_t0_indices,
+                    signals=packaged_signals,
+                )
+                self.logger.info(f"  Clipped signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
 
         if self.standardize_fft and self.fft_num_kernels:
             self.logger.info(f"  Standardizing FFT in model")
@@ -399,8 +403,8 @@ class ELM_Data(
         #         object_list = [None] * 5
         #         torch.distributed.broadcast_object_list(object_list=object_list)
         #         count, signal_min, signal_max, mean, stdev = object_list
-        self.logger.info(
-            f"  Signal stats count {count} min {signal_min:.4f} max {signal_max:.4f} mean {mean:.4f} stdev {stdev:.4f}")
+        # self.logger.info(
+        #     f"  Signal stats count {count} min {signal_min:.4f} max {signal_max:.4f} mean {mean:.4f} stdev {stdev:.4f}")
         return {
             'count': count.item(),
             'min': signal_min.item(),

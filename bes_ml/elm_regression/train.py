@@ -102,7 +102,7 @@ if __name__=='__main__':
         # max_elms=5,
         batch_size=16,
         n_epochs=2,
-        fraction_test=0,
+        # fraction_test=0,
         # pre_elm_size=2000,
         minibatch_print_interval=100,
         do_train=True,
