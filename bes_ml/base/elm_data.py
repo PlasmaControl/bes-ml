@@ -261,14 +261,14 @@ class ELM_Data(
         )
         self.logger.info(f"  Raw signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
         if is_train_data:
-            self.results['raw_signal_mean'] = stats['mean']
-            self.results['raw_signal_stdev'] = stats['stdev']
+            self.results['raw_train_signal_mean'] = stats['mean']
+            self.results['raw_train_signal_stdev'] = stats['stdev']
 
         # standardize signals with mean~0 and stdev~1
         if self.standardize_signals:
-            assert self.results['raw_signal_mean'] and self.results['raw_signal_stdev']
-            mean = self.results['raw_signal_mean']
-            stdev = self.results['raw_signal_stdev']
+            assert self.results['raw_train_signal_mean'] and self.results['raw_train_signal_stdev']
+            mean = self.results['raw_train_signal_mean']
+            stdev = self.results['raw_train_signal_stdev']
             self.logger.info(f"  Standardizing signals with mean {mean:.4f} and stdev {stdev:.4f}")
             packaged_signals = (packaged_signals - mean) / stdev
             stats = self._get_statistics(
