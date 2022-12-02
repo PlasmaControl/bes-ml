@@ -354,7 +354,7 @@ class ConfinementDataset(torch.utils.data.Dataset):
 
         signal_windows = self._roll_window(hf[hf_index], self.signal_window_size, self.batch_size)
         labels = hf_labels[hf_index[-self.batch_size:]]
-
+        print(signal_windows.shape[0], self.batch_size, signal_windows.shape[1], self.signal_window_size)
         assert signal_windows.shape[0] == self.batch_size and signal_windows.shape[1] == self.signal_window_size
         assert labels.shape[0] == self.batch_size
 
@@ -470,8 +470,11 @@ class ConfinementDataset(torch.utils.data.Dataset):
                 # read_direct is faster and more memory efficient
                 arr_len = sx.stop - sx.start
                 hf2np_s = np.empty((64, arr_len))
-                hf2np_l = np.empty((arr_len,4))
+                hf2np_l = np.empty((arr_len,))
                 hf2np_t = np.empty((arr_len,))
+                
+                hf['labels'] = np.where(hf['labels'])[1]
+                # print(np.where(hf['labels'])[1])
 
                 hf['signals'].read_direct(hf2np_s, sx_s, np.s_[...])
                 hf['labels'].read_direct(hf2np_l, sx, np.s_[...])
