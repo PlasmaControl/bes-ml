@@ -131,7 +131,7 @@ class ELM_Data(
             )
 
         self._ddp_barrier()
-        self.logger.info(f"Training ELM events: {training_elms.size}")
+        self.logger.info(f"Training data ELM events: {training_elms.size}")
         self.train_data = self._preprocess_data(
             elm_indices=training_elms,
             shuffle_indices=True,
@@ -141,7 +141,7 @@ class ELM_Data(
 
         if n_validation_elms:
             self._ddp_barrier()
-            self.logger.info(f"Validation ELM events: {validation_elms.size}")
+            self.logger.info(f"Validation data ELM events: {validation_elms.size}")
             self.validation_data = self._preprocess_data(
                 elm_indices=validation_elms,
                 # save_filename='validation_elms',
@@ -152,7 +152,7 @@ class ELM_Data(
 
         if n_test_elms:
             self._ddp_barrier()
-            self.logger.info(f"Test ELM events: {test_elms.size}")
+            self.logger.info(f"Test data ELM events: {test_elms.size}")
             self.test_data = self._preprocess_data(
                 elm_indices=test_elms,
                 # save_filename='test_elms',
@@ -191,7 +191,7 @@ class ELM_Data(
         with h5py.File(self.data_location, 'r') as h5_file:
             elm_data = []
             for i_elm, elm_index in enumerate(elm_indices):
-                if i_elm%200 == 0:
+                if i_elm%100 == 0:
                     self.logger.info(f"  ELM event {i_elm:04d}/{elm_indices.size:04d}")
                 elm_key = f"{elm_index:05d}"
                 elm_event = h5_file[elm_key]
@@ -261,6 +261,7 @@ class ELM_Data(
         )
         self.logger.info(f"  Raw signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
         if is_train_data:
+            self.logger.info("  Setting raw signal mean/stdev using training data")
             self.results['raw_train_signal_mean'] = stats['mean']
             self.results['raw_train_signal_stdev'] = stats['stdev']
 
@@ -297,7 +298,7 @@ class ELM_Data(
             hist_bins = 230
             cummulative_hist = np.zeros(hist_bins, dtype=int)
             fft_bins = np.empty((self.fft_nbins, nfreqs-1, 8, 8), dtype=np.float32)
-            stat_interval = packaged_valid_t0_indices.size // 4000
+            stat_interval = packaged_valid_t0_indices.size // 2000
             if stat_interval < 1:
                 stat_interval = 1
             for i in packaged_valid_t0_indices[::stat_interval]:
@@ -320,21 +321,13 @@ class ELM_Data(
             bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
             mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
             stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
-            # if self.is_ddp:
-            #     self.logger.info(f"  Before broadcast FFT mean {mean:.4f} stdev {stdev:.4f}")
-            #     if self.is_main_process:
-            #         object_list = [mean, stdev]
-            #         torch.distributed.broadcast_object_list(object_list=object_list)
-            #     else:
-            #         object_list = [None] * 2
-            #         torch.distributed.broadcast_object_list(object_list=object_list)
-            #         mean, stdev = object_list
-            #     self.logger.info(f"  After broadcast FFT {mean:.4f} stdev {stdev:.4f}")
-            self.logger.info(f"  Original log10(|FFT|^2) mean {mean:.4f}  stdev {stdev:.4f}")
-            self.model.fft_features.fft_mean = mean
-            self.model.fft_features.fft_stdev = stdev
-            self.results['fft_mean'] = mean.item()
-            self.results['fft_stdev'] = stdev.item()
+            self.logger.info(f"  Signal log10(|FFT|^2) mean {mean:.4f}  stdev {stdev:.4f}")
+            if is_train_data:
+                self.logger.info("  Using train signals for FFT standardization")
+                self.results['train_signal_fft_mean'] = mean.item()
+                self.results['train_signal_fft_stdev'] = stdev.item()
+            self.model.fft_features.fft_mean = self.results['train_signal_fft_mean']
+            self.model.fft_features.fft_stdev = self.results['train_signal_fft_stdev']
 
         # balance or normalize labels
         if self.is_classification:
@@ -377,10 +370,7 @@ class ELM_Data(
         signal_max = np.array(-np.inf)
         n_bins = 200
         cummulative_hist = np.zeros(n_bins, dtype=int)
-        count = np.array(sample_indices.size)
-        stat_interval = sample_indices.size // 2000
-        if stat_interval < 1:
-            stat_interval = 1
+        stat_interval = sample_indices.size // 1000 if sample_indices.size > 1000 else 1
         for i in sample_indices[::stat_interval]:
             signal_window = signals[i: i + self.signal_window_size, :, :]
             signal_min = np.min([signal_min, signal_window.min()])
@@ -394,19 +384,8 @@ class ELM_Data(
         bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
         mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
         stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
-        # if self.is_ddp:
-        #     self.logger.info(f"  Before signal broadcast count {count} min {signal_min:.4f} max {signal_max:.4f} mean {mean:.4f} stdev {stdev:.4f}")
-        #     if self.is_main_process:
-        #         object_list = [count, signal_min, signal_max, mean, stdev]
-        #         torch.distributed.broadcast_object_list(object_list=object_list)
-        #     else:
-        #         object_list = [None] * 5
-        #         torch.distributed.broadcast_object_list(object_list=object_list)
-        #         count, signal_min, signal_max, mean, stdev = object_list
-        # self.logger.info(
-        #     f"  Signal stats count {count} min {signal_min:.4f} max {signal_max:.4f} mean {mean:.4f} stdev {stdev:.4f}")
         return {
-            'count': count.item(),
+            'count': sample_indices.size,
             'min': signal_min.item(),
             'max': signal_max.item(),
             'mean': mean.item(),
