@@ -25,7 +25,7 @@ class Confinement_Data_v2(
     Trainer_Base_Dataclass,
     Multi_Features_Model_Dataclass,
 ):
-    data_location: Path|str = sample_data_dir / 'turbulence_data' #location of stored data
+    data_location: Path|str = sample_data_dir / 'kgill_data' #location of stored data
     dataset_to_ram: bool = True # Load datasets to ram
     batch_size: int = 64  # power of 2, like 16-128
     fraction_validation: float = 0.2  # fraction of dataset for validation
@@ -84,7 +84,7 @@ class Confinement_Data_v2(
         input_files = [shots[key] for key in sorted(shots.keys())]
         shot_nums = list(sorted(shots.keys()))
         return shot_nums, input_files
-
+    
     def _make_datasets(self):
         """
         Splits full dataset into train and test sets. Returns copies of self.
@@ -360,15 +360,16 @@ class ConfinementDataset(torch.utils.data.Dataset):
 
         batch_labels = hf_labels[hf_index]
         batch_time = hf_time[hf_index]
-        if not all(batch_labels == labels[0]) or not all(np.diff(batch_time) <= 0.2):
-            #adjust index for bad labels
-            if not all(batch_labels == labels[0]):
-                i_offset = np.argmax(batch_labels != batch_labels[0]) + 1
-            else:
-                i_offset = np.argmax(np.diff(batch_time) >= 2e-3) + 1
+        print("!!!!!!!!!!!!!!!!!!!!!!",batch_labels, batch_time, labels)
+        # if not all(batch_labels == labels[0]) or not all(np.diff(batch_time) <= 0.2):
+        #     #adjust index for bad labels
+        #     if not all(batch_labels == labels[0]):
+        #         i_offset = np.argmax(batch_labels != batch_labels[0]) + 1
+        #     else:
+        #         i_offset = np.argmax(np.diff(batch_time) >= 2e-3) + 1
 
-            index = [i + i_offset for i in index]
-            self._get_from_ram(index)
+        #     index = [i + i_offset for i in index]
+        #     self._get_from_ram(index)
 
         return torch.tensor(signal_windows, dtype=torch.float32).unsqueeze(1), torch.tensor(labels, dtype=torch.float32)
 
@@ -469,7 +470,7 @@ class ConfinementDataset(torch.utils.data.Dataset):
                 # read_direct is faster and more memory efficient
                 arr_len = sx.stop - sx.start
                 hf2np_s = np.empty((64, arr_len))
-                hf2np_l = np.empty((arr_len,))
+                hf2np_l = np.empty((arr_len,4))
                 hf2np_t = np.empty((arr_len,))
 
                 hf['signals'].read_direct(hf2np_s, sx_s, np.s_[...])
