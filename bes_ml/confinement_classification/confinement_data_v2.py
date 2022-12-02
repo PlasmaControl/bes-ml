@@ -474,7 +474,6 @@ class ConfinementDataset(torch.utils.data.Dataset):
                 hf2np_t = np.empty((arr_len,))
                 
                 hf['labels'] = np.where(hf['labels'])[1]
-                # print(np.where(hf['labels'])[1])
 
                 hf['signals'].read_direct(hf2np_s, sx_s, np.s_[...])
                 hf['labels'].read_direct(hf2np_l, sx, np.s_[...])
