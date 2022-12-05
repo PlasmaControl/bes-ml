@@ -36,8 +36,8 @@ class ELM_Data(
     seed: int = None  # RNG seed for deterministic, reproducible shuffling (ELMs, sample indices, etc.)
     label_type: np.int8 | np.float32 = dataclasses.field(default=None, init=False)
     test_data_file: str = 'test_data.pkl'
-    standardize_signals: bool = True,
-    standardize_fft: bool = True,
+    standardize_signals: bool = True,  # if True, standardize signals based on training data mean~0, stdev~1
+    standardize_fft: bool = True,  # if True, standardize FFTs based on training data log10(FFT^2) mean~0, stdev~1
     clip_sigma: float = 8.0  # remove signal windows with abs(standardized_signals) > n_sigma
     data_partition_file: str = 'data_partition.yaml'  # data partition for training, valid., and testing
     max_elms: int = None
