@@ -202,6 +202,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
         model_kwargs = {
             field.name: getattr(self, field.name)
             for field in dataclasses.fields(Multi_Features_Model)
+            if field.init
         }
         self.model = Multi_Features_Model(**model_kwargs)
         if self.is_main_process:
@@ -491,9 +492,9 @@ class Trainer_Base(Trainer_Base_Dataclass):
         self.logger.info(f"End training loop")
         self.logger.info(f"Training time {training_time/60:.1f} min")
 
-        if hasattr(self.model, 'fft_features') and self.model.fft_features.fft_histogram:
+        if hasattr(self.model, 'fft_features') and self.model.fft_features.calc_histogram:
             fft_features = self.model.fft_features
-            self.logger.info(f"  FFT min/max:{fft_features.min:.4f}, {fft_features.max:.4f}")
+            self.logger.info(f"  FFT min/max:{fft_features.fft_min:.4f}, {fft_features.fft_max:.4f}")
             bin_center = fft_features.bin_edges[:-1] + (fft_features.bin_edges[1] - fft_features.bin_edges[0]) / 2
             mean = np.sum(fft_features.cummulative_hist * bin_center) / np.sum(fft_features.cummulative_hist)
             stdev = np.sqrt(np.sum(fft_features.cummulative_hist * (bin_center - mean) ** 2) / np.sum(fft_features.cummulative_hist))

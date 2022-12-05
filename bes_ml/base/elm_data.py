@@ -261,7 +261,7 @@ class ELM_Data(
         )
         self.logger.info(f"  Raw signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
         if is_train_data:
-            self.logger.info("  Setting raw signal mean/stdev using training data")
+            self.logger.info("  -> Setting raw signal mean/stdev using training data")
             self.results['raw_train_signal_mean'] = stats['mean']
             self.results['raw_train_signal_stdev'] = stats['stdev']
 
@@ -291,43 +291,43 @@ class ELM_Data(
                 )
                 self.logger.info(f"  Clipped signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
 
-        if self.standardize_fft and self.fft_num_kernels:
-            self.logger.info(f"  Standardizing FFT in model")
-            nfft = self.signal_window_size // self.fft_nbins
-            nfreqs = nfft // 2 + 1
-            hist_bins = 230
-            cummulative_hist = np.zeros(hist_bins, dtype=int)
-            fft_bins = np.empty((self.fft_nbins, nfreqs-1, 8, 8), dtype=np.float32)
-            stat_interval = packaged_valid_t0_indices.size // 2000
+        if self.fft_num_kernels:
+            self.model.fft_features.calc_histogram = True
+            self.model.fft_features.reset_histogram()
+            stat_interval = packaged_valid_t0_indices.size // 1000
             if stat_interval < 1:
                 stat_interval = 1
             for i in packaged_valid_t0_indices[::stat_interval]:
                 signal_window = packaged_signals[i: i + self.signal_window_size, :, :]
-                for i_bin in range(self.fft_nbins):
-                    rfft = np.fft.rfft(
-                        signal_window[i_bin * nfft:(i_bin+1) * nfft, :, :], 
-                        axis=0,
-                    )
-                    fft_bins[i_bin: i_bin + 1, :, :, :] = np.abs(rfft[1:, :, :]) ** 2
-                fft_sw = np.mean(fft_bins, axis=0)
-                fft_sw[fft_sw<1e-5] = 1e-5
-                fft_sw = np.log10(fft_sw)
-                hist, bin_edges = np.histogram(
-                    fft_sw,
-                    bins=hist_bins,
-                    range=[-7,7],
-                )
-                cummulative_hist += hist
+                _ = self.model.fft_features.forward(torch.from_numpy(signal_window).unsqueeze(0).unsqueeze(0))
+            bin_edges = self.model.fft_features.bin_edges
+            cummulative_hist = self.model.fft_features.cummulative_hist
             bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
             mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
             stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
-            self.logger.info(f"  Signal log10(|FFT|^2) mean {mean:.4f}  stdev {stdev:.4f}")
-            if is_train_data:
-                self.logger.info("  Using train signals for FFT standardization")
+            self.logger.info(f"  log10(|FFT|^2)  mean {mean:.4f}  stdev {stdev:.4f}")
+            if is_train_data and self.standardize_fft:
+                self.logger.info(f"  -> Standardizing FFT in data with train data FFTs")
                 self.results['train_signal_fft_mean'] = mean.item()
                 self.results['train_signal_fft_stdev'] = stdev.item()
-            self.model.fft_features.fft_mean = self.results['train_signal_fft_mean']
-            self.model.fft_features.fft_stdev = self.results['train_signal_fft_stdev']
+                assert (
+                    self.model.fft_features.fft_mean is None and
+                    self.model.fft_features.fft_stdev is None
+                )
+                self.model.fft_features.fft_mean = self.results['train_signal_fft_mean']
+                self.model.fft_features.fft_stdev = self.results['train_signal_fft_stdev']
+                # redo hist calculation with mean/stdev for standardization
+                self.model.fft_features.reset_histogram()
+                for i in packaged_valid_t0_indices[::stat_interval]:
+                    signal_window = packaged_signals[i: i + self.signal_window_size, :, :]
+                    _ = self.model.fft_features.forward(torch.from_numpy(signal_window).unsqueeze(0).unsqueeze(0))
+                bin_edges = self.model.fft_features.bin_edges
+                cummulative_hist = self.model.fft_features.cummulative_hist
+                bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
+                mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
+                stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
+                self.logger.info(f"  Standardized log10(|FFT|^2)  mean {mean:.4f}  stdev {stdev:.4f}")
+            self.model.fft_features.calc_histogram = False
 
         # balance or normalize labels
         if self.is_classification:
