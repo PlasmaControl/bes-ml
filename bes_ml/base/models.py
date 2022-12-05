@@ -692,6 +692,19 @@ class Multi_Features_Model(
             self.activation = self.activation_function()
         self.dropout = nn.Dropout(p=self.dropout_rate)
 
+        # initialize
+        @torch.no_grad()
+        def initialize_weights(submodule: torch.nn.Module):
+            if hasattr(submodule, 'weight'):
+                torch.nn.init.kaiming_normal_(
+                    submodule.weight,
+                    a=self.leakyrelu_negative_slope,
+                    nonlinearity='leaky_relu',
+                )
+
+        # iteratively apply weight initialization
+        self.apply(initialize_weights)
+
         self.trainable_parameters = {}
 
     def forward(self, x):
