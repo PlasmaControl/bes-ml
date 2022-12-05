@@ -15,6 +15,5 @@ def get_db_url() -> str:
         'database',
     ]:
         assert key in data, f"File {db_connection_file} is missing key {key}"
-    # return db_connection_data
     url = f"mysql+pymysql://{data['user']}:{data['password']}@{data['host']}/{data['database']}"
     return url

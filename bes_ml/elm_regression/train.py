@@ -1,6 +1,7 @@
 import dataclasses
 import numpy as np
 import torch
+# import torch.distributed
 
 try:
     from ..base.train_base import Trainer_Base
@@ -27,8 +28,6 @@ class Trainer(
 
         if self.inverse_weight_label and self.normalize_labels:
             assert False, "Invalid options"
-
-        self.raw_label_minmax = None
 
         super().__post_init__()  # Trainer_Base.__post_init__()
 
@@ -68,7 +67,6 @@ class Trainer(
         assert signals.shape[0] == valid_t0.size
         if self.log_time:
             labels = np.log10(labels)
-            assert labels.min() == 0
         return labels, signals, valid_t0
 
     def _apply_label_weights(
@@ -83,41 +81,34 @@ class Trainer(
 
     def _apply_label_normalization(
         self, 
-        labels: torch.Tensor = None,
-        valid_indices: torch.Tensor = None,
-    ) -> torch.Tensor:
+        labels: np.ndarray = None,
+        valid_indices: np.ndarray = None,
+    ) -> np.ndarray:
+        raw_label_min = labels[valid_indices+self.signal_window_size].min()
+        raw_label_max = labels[valid_indices+self.signal_window_size].max()
+        self.results['raw_label_min'] = raw_label_min.item()
+        self.results['raw_label_max'] = raw_label_max.item()
+        self.logger.info(f"  Raw label min/max: {raw_label_min:.4e}, {raw_label_max:.4e}")
         if self.normalize_labels:
-            if self.raw_label_minmax is None:
-                initialize = True
-                self.raw_label_minmax = [
-                    labels[valid_indices+self.signal_window_size].min().item(), 
-                    labels[valid_indices+self.signal_window_size].max().item(),
-                ]
-                self.results['raw_label_minmax'] = self.raw_label_minmax
-                if self.log_time:
-                    assert self.raw_label_minmax[0] == 0
-                else:
-                    assert self.raw_label_minmax[0] == 1
-            else:
-                initialize = False
-            self.logger.info(
-                f"  Normalizing labels[valid_t0] to min/max = -/+ 1 " +
-                f"with raw min/max {self.raw_label_minmax[0]:.4e} {self.raw_label_minmax[1]:.4e}"
-            )
-            label_range = self.raw_label_minmax[1] - self.raw_label_minmax[0]
-            labels = ((labels - self.raw_label_minmax[0]) / label_range - 0.5) * 2
-            if initialize:
-                assert labels[valid_indices+self.signal_window_size].min() == -1
-                assert labels[valid_indices+self.signal_window_size].max() == 1
+            self.logger.info(f"  Normalizing labels to min/max = -/+ 1")
+            label_range = raw_label_max - raw_label_min
+            labels = ((labels - raw_label_min) / label_range - 0.5) * 2
         return labels
 
 
 if __name__=='__main__':
     Trainer(
         dense_num_kernels=8,
-        max_elms=5,
+        fft_num_kernels=8,
+        signal_window_size=128,
+        fft_subwindows=2,
+        fft_nbins=2,
+        # fft_histogram=True,
+        # max_elms=5,
+        batch_size=16,
         n_epochs=2,
-        fraction_test=0,
-        pre_elm_size=2000,
+        # fraction_test=0,
+        # pre_elm_size=2000,
+        minibatch_print_interval=50,
         do_train=True,
     )
