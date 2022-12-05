@@ -113,8 +113,16 @@ class Trainer(
 if __name__=='__main__':
     Trainer(
         dense_num_kernels=8,
-        max_elms=5,
+        fft_num_kernels=8,
+        signal_window_size=128,
+        fft_subwindows=2,
+        fft_nbins=2,
+        # fft_histogram=True,
+        # max_elms=5,
+        batch_size=16,
         n_epochs=2,
-        fraction_test=0,
+        # fraction_test=0,
+        # pre_elm_size=2000,
+        minibatch_print_interval=50,
         do_train=True,
     )
