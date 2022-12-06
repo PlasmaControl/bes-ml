@@ -237,6 +237,7 @@ class Analyzer_Base(
 
     def plot_inference(
         self,
+        max_elms: int = None,
         save: bool = False,  # save PDFs
     ) -> None:
         if self.test_data is None:
@@ -253,6 +254,8 @@ class Analyzer_Base(
             prediction_offset += self.inputs['prediction_horizon']
         i_page = 1
         for i_elm in range(n_elms):
+            if max_elms and i_elm >= max_elms:
+                break
             elm_index = self.test_data['elm_indices'][i_elm]
             labels = self.all_labels[i_elm]
             predictions = self.all_predictions[i_elm]
