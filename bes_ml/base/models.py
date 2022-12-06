@@ -162,8 +162,6 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
         assert (
             self.cnn_layer1_kernel_time_size % 2 == 1 and
             self.cnn_layer2_kernel_time_size % 2 == 1
-            # self.cnn_layer1_kernel_spatial_size % 2 == 1 and
-            # self.cnn_layer2_kernel_spatial_size % 2 == 1
         ), 'Kernel time dims must be odd'
 
         self.logger.info("CNN transformation")
@@ -279,7 +277,7 @@ class _FFT_Features_Dataclass(_Base_Features_Dataclass):
     fft_maxpool_spatial_size: int = 2
     fft_mean: float = dataclasses.field(default=None, init=False)
     fft_stdev: float = dataclasses.field(default=None, init=False)
-    calc_histogram: bool = dataclasses.field(default=False, init=False)
+    fft_calc_histogram: bool = dataclasses.field(default=False, init=False)
 
 
 @dataclasses.dataclass(eq=False)
@@ -309,7 +307,7 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
         # FFT stats
         self.hist_bins = 230
         self.reset_histogram()
-        self.calc_histogram = False
+        self.fft_calc_histogram = False
 
         self.logger.info("FFT transformation")
 
@@ -414,7 +412,7 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
             fft_subwindows = (fft_subwindows - self.fft_mean) / self.fft_stdev
             fft_subwindows[fft_subwindows<-6] = -6
             fft_subwindows[fft_subwindows>6] = 6
-        if self.calc_histogram:
+        if self.fft_calc_histogram:
             hist, bin_edges = np.histogram(
                 fft_subwindows.cpu(),
                 bins=self.hist_bins,
@@ -623,7 +621,6 @@ class Multi_Features_Model(
         if self.logger is None:
             self.logger = logging.getLogger(__name__)
             self.logger.setLevel(logging.INFO)
-            # self.logger.addHandler(logging.StreamHandler())
             self.logger.addHandler(logging.NullHandler())
 
         self_parameters = inspect.signature(self.__class__).parameters

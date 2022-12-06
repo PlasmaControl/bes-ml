@@ -5,7 +5,6 @@ import pickle
 import numpy as np
 import torch
 import torch.utils.data
-# import torch.distributed
 import h5py
 import yaml
 import matplotlib.pyplot as plt
@@ -292,14 +291,15 @@ class ELM_Data(
                 self.logger.info(f"  Clipped signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
 
         if self.fft_num_kernels:
-            self.model.fft_features.calc_histogram = True
+            self.model.fft_features.fft_calc_histogram = True
             self.model.fft_features.reset_histogram()
             stat_interval = packaged_valid_t0_indices.size // 1000
             if stat_interval < 1:
                 stat_interval = 1
             for i in packaged_valid_t0_indices[::stat_interval]:
                 signal_window = packaged_signals[i: i + self.signal_window_size, :, :]
-                _ = self.model.fft_features.forward(torch.from_numpy(signal_window).unsqueeze(0).unsqueeze(0))
+                signal_window = torch.from_numpy(signal_window[np.newaxis, np.newaxis, ...]).to(self.device)
+                _ = self.model.fft_features.forward(signal_window)
             bin_edges = self.model.fft_features.bin_edges
             cummulative_hist = self.model.fft_features.cummulative_hist
             bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
@@ -320,14 +320,15 @@ class ELM_Data(
                 self.model.fft_features.reset_histogram()
                 for i in packaged_valid_t0_indices[::stat_interval]:
                     signal_window = packaged_signals[i: i + self.signal_window_size, :, :]
-                    _ = self.model.fft_features.forward(torch.from_numpy(signal_window).unsqueeze(0).unsqueeze(0))
+                    signal_window = torch.from_numpy(signal_window[np.newaxis, np.newaxis, ...]).to(self.device)
+                    _ = self.model.fft_features.forward(signal_window)
                 bin_edges = self.model.fft_features.bin_edges
                 cummulative_hist = self.model.fft_features.cummulative_hist
                 bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
                 mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
                 stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
                 self.logger.info(f"  Standardized log10(|FFT|^2)  mean {mean:.4f}  stdev {stdev:.4f}")
-            self.model.fft_features.calc_histogram = False
+            self.model.fft_features.fft_calc_histogram = False
 
         # balance or normalize labels
         if self.is_classification:

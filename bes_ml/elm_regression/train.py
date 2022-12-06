@@ -1,7 +1,6 @@
 import dataclasses
 import numpy as np
 import torch
-# import torch.distributed
 
 try:
     from ..base.train_base import Trainer_Base
@@ -52,7 +51,6 @@ class Trainer(
             if first_signal_window_start_index < 0:
                 first_signal_window_start_index = 0
             valid_t0[0:first_signal_window_start_index + 1 - 1] = 0
-            # valid_t0 = valid_t0[first_signal_window_start_index:]
             assert valid_t0[first_signal_window_start_index] == 1
             assert valid_t0[first_signal_window_start_index - 1] == 0
             n_valid_t0 = np.min([last_signal_window_start_index+1, self.pre_elm_size])
@@ -98,17 +96,13 @@ class Trainer(
 
 if __name__=='__main__':
     Trainer(
+        signal_window_size=128,
+        batch_size=16,
+        n_epochs=4,
         dense_num_kernels=8,
         fft_num_kernels=8,
-        signal_window_size=128,
         fft_subwindows=2,
         fft_nbins=2,
-        # fft_histogram=True,
-        # max_elms=5,
-        batch_size=16,
-        n_epochs=2,
-        # fraction_test=0,
-        # pre_elm_size=2000,
         minibatch_print_interval=50,
         do_train=True,
     )

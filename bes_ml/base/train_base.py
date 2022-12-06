@@ -470,21 +470,29 @@ class Trainer_Base(Trainer_Base_Dataclass):
                 assert np.isfinite(score)
                 report_successful = False
                 report_attempts = 1
-                while report_successful is False:
+                while report_successful is False and report_attempts<=10:
                     try:
                         self.optuna_trial.report(score, i_epoch)
                         report_successful = True
                     except:
                         report_attempts += 1
                         time.sleep(2)
-                        if report_attempts >= 10:
-                            self.logger.info("==> Failed Optuna report, exiting training loop")
-                            break
+                    else:
+                        report_successful = True
+                # break loop if report fails
+                if report_successful is False:
+                    self.logger.info("==> Failed Optuna report, exiting training loop")
+                    break
+                # break loop if pruning
+                if self.optuna_trial.should_prune():
+                    do_optuna_prune = True
+                    self.logger.info("==> Pruning trial with Optuna")
+                    break  # exit epoch training loop
 
             self._ddp_barrier()
 
             # break loop if score stops improving
-            if (i_epoch > 20) and (i_epoch > best_epoch + self.low_score_patience) and (score < 0.95 * best_score):
+            if (i_epoch > 30) and (i_epoch > best_epoch + self.low_score_patience) and (score < 0.95 * best_score):
                 self.logger.info("==> Score is < 95% best score; breaking")
                 break
 
@@ -492,15 +500,13 @@ class Trainer_Base(Trainer_Base_Dataclass):
         self.logger.info(f"End training loop")
         self.logger.info(f"Training time {training_time/60:.1f} min")
 
-        if hasattr(self.model, 'fft_features') and self.model.fft_features.calc_histogram:
+        if hasattr(self.model, 'fft_features') and self.model.fft_features.fft_calc_histogram:
             fft_features = self.model.fft_features
             self.logger.info(f"  FFT min/max:{fft_features.fft_min:.4f}, {fft_features.fft_max:.4f}")
             bin_center = fft_features.bin_edges[:-1] + (fft_features.bin_edges[1] - fft_features.bin_edges[0]) / 2
             mean = np.sum(fft_features.cummulative_hist * bin_center) / np.sum(fft_features.cummulative_hist)
             stdev = np.sqrt(np.sum(fft_features.cummulative_hist * (bin_center - mean) ** 2) / np.sum(fft_features.cummulative_hist))
             self.logger.info(f"  FFT mean {mean:.4f}  stdev {stdev:.4f}")
-            # for i in range(fft_features.hist_bins):
-            #     self.logger.info(f"  edge {bin_center[i]:.3}:  {fft_features.cummulative_hist[i]}")
 
         for handler in self.logger.handlers[:]:
             handler.close()
