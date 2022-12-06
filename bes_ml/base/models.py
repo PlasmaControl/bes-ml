@@ -83,18 +83,18 @@ class _Base_Features(nn.Module, _Base_Features_Dataclass):
         self.features = None  # set in subclass
         self.conv = None  # set in subclass
 
-        self._input_size_after_timeslice_pooling = (
+        self._input_size_after_timeslice_pooling = [
             self.time_points,
             8 // self.spatial_pool_size,
             8 // self.spatial_pool_size,
-        )
+        ]
 
     def _time_interval_and_pooling(self, x: torch.Tensor) -> torch.Tensor:
         if self.time_slice_interval > 1:
             x = x[:, :, ::self.time_slice_interval, :, :]
         if self.pooling_layer:
             x = self.pooling_layer(x)
-        return x
+        return x   # shape [ <batch>, 1, <time>, <space>, <space> ]
 
     def _flatten_activation_dropout(self, x: torch.Tensor) -> torch.Tensor:
         return torch.flatten(self.activation(self.dropout(x)), 1)
@@ -167,7 +167,7 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
         ), 'Kernel time dims must be odd'
 
         self.logger.info("CNN transformation")
-        data_shape = tuple([1]+list(self._input_size_after_timeslice_pooling))
+        data_shape = [1] + self._input_size_after_timeslice_pooling
         self.logger.info(f"  Input after pre-pooling, pre-slicing: {data_shape}")
 
         def test_bad_shape(shape):
@@ -271,14 +271,15 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
 @dataclasses.dataclass(eq=False)
 class _FFT_Features_Dataclass(_Base_Features_Dataclass):
     fft_num_kernels: int = 0
-    fft_nbins: int = 4
-    fft_histogram: bool = False
-    fft_mean: float = None
-    fft_stdev: float = None
+    fft_nbins: int = 2
+    fft_subwindows: int = 1
     fft_kernel_time_size: int = 5
     fft_kernel_spatial_size: int = 3
     fft_maxpool_freq_size: int = 2
     fft_maxpool_spatial_size: int = 2
+    fft_mean: float = dataclasses.field(default=None, init=False)
+    fft_stdev: float = dataclasses.field(default=None, init=False)
+    calc_histogram: bool = dataclasses.field(default=False, init=False)
 
 
 @dataclasses.dataclass(eq=False)
@@ -298,41 +299,53 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
         ), 'FFT kernel dims must be odd'
 
         assert np.log2(self.fft_nbins).is_integer(), 'FFT nbins must be power of 2'
+        assert np.log2(self.fft_subwindows).is_integer(), "FFT subwindows must be power of 2"
 
-        self.nfft = self.signal_window_size // self.fft_nbins
+        self.subwindow_size = self.signal_window_size // self.fft_subwindows
+
+        self.nfft = self.subwindow_size // self.fft_nbins
         self.nfreqs = self.nfft // 2 + 1
-        self.min = np.inf
-        self.max = -np.inf
+
+        # FFT stats
         self.hist_bins = 230
-        self.cummulative_hist = np.zeros(self.hist_bins, dtype=int)
+        self.reset_histogram()
+        self.calc_histogram = False
 
         self.logger.info("FFT transformation")
 
-        data_shape = tuple([1]+list(self._input_size_after_timeslice_pooling))
+        # data_shape = tuple([1]+list(self._input_size_after_timeslice_pooling))
+        self.logger.info(f"  Subwindows {self.fft_subwindows} subwindow size {self.subwindow_size} bins {self.fft_nbins} nfft {self.nfft}")
+
+        data_shape = [1,1,1] + self._input_size_after_timeslice_pooling
         self.logger.info(f"  Input after pre-pooling, pre-slicing: {data_shape}")
 
         data_shape = [
-            self.fft_num_kernels,
+            data_shape[0],
+            data_shape[1],
+            self.fft_subwindows,
             self.nfreqs-1,
-            data_shape[2],
-            data_shape[3],
+            data_shape[4],
+            data_shape[5],
         ]
-        self.logger.info(f"  After FFT: {data_shape}")
+        self.logger.info(f"  After bin-averaged FFT: {data_shape}")
 
         self.conv = nn.Conv3d(
-            in_channels=1,
+            in_channels=self.fft_subwindows,
             out_channels=self.fft_num_kernels,
             kernel_size=(
                 self.fft_kernel_time_size,
                 self.fft_kernel_spatial_size,
                 self.fft_kernel_spatial_size,
             ),
+            groups=self.fft_subwindows,
         )
         data_shape = [
             data_shape[0],
-            data_shape[1] - (self.fft_kernel_time_size-1),
-            data_shape[2]-(self.fft_kernel_spatial_size-1),
-            data_shape[3]-(self.fft_kernel_spatial_size-1),
+            self.fft_num_kernels,
+            data_shape[2],
+            data_shape[3] - (self.fft_kernel_time_size-1),
+            data_shape[4] - (self.fft_kernel_spatial_size-1),
+            data_shape[5] - (self.fft_kernel_spatial_size-1),
         ]
         self.logger.info(f"  After conv: {data_shape}")
 
@@ -346,48 +359,70 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
         )
         data_shape = [
             data_shape[0],
-            data_shape[1] // self.fft_maxpool_freq_size,
-            data_shape[2] // self.fft_maxpool_spatial_size,
-            data_shape[3] // self.fft_maxpool_spatial_size,
+            data_shape[1],
+            data_shape[2],
+            data_shape[3] // self.fft_maxpool_freq_size,
+            data_shape[4] // self.fft_maxpool_spatial_size,
+            data_shape[5] // self.fft_maxpool_spatial_size,
         ]
         self.logger.info(f"  After maxpool: {data_shape}")
 
         self.features = np.prod(data_shape, dtype=int)
+        self.logger.info(f"  Total FFT features {self.features}")
+
+    def reset_histogram(self):
+        self.cummulative_hist = np.zeros(self.hist_bins, dtype=int)
 
     def forward(self, x):
-        x = self._time_interval_and_pooling(x)
-        fft_bins_size = [
-            x.shape[0],
-            self.fft_nbins,
-            self.nfreqs-1,
-            x.shape[3],
-            x.shape[4],
-        ]
-        fft_bins = torch.empty(size=fft_bins_size, dtype=x.dtype, device=x.device)
-        for i_bin in torch.arange(self.fft_nbins):
-            rfft = torch.fft.rfft(
-                x[:, :, i_bin * self.nfft:(i_bin+1) * self.nfft, :, :], 
-                dim=2,
-            )
-            fft_bins[:, i_bin: i_bin + 1, :, :, :] = torch.abs(rfft[:, :, 1:, :, :]) ** 2
-        fft_sw = torch.mean(fft_bins, dim=1, keepdim=True)
-        fft_sw[fft_sw<1e-5] = 1e-5
-        fft_sw = torch.log10(fft_sw)
-        if self.fft_mean and self.fft_stdev:
-            fft_sw = (fft_sw - self.fft_mean) / self.fft_stdev
-            fft_sw[fft_sw<-6] = -6
-            fft_sw[fft_sw>6] = 6
-        if self.fft_histogram:
-            self.min = np.min([fft_sw.min().item(), self.min])
-            self.max = np.max([fft_sw.max().item(), self.min])
+        x = self._time_interval_and_pooling(x)  # shape [ <batch>, 1, <time>, <space>, <space> ]
+        # holder for FFT bins
+        fft_bins = torch.empty(
+            size=(
+                x.shape[0],
+                self.fft_nbins,
+                self.nfreqs-1,
+                x.shape[3],
+                x.shape[4],
+            ),
+            dtype=x.dtype,
+            device=x.device,
+        )
+        # holder for bin-averaged subwindow FFTs
+        fft_subwindows = torch.empty(
+            size=(
+                x.shape[0],
+                self.fft_subwindows,
+                self.nfreqs-1,
+                x.shape[3],
+                x.shape[4],
+            ),
+            dtype=x.dtype,
+            device=x.device,
+        )
+        for i_subwindow, subwindow in enumerate(x.split(self.subwindow_size, dim=2)):
+            for i_bin in range(self.fft_nbins):
+                fft_bins[:,i_bin:i_bin+1,:,:,:] = torch.abs(
+                    torch.fft.rfft(
+                        subwindow[:, :, i_bin * self.nfft:(i_bin+1) * self.nfft, :, :], 
+                        dim=2,
+                    )[:,:,1:,:,:]  # remove DC (freq=0) to keep dim size = power of 2
+                ) ** 2
+            fft_subwindows[:,i_subwindow:i_subwindow+1,:,:,:] = torch.mean(fft_bins, dim=1, keepdim=True)
+        fft_subwindows[fft_subwindows<1e-5] = 1e-5
+        fft_subwindows = torch.log10(fft_subwindows)
+        if self.fft_mean or self.fft_stdev:
+            fft_subwindows = (fft_subwindows - self.fft_mean) / self.fft_stdev
+            fft_subwindows[fft_subwindows<-6] = -6
+            fft_subwindows[fft_subwindows>6] = 6
+        if self.calc_histogram:
             hist, bin_edges = np.histogram(
-                fft_sw.cpu(),
+                fft_subwindows.cpu(),
                 bins=self.hist_bins,
                 range=[-7,7],
             )
             self.cummulative_hist += hist
             self.bin_edges = bin_edges
-        fft_sw_features = self.conv(fft_sw)
+        fft_sw_features = self.conv(fft_subwindows)
         output_features = self.activation(self.dropout(fft_sw_features))
         output_features = self.fft_maxpool(output_features)
         if self.debug:
@@ -656,6 +691,19 @@ class Multi_Features_Model(
         else:
             self.activation = self.activation_function()
         self.dropout = nn.Dropout(p=self.dropout_rate)
+
+        # initialize
+        @torch.no_grad()
+        def initialize_weights(submodule: torch.nn.Module):
+            if hasattr(submodule, 'weight'):
+                torch.nn.init.kaiming_normal_(
+                    submodule.weight,
+                    a=self.leakyrelu_negative_slope,
+                    nonlinearity='leaky_relu',
+                )
+
+        # iteratively apply weight initialization
+        self.apply(initialize_weights)
 
         self.trainable_parameters = {}
 
