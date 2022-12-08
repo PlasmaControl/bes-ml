@@ -271,7 +271,7 @@ class _FFT_Features_Dataclass(_Base_Features_Dataclass):
     fft_num_kernels: int = 0
     fft_nbins: int = 2
     fft_subwindows: int = 1
-    fft_kernel_time_size: int = 5
+    fft_kernel_freq_size: int = 5
     fft_kernel_spatial_size: int = 3
     fft_maxpool_freq_size: int = 2
     fft_maxpool_spatial_size: int = 2
@@ -292,9 +292,9 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
         ), 'FFT maxpool dims must be power of 2'
 
         assert(
-            self.fft_kernel_time_size%2 == 1 and
-            self.fft_kernel_spatial_size%2 == 1
-        ), 'FFT kernel dims must be odd'
+            self.fft_kernel_freq_size%2 == 1
+            # and self.fft_kernel_spatial_size%2 == 1
+        ), 'FFT kernel freq dim must be odd'
 
         assert np.log2(self.fft_nbins).is_integer(), 'FFT nbins must be power of 2'
         assert np.log2(self.fft_subwindows).is_integer(), "FFT subwindows must be power of 2"
@@ -331,7 +331,7 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
             in_channels=self.fft_subwindows,
             out_channels=self.fft_num_kernels,
             kernel_size=(
-                self.fft_kernel_time_size,
+                self.fft_kernel_freq_size,
                 self.fft_kernel_spatial_size,
                 self.fft_kernel_spatial_size,
             ),
@@ -341,7 +341,7 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
             data_shape[0],
             self.fft_num_kernels,
             data_shape[2],
-            data_shape[3] - (self.fft_kernel_time_size-1),
+            data_shape[3] - (self.fft_kernel_freq_size-1),
             data_shape[4] - (self.fft_kernel_spatial_size-1),
             data_shape[5] - (self.fft_kernel_spatial_size-1),
         ]

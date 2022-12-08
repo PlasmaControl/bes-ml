@@ -7,8 +7,8 @@ import yaml
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
+import torch.cuda
 import torch.utils.data
-import h5py
 
 try:
     from .models import Multi_Features_Model  #, _Multi_Features_Model_Dataclass
@@ -57,10 +57,16 @@ class Analyzer_Base(
         for i_field, field_name in enumerate([field.name for field in fields]):
             if field_name == 'logger':
                 fields.pop(i_field)
-        model_kwargs = {field.name: self.inputs[field.name] for field in fields}
+        model_kwargs = {field.name: self.inputs[field.name] for field in fields if field.init}
         self.model = Multi_Features_Model(**model_kwargs)
         self.model = self.model.to(self.device)
-        self._load_model_parameters()
+        checkpoint_file = self.output_dir / self.inputs['checkpoint_file']
+        assert checkpoint_file.exists(), f"{checkpoint_file} does not exist"
+        model_state_dict = torch.load(
+            checkpoint_file,
+            map_location=self.device,
+        )
+        self.model.load_state_dict(model_state_dict)
         self.model.eval()
 
         self.test_data = None
@@ -80,37 +86,15 @@ class Analyzer_Base(
         self.is_classification = None
 
     def _load_test_data(self) -> None:
-        # restore test data
-        # data_partition_file = self.output_dir / 'data_partition.yaml'
-        # with data_partition_file.open('r') as file:
-        #     data_partition = yaml.safe_load(file)
-        # test_elms = data_partition['test_elms']
-        # with h5py.File(self.inputs['data_location'], 'r') as h5_file:
-        #     for elm_index in test_elms:
-        #         elm_key = f"{elm_index:05d}"
-        #         elm_event = h5_file[elm_key]
-        #         signals = np.array(elm_event["signals"], dtype=np.float32)  # (64, <time>)
-        #         signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (<time>, 8, 8)
-        #         labels = np.array(elm_event["labels"])
-        #         # labels, signals, valid_t0 = self._get_valid_indices(labels, signals)
-        #         # assert labels.size == valid_t0.size
-        # return
         test_data_file = self.output_dir / self.inputs['test_data_file']
         assert test_data_file.exists(), f"{test_data_file} does not exist."
         with test_data_file.open('rb') as file:
             self.test_data = pickle.load(file)
-        return
 
-    def _load_model_parameters(self) -> None:
-        checkpoint_file = self.output_dir / self.inputs['checkpoint_file']
-        assert checkpoint_file.exists(), f"{checkpoint_file} does not exist"
-        model_state_dict = torch.load(
-            checkpoint_file,
-            map_location=self.device,
-        )
-        self.model.load_state_dict(model_state_dict)
-
-    def run_inference(self) -> None:
+    def run_inference(
+        self,
+        max_elms: int = None,
+    ) -> None:
         if self.test_data is None:
             print("Skipping inference, no test data")
             return
@@ -122,6 +106,8 @@ class Analyzer_Base(
             # loop over ELMs in test data
             print('Running inference on test data')
             for i_elm in range(n_elms):
+                if max_elms and i_elm>= max_elms:
+                    break
                 print(f'  ELM {i_elm+1} of {n_elms}')
                 i_start = self.test_data['window_start'][i_elm]
                 i_stop = (
@@ -131,12 +117,15 @@ class Analyzer_Base(
                 )
                 elm_labels = self.test_data['labels'][i_start:i_stop+1]
                 elm_signals = self.test_data['signals'][i_start:i_stop+1, ...]
-                elm_sample_indices = self.test_data['sample_indices'][
-                    np.logical_and(
-                        self.test_data['sample_indices'] >= i_start,
-                        self.test_data['sample_indices'] <= i_stop,
-                    )
-                ] - i_start
+                # elm_sample_indices = self.test_data['sample_indices'][
+                #     np.logical_and(
+                #         self.test_data['sample_indices'] >= i_start,
+                #         self.test_data['sample_indices'] <= i_stop,
+                #     )
+                # ] - i_start
+                # elm_sample_indices = self.test_data['sample_indices'][i_start:i_stop+1] - self.test_data['sample_indices'][i_start]
+                elm_sample_indices = np.arange(elm_labels.size - self.inputs['signal_window_size'], dtype=int)
+                # print(elm_labels.size, elm_sample_indices.size+self.inputs['signal_window_size'])
                 elm_test_dataset = ELM_Dataset(
                     signals=elm_signals,
                     labels=elm_labels,
@@ -148,15 +137,17 @@ class Analyzer_Base(
                     dataset=elm_test_dataset,
                     batch_size=128,
                     shuffle=False,
-                    num_workers=self.inputs['num_workers'],
+                    num_workers=2 if torch.cuda.is_available() else 0,
                     pin_memory=False,
                     drop_last=False,
                 )
                 # loop over batches for single ELM
                 elm_predictions = np.empty(0, dtype=np.float32)
+                count_predictions = 0
                 for batch_signals, _ in elm_test_data_loader:
                     batch_signals = batch_signals.to(self.device)
                     batch_predictions = self.model(batch_signals)
+                    count_predictions += batch_predictions.numel()
                     if self.is_classification:
                         # if evaluation/inference mode and classificaiton model,
                         # apply sigmoid to transform [-inf,inf] logit -> [0,1] probability
@@ -165,6 +156,10 @@ class Analyzer_Base(
                 self.all_labels.append(elm_labels)
                 self.all_predictions.append(elm_predictions)
                 self.all_signals.append(elm_signals[:,2,3])
+                # finite_labels = np.count_nonzero(np.isfinite(elm_labels))
+                # pred_sws = elm_predictions.size + self.inputs['signal_window_size']
+                # print(f"  ELM {i_elm+1}: finite labels {finite_labels} predictions+sws {pred_sws}")
+                # print(f"    Count pred {count_predictions} len(dataset) {len(elm_test_dataset)} len(sample_indices) {len(elm_sample_indices)}")
         print('Inference complete')
 
     def _load_training_results(self) -> None:
@@ -244,40 +239,45 @@ class Analyzer_Base(
             print("Skipping inference, no test data")
             return
         if None in [self.all_labels, self.all_predictions, self.all_signals]:
-            self.run_inference()
-        n_elms = self.test_data['elm_indices'].size
-        assert len(self.all_labels) == n_elms and \
-            len(self.all_predictions) == n_elms and \
-            len(self.all_signals) == n_elms
+            self.run_inference(max_elms=max_elms)
         prediction_offset = self.inputs['signal_window_size'] - 1
         if self.is_classification:
             prediction_offset += self.inputs['prediction_horizon']
         i_page = 1
+        n_elms = len(self.all_labels)
+        _, axes = plt.subplots(ncols=3, nrows=2, figsize=(12, 6))
+        plt.suptitle(f"{self.output_dir.resolve()}")
+        axes_twinx = [axis.twinx() for axis in axes.flat]
         for i_elm in range(n_elms):
-            if max_elms and i_elm >= max_elms:
-                break
             elm_index = self.test_data['elm_indices'][i_elm]
             labels = self.all_labels[i_elm]
             predictions = self.all_predictions[i_elm]
             signals = self.all_signals[i_elm]
             elm_time = np.arange(labels.size)
+            # finite_labels = np.count_nonzero(np.isfinite(labels))
+            # pred_sws = predictions.size + prediction_offset
+            # print(f"  ELM {i_elm+1}: finite labels {finite_labels} predictions+sws {pred_sws}")
             if i_elm % 6 == 0:
-                _, axes = plt.subplots(ncols=3, nrows=2, figsize=(12, 6))
-            plt.suptitle(f"{self.output_dir.resolve()}")
+                for i_axis in range(axes.size):
+                    axes.flat[i_axis].clear()
+                    axes_twinx[i_axis].clear()
             plt.sca(axes.flat[i_elm % 6])
-            # if self.is_classification:
-            #     signals = signals / np.max(signals)
-            plt.plot(elm_time, signals, label="BES")
-            plt.plot(elm_time, labels, label="Label")
+            plt.plot(elm_time, labels, label="Label", color='C0')
             plt.plot(
                 elm_time[prediction_offset:prediction_offset+predictions.size],
                 predictions,
                 label="Prediction",
+                color='C1',
             )
             plt.xlabel("Time (micro-s)")
-            plt.ylabel("Signal | label")
-            plt.legend(fontsize='small')
+            plt.ylabel("Label | Prediction")
+            plt.ylim(-1.1,1.1)
+            plt.legend(fontsize='small', loc='upper left')
             plt.title(f'Test ELM index {elm_index}')
+            twinx = axes_twinx[i_elm%6]
+            twinx.plot(elm_time, signals, label="BES", color='C2')
+            twinx.set_ylabel('Scaled signal')
+            twinx.legend(fontsize='small', loc='upper right')
             if i_elm % 6 == 5 or i_elm == n_elms-1:
                 plt.tight_layout()
                 if save:
@@ -288,11 +288,12 @@ class Analyzer_Base(
                     i_page += 1
         if save:
             inputs = sorted(self.output_dir.glob('inference_*.pdf'))
-            output = self.output_dir/'inference.pdf'
+            output = self.output_dir/'test_inference.pdf'
             merge_pdfs(
                 inputs=inputs,
                 output=output,
                 delete_inputs=True,
+                verbose=True,
             )
 
     @staticmethod

@@ -143,7 +143,7 @@ class ELM_Data(
             self.logger.info(f"Validation data ELM events: {validation_elms.size}")
             self.validation_data = self._preprocess_data(
                 elm_indices=validation_elms,
-                # save_filename='validation_elms',
+                save_filename='validation_elms',
             )
         else:
             self.logger.info("Skipping validation data")
@@ -154,7 +154,7 @@ class ELM_Data(
             self.logger.info(f"Test data ELM events: {test_elms.size}")
             self.test_data = self._preprocess_data(
                 elm_indices=test_elms,
-                # save_filename='test_elms',
+                save_filename='test_elms',
             )
             test_data_file = self.output_dir / self.test_data_file
             self.logger.info(f"Test data file: {test_data_file}")
@@ -187,6 +187,7 @@ class ELM_Data(
             _, axes = plt.subplots(nrows=3, ncols=4, figsize=(16, 9))
             self.logger.info(f"  Plotting valid indices: {save_filename}_**.pdf")
             i_page = 1
+            axes_twinx = [axis.twinx() for axis in axes.flat]
         with h5py.File(self.data_location, 'r') as h5_file:
             elm_data = []
             for i_elm, elm_index in enumerate(elm_indices):
@@ -196,26 +197,26 @@ class ELM_Data(
                 elm_event = h5_file[elm_key]
                 signals = np.array(elm_event["signals"], dtype=np.float32)  # (64, <time>)
                 signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (<time>, 8, 8)
-                try:
-                    labels = np.array(elm_event["labels"], dtype=self.label_type)
-                except KeyError:
-                    labels = np.array(elm_event["manual_labels"], dtype=self.label_type)
+                labels = np.array(elm_event["labels"], dtype=self.label_type)
                 labels, signals, valid_t0 = self._get_valid_indices(labels, signals)
-                assert labels.size == valid_t0.size
-                elm_data.append(
-                    {'signals': signals, 'labels': labels, 'valid_t0': valid_t0}
-                )
                 if save_filename and self.is_main_process:
                     if i_elm % 12 == 0:
-                        for axis in axes.flat:
-                            plt.sca(axis)
-                            plt.cla()
+                        for i_axis in range(axes.size):
+                            axes.flat[i_axis].clear()
+                            axes_twinx[i_axis].clear()
+                    twinx = axes_twinx[i_elm%12]
+                    twinx.plot(signals[:,2,3]/10, label='BES 20', color='C1', zorder=0)
+                    twinx.plot(signals[:,2,5]/10, label='BES 22', color='C2', zorder=0)
+                    twinx.set_ylabel('Raw signal/10')
+                    twinx.legend(fontsize='x-small', loc='upper right')
                     plt.sca(axes.flat[i_elm%12])
-                    plt.plot(signals[:,2,3]/10, label='BES 20')
-                    plt.plot(signals[:,2,5]/10, label='BES 22')
-                    plt.plot(labels, label='Label')
+                    plt.plot(labels, label='Label', color='C0')
+                    if self.is_classification:
+                        plt.ylabel('Label')
+                    else:
+                        plt.ylabel('Time to ELM onset (mu-s)')
+                    plt.legend(fontsize='x-small', loc='upper left')
                     plt.title(f"ELM index {elm_key}")
-                    plt.legend(fontsize='x-small')
                     plt.xlabel('Time (mu-s)')
                     if i_elm%12==11 or i_elm==elm_indices.size-1:
                         plt.tight_layout()
@@ -226,6 +227,9 @@ class ELM_Data(
                             transparent=True,
                         )
                         i_page += 1
+                elm_data.append(
+                    {'signals': signals, 'labels': labels, 'valid_t0': valid_t0}
+                )
 
         self.logger.info('  Finished reading ELM event data')
 
@@ -253,6 +257,9 @@ class ELM_Data(
         packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
         packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
 
+        assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices]))
+        assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices + self.signal_window_size]))
+
         # get signal stats
         stats = self._get_statistics(
             sample_indices=packaged_valid_t0_indices,
@@ -260,7 +267,6 @@ class ELM_Data(
         )
         self.logger.info(f"  Raw signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
         if is_train_data:
-            self.logger.info("  -> Setting raw signal mean/stdev using training data")
             self.results['raw_train_signal_mean'] = stats['mean']
             self.results['raw_train_signal_stdev'] = stats['stdev']
 
@@ -269,7 +275,7 @@ class ELM_Data(
             assert self.results['raw_train_signal_mean'] and self.results['raw_train_signal_stdev']
             mean = self.results['raw_train_signal_mean']
             stdev = self.results['raw_train_signal_stdev']
-            self.logger.info(f"  Standardizing signals with mean {mean:.4f} and stdev {stdev:.4f}")
+            self.logger.info(f"  -> Standardizing signals with mean {mean:.4f} and stdev {stdev:.4f} from training data")
             packaged_signals = (packaged_signals - mean) / stdev
             stats = self._get_statistics(
                 sample_indices=packaged_valid_t0_indices,
@@ -278,7 +284,7 @@ class ELM_Data(
             self.logger.info(f"  Standardized signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
             # clip at +/- sigma
             if self.clip_sigma:
-                self.logger.info(f"  Clipping signal windows beyond +/- {self.clip_sigma} sigma")
+                self.logger.info(f"  -> Clipping signal windows beyond +/- {self.clip_sigma} sigma")
                 mask = []
                 for i in packaged_valid_t0_indices:
                     signal_window = packaged_signals[i: i + self.signal_window_size, :, :]
@@ -340,10 +346,25 @@ class ELM_Data(
             )
         elif self.is_regression:
             # if specified, normalize time-to-ELM labels to min/max = -/+ 1
-            packaged_labels = self._apply_label_normalization(
-                packaged_labels,
-                packaged_valid_t0_indices,
-            )
+            # packaged_labels = self._apply_label_normalization(
+            #     packaged_labels,
+            #     packaged_valid_t0_indices,
+            # )
+            raw_label_min = packaged_labels[packaged_valid_t0_indices+self.signal_window_size].min()
+            raw_label_max = packaged_labels[packaged_valid_t0_indices+self.signal_window_size].max()
+            self.logger.info(f"  Raw label min/max: {raw_label_min:.4e}, {raw_label_max:.4e}")
+            if is_train_data:
+                self.results['raw_label_min'] = raw_label_min.item()
+                self.results['raw_label_max'] = raw_label_max.item()
+            if self.normalize_labels:
+                self.logger.info(f"  -> Normalizing labels to min/max = -/+ 1 based on training data")
+                label_range = self.results['raw_label_max'] - self.results['raw_label_min']
+                packaged_labels = ((packaged_labels - self.results['raw_label_min']) / label_range - 0.5) * 2
+                assert np.all(packaged_labels[packaged_valid_t0_indices+self.signal_window_size]>=-1)
+                assert np.min(packaged_labels[packaged_valid_t0_indices+self.signal_window_size]) == -1
+                if is_train_data:
+                    assert np.all(packaged_labels[packaged_valid_t0_indices+self.signal_window_size]<=1)
+                    assert np.max(packaged_labels[packaged_valid_t0_indices+self.signal_window_size]) == 1
 
         if shuffle_indices:
             self.rng_generator.shuffle(packaged_valid_t0_indices)
@@ -361,7 +382,7 @@ class ELM_Data(
         for array in return_tuple:
             assert isinstance(array, np.ndarray)
             self.logger.info(
-                f"    shape {array.shape}, dtype {array.dtype}, min {array.min():.3f}, max {array.max():.3f}"
+                f"    shape {array.shape}, dtype {array.dtype}, min {np.nanmin(array):.3f}, max {np.nanmax(array):.3f}"
             )
 
         return return_tuple
@@ -393,8 +414,8 @@ class ELM_Data(
             'stdev': stdev.item(),
         }
 
-    def _apply_label_normalization(self) -> torch.Tensor:
-        raise NotImplementedError
+    # def _apply_label_normalization(self) -> torch.Tensor:
+    #     raise NotImplementedError
 
     def _check_for_balanced_data(self) -> None:
         # if classification, must implement in subclass

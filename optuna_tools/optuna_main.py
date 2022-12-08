@@ -355,12 +355,13 @@ def objective(
                 scores = outputs['valid_score'] if 'valid_score' in outputs else outputs['train_score']
                 objective_value = np.max(scores)
                 if analyzer_class is not None:
-                    analysis = analyzer_class(
+                    analyzer = analyzer_class(
                         output_dir=input_kwargs['output_dir'],
                         device=input_kwargs['device'],
                         verbose=False,
                     )
-                    analysis.plot_training(save=True)
+                    analyzer.plot_training(save=True)
+                    analyzer.plot_inference(save=True, max_elms=90)
             sys.stdout = sys.__stdout__
             sys.stderr = sys.__stderr__
             if world_rank in [None, 0]:

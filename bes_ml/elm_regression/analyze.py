@@ -3,7 +3,7 @@ import dataclasses
 try:
     from ..base.analyze_base import Analyzer_Base
 except ImportError:
-    from bes_ml.base.analyze_base import _Analyzer_Base
+    from bes_ml.base.analyze_base import Analyzer_Base
 
 
 @dataclasses.dataclass
