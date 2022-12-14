@@ -177,6 +177,10 @@ class Analyzer_Base(
         self.valid_loss = self.results.get('valid_loss', None)
         self.valid_score = self.results.get('valid_score', None)
         self.valid_roc = self.results.get('valid_roc', None)
+        self.param_keys = {}
+        for key in self.results:
+            if 'weight' in key or 'bias' in key:
+                self.param_keys[key] = self.results[key]
 
     def plot_training(
         self,
@@ -225,6 +229,24 @@ class Analyzer_Base(
         plt.tight_layout()
         if save:
             filepath = self.output_dir / "training.pdf"
+            if self.verbose:
+                print(f'Saving training plot: {filepath}')
+            plt.savefig(filepath, format='pdf', transparent=True)
+        n_params = len(self.param_keys)
+        nrows = n_params // 4 + int(n_params%4!=0)
+        _, axes = plt.subplots(ncols=4, nrows=nrows, figsize=(11,2.5*nrows))
+        plt.suptitle(f"{self.output_dir}")
+        for i_plot, (p_name, p_values) in enumerate(self.param_keys.items()):
+            plt.sca(axes.flat[i_plot])
+            plt.cla()
+            plt.title(p_name)
+            for stat_name in ['mean','stdev','skew','kurt']:
+                plt.plot(p_values[stat_name], label=stat_name)
+            plt.legend(fontsize='small')
+            plt.xlabel('Epoch')
+        plt.tight_layout()
+        if save:
+            filepath = self.output_dir / "parameter_stats.pdf"
             if self.verbose:
                 print(f'Saving training plot: {filepath}')
             plt.savefig(filepath, format='pdf', transparent=True)
