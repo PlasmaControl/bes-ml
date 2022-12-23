@@ -492,8 +492,8 @@ class Trainer_Base(Trainer_Base_Dataclass):
             self._ddp_barrier()
 
             # break loop if score stops improving
-            if (i_epoch > 30) and (i_epoch > best_epoch + self.low_score_patience) and (score < 0.95 * best_score):
-                self.logger.info("==> Score is < 95% best score; breaking")
+            if (i_epoch > 30) and (i_epoch > best_epoch + self.low_score_patience) and (score < 0.97 * best_score):
+                self.logger.info("==> Score is < 97% best score; breaking")
                 break
 
 

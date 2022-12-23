@@ -109,20 +109,18 @@ def run_optuna(
     attempts = 0
     while success is False:
         try:
-            storage = optuna.storages.RDBStorage(
-                url=db_url,
-            )
+            storage = optuna.storages.RDBStorage(url=db_url, skip_table_creation=True, skip_compatibility_check=True)
             success = True
         except:
             attempts += 1
-            time.sleep(1)
-            if attempts >= 10:
-                assert False, "Failed DB connection"
+            time.sleep(2)
+            if attempts >= 20:
+                assert False, f"Failed DB connection with {attempts} attempts on world rank {world_rank}"
 
-    if world_rank in [None, 0]:
-        print(f'Existing studies in storage:')
-        for study in optuna.get_all_study_summaries(db_url):
-            print(f'  Study {study.study_name} with {study.n_trials} trials')
+    # if world_rank in [None, 0]:
+    #     print(f'Existing studies in storage:')
+    #     for study in optuna.get_all_study_summaries(db_url):
+    #         print(f'  Study {study.study_name} with {study.n_trials} trials')
 
     if world_rank in [None, 0]:
         print(f"Creating/loading study {study_name}")
@@ -281,12 +279,22 @@ def worker(
         )
 
     if local_rank is None or local_rank == 0:
-        study = optuna.load_study(
-            study_name=study_name,
-            storage=db_url,
-            sampler=sampler,
-            pruner=pruner,
-        )
+        attempts = 0
+        success = False
+        while success is False:
+            try:
+                study = optuna.load_study(
+                    study_name=study_name,
+                    storage=db_url,
+                    sampler=sampler,
+                    pruner=pruner,
+                )
+                success = True
+            except:
+                attempts += 1
+                time.sleep(2)
+                if attempts >= 15:
+                    assert False, f"Failed load_study() on world_rank {world_rank}"
         study.optimize(
             objective_wrapper,
             n_trials=n_trials_per_worker,  # trials for this study.optimize() call

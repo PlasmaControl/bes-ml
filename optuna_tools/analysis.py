@@ -214,44 +214,44 @@ def plot_trial(
         trial_result.plot_inference(max_elms=max_elms, save=save)
 
 
-def plot_top_trials(
-        study_dir: Union[Path, str] = None,  # study dir. or db file
-        study_name: str = None,
-        db_url: str = None,
-        n_trials = 1,
-        device = None,
-        max_elms = None,
-        use_train_loss = False,
-        analyzer: Callable = None,
-):
-    study_dir = Path(study_dir).resolve()
-    study = open_study(
-        study_dir=study_dir,
-        study_name=study_name,
-        db_url=db_url,
-    )
+# def plot_top_trials(
+#         study_dir: Union[Path, str] = None,  # study dir. or db file
+#         study_name: str = None,
+#         db_url: str = None,
+#         n_trials = 1,
+#         device = None,
+#         max_elms = None,
+#         use_train_loss = False,
+#         analyzer: Callable = None,
+# ):
+#     study_dir = Path(study_dir).resolve()
+#     study = open_study(
+#         study_dir=study_dir,
+#         study_name=study_name,
+#         db_url=db_url,
+#     )
 
-    trials = study.get_trials(
-        states=(optuna.trial.TrialState.COMPLETE,
-                optuna.trial.TrialState.PRUNED,),
-    )
-    print(f'Completed trials: {len(trials)}')
-    if use_train_loss:
-        attr_name = 'train_loss'
-    else:
-        attr_name = 'valid_score'
-    values = np.array([np.max(trial.user_attrs[attr_name]) for trial in trials])
+#     trials = study.get_trials(
+#         states=(optuna.trial.TrialState.COMPLETE,
+#                 optuna.trial.TrialState.PRUNED,),
+#     )
+#     print(f'Completed trials: {len(trials)}')
+#     if use_train_loss:
+#         attr_name = 'train_loss'
+#     else:
+#         attr_name = 'valid_score'
+#     values = np.array([np.max(trial.user_attrs[attr_name]) for trial in trials])
 
-    sorted_indices = np.flip(np.argsort(values))
-    for i in np.arange(n_trials):
-        i_trial = sorted_indices[i]
-        trial = trials[i_trial]
-        trial_dir = study_dir / f'trial_{trial.number:04d}'
-        run = analyzer(trial_dir, device=device)
-        run.plot_training_epochs()
-        # run.plot_valid_indices_analysis()
-        if max_elms:
-            run.plot_full_inference(max_elms=max_elms)
+#     sorted_indices = np.flip(np.argsort(values))
+#     for i in np.arange(n_trials):
+#         i_trial = sorted_indices[i]
+#         trial = trials[i_trial]
+#         trial_dir = study_dir / f'trial_{trial.number:04d}'
+#         run = analyzer(trial_dir, device=device)
+#         run.plot_training_epochs()
+#         # run.plot_valid_indices_analysis()
+#         if max_elms:
+#             run.plot_full_inference(max_elms=max_elms)
 
 
 def summarize_study(
