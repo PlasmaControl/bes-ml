@@ -98,13 +98,15 @@ class Trainer(
 
 if __name__=='__main__':
     Trainer(
+        # data_location= '/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
+        # max_elms=500,
         signal_window_size=128,
-        batch_size=16,
-        n_epochs=4,
+        batch_size=128,
+        n_epochs=1,
         dense_num_kernels=8,
         fft_num_kernels=8,
         fft_subwindows=2,
         fft_nbins=2,
-        minibatch_print_interval=50,
+        # minibatch_print_interval=50,
         do_train=True,
     )

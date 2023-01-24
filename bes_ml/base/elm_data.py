@@ -352,19 +352,30 @@ class ELM_Data(
             # )
             raw_label_min = packaged_labels[packaged_valid_t0_indices+self.signal_window_size].min()
             raw_label_max = packaged_labels[packaged_valid_t0_indices+self.signal_window_size].max()
+            raw_label_median = np.median(packaged_labels[packaged_valid_t0_indices+self.signal_window_size])
             self.logger.info(f"  Raw label min/max: {raw_label_min:.4e}, {raw_label_max:.4e}")
+            self.logger.info(f"  Raw label median: {raw_label_median:.4e}")
             if is_train_data:
                 self.results['raw_label_min'] = raw_label_min.item()
                 self.results['raw_label_max'] = raw_label_max.item()
+                self.results['raw_label_median'] = raw_label_median.item()
             if self.normalize_labels:
-                self.logger.info(f"  -> Normalizing labels to min/max = -/+ 1 based on training data")
-                label_range = self.results['raw_label_max'] - self.results['raw_label_min']
-                packaged_labels = ((packaged_labels - self.results['raw_label_min']) / label_range - 0.5) * 2
+                # self.logger.info(f"  -> Normalizing labels to min/max = -/+ 1 based on training data")
+                self.logger.info(f"  -> Normalizing labels to min=-1 and median=0 based on training data")
+                packaged_labels = packaged_labels - self.results['raw_label_median']
+                packaged_labels = packaged_labels / (self.results['raw_label_median'] - self.results['raw_label_min'])
+                raw_label_min = packaged_labels[packaged_valid_t0_indices+self.signal_window_size].min()
+                raw_label_max = packaged_labels[packaged_valid_t0_indices+self.signal_window_size].max()
+                raw_label_median = np.median(packaged_labels[packaged_valid_t0_indices+self.signal_window_size])
+                self.logger.info(f"  Norm. label min/max: {raw_label_min:.4e}, {raw_label_max:.4e}")
+                self.logger.info(f"  Norm. label median: {raw_label_median:.4e}")
+                # label_range = self.results['raw_label_max'] - self.results['raw_label_min']
+                # packaged_labels = ((packaged_labels - self.results['raw_label_min']) / label_range - 0.5) * 2
                 assert np.all(packaged_labels[packaged_valid_t0_indices+self.signal_window_size]>=-1)
                 assert np.min(packaged_labels[packaged_valid_t0_indices+self.signal_window_size]) == -1
-                if is_train_data:
-                    assert np.all(packaged_labels[packaged_valid_t0_indices+self.signal_window_size]<=1)
-                    assert np.max(packaged_labels[packaged_valid_t0_indices+self.signal_window_size]) == 1
+                # if is_train_data:
+                #     assert np.all(packaged_labels[packaged_valid_t0_indices+self.signal_window_size]<=1)
+                #     assert np.max(packaged_labels[packaged_valid_t0_indices+self.signal_window_size]) == 1
 
         if shuffle_indices:
             self.rng_generator.shuffle(packaged_valid_t0_indices)
@@ -392,7 +403,7 @@ class ELM_Data(
         signal_max = np.array(-np.inf)
         n_bins = 200
         cummulative_hist = np.zeros(n_bins, dtype=int)
-        stat_interval = sample_indices.size // 1000 if sample_indices.size > 1000 else 1
+        stat_interval = sample_indices.size // 1000 if sample_indices.size > 10000 else 1
         for i in sample_indices[::stat_interval]:
             signal_window = signals[i: i + self.signal_window_size, :, :]
             signal_min = np.min([signal_min, signal_window.min()])

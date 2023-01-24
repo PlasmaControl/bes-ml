@@ -57,7 +57,8 @@ class Trainer_Base_Dataclass:
     lr_scheduler_patience: int = 20  # epochs to wait before triggering lr scheduler
     lr_scheduler_factor: float = 0.5  # reduction factor for lr scheduler
     lr_scheduler_threshold: float = 1e-3  # threshold for *relative* decrease in loss to *not* trigger LR scheduler
-    low_score_patience: int = 20  # epochs to wait before aborting due to low score
+    low_score_patience: int = 30  # epochs to wait before aborting due to low score
+    low_score_threshold: float = 0.95  # abort if score drops below threshold for number of patience epochs
     weight_decay: float = 1e-3  # optimizer L2 regularization factor
     minibatch_print_interval: int = 5000
     do_train: bool = False  # if True, start training at end of init
@@ -492,8 +493,10 @@ class Trainer_Base(Trainer_Base_Dataclass):
             self._ddp_barrier()
 
             # break loop if score stops improving
-            if (i_epoch > 30) and (i_epoch > best_epoch + self.low_score_patience) and (score < 0.97 * best_score):
-                self.logger.info("==> Score is < 97% best score; breaking")
+            if (i_epoch > 50) and \
+                (i_epoch > best_epoch + self.low_score_patience) and \
+                (score < self.low_score_threshold * best_score):
+                self.logger.info(f"==> Score is < {self.low_score_threshold} best score; breaking")
                 break
 
 

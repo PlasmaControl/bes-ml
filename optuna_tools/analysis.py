@@ -108,7 +108,9 @@ def plot_study(
     trials = []
     for trial in completed_trials:
         trial_dir = study_dir / f"trial_{trial.number:04d}"
-        assert trial_dir.exists()
+        # assert trial_dir.exists(), f"Did not find trial dir {trial_dir}"
+        if not trial_dir.exists():
+            continue
         results_file = trial_dir / 'results.yaml'
         assert results_file.exists()
         with results_file.open() as results_file:
@@ -189,7 +191,7 @@ def plot_study(
                 study_dir=study_dir,
                 trial_number=trial['number'],
                 max_elms=max_elms,
-                save=True,
+                save=save,
             )
 
 
