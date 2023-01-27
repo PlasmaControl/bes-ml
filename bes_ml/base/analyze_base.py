@@ -293,7 +293,7 @@ class Analyzer_Base(
             )
             plt.xlabel("Time (micro-s)")
             plt.ylabel("Label | Prediction")
-            plt.ylim(-1.1, None)
+            plt.ylim(-1.1, np.max([0, 1.1*np.nanmax(labels)]))
             plt.legend(fontsize='small', loc='upper left')
             plt.title(f'Test ELM index {elm_index}')
             twinx = axes_twinx[i_elm%6]

@@ -368,7 +368,7 @@ def objective(
                         verbose=False,
                     )
                     analyzer.plot_training(save=True)
-                    analyzer.plot_inference(save=True, max_elms=90)
+                    analyzer.plot_inference(save=True, max_elms=30)
             sys.stdout = sys.__stdout__
             sys.stderr = sys.__stderr__
             if world_rank in [None, 0]:
