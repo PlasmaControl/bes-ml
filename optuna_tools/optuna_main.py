@@ -104,54 +104,51 @@ def run_optuna(
 
     study_dir.mkdir(exist_ok=True)
 
-    # connect to optuna database
-    success = False
-    attempts = 0
-    while success is False:
-        try:
-            storage = optuna.storages.RDBStorage(
-                url=db_url,
-            )
-            success = True
-        except:
-            attempts += 1
-            time.sleep(1)
-            if attempts >= 10:
-                assert False, "Failed DB connection"
-
     if world_rank in [None, 0]:
-        print(f'Existing studies in storage:')
-        for study in optuna.get_all_study_summaries(db_url):
-            print(f'  Study {study.study_name} with {study.n_trials} trials')
+        # connect to optuna database
+        success = False
+        attempts = 0
+        while success is False:
+            try:
+                storage = optuna.storages.RDBStorage(url=db_url, skip_table_creation=True, skip_compatibility_check=True)
+                success = True
+            except:
+                attempts += 1
+                time.sleep(3)
+                if attempts >= 40:
+                    assert False, f"Failed DB connection with {attempts} attempts on world rank {world_rank}"
 
-    if world_rank in [None, 0]:
+        # print(f'Existing studies in storage:')
+        # for study in optuna.get_all_study_summaries(db_url):
+        #     print(f'  Study {study.study_name} with {study.n_trials} trials')
+
         print(f"Creating/loading study {study_name}")
-    study = optuna.create_study(
-        study_name=study_name,
-        storage=storage,
-        load_if_exists=True,
-        direction='maximize',
-    )
+        optuna.create_study(
+            study_name=study_name,
+            storage=storage,
+            load_if_exists=True,
+            direction='maximize',
+        )
 
     if None not in [world_size, world_rank, local_rank]:
-        assert world_size == torch.cuda.device_count()
         assert world_rank < world_size
         assert local_rank <= world_rank
+        torch.distributed.barrier()
 
-    if fail_stale_trials:
-        # FAIL any zombie trials that are stuck in `RUNNING` state
-        stale_trials = storage.get_all_trials(
-            study._study_id,
-            deepcopy=False,
-            states=(optuna.trial.TrialState.RUNNING,),
-        )
-        for stale_trial in stale_trials:
-            print(f'Setting trial {stale_trial.number} with state {stale_trial.state} to FAIL')
-            status = storage.set_trial_state_values(
-                stale_trial._trial_id,
-                optuna.trial.TrialState.FAIL,
-            )
-            print(f'Success?: {status}')
+    # if fail_stale_trials:
+    #     # FAIL any zombie trials that are stuck in `RUNNING` state
+    #     stale_trials = storage.get_all_trials(
+    #         study._study_id,
+    #         deepcopy=False,
+    #         states=(optuna.trial.TrialState.RUNNING,),
+    #     )
+    #     for stale_trial in stale_trials:
+    #         print(f'Setting trial {stale_trial.number} with state {stale_trial.state} to FAIL')
+    #         status = storage.set_trial_state_values(
+    #             stale_trial._trial_id,
+    #             optuna.trial.TrialState.FAIL,
+    #         )
+    #         print(f'Success?: {status}')
 
     # launch workers
     worker_kwargs = {
@@ -280,13 +277,23 @@ def worker(
             logger_hash=logger_hash,
         )
 
-    if local_rank is None or local_rank == 0:
-        study = optuna.load_study(
-            study_name=study_name,
-            storage=db_url,
-            sampler=sampler,
-            pruner=pruner,
-        )
+    if local_rank in [None, 0]:
+        attempts = 0
+        success = False
+        while success is False:
+            try:
+                study = optuna.load_study(
+                    study_name=study_name,
+                    storage=db_url,
+                    sampler=sampler,
+                    pruner=pruner,
+                )
+                success = True
+            except:
+                attempts += 1
+                time.sleep(2)
+                if attempts >= 15:
+                    assert False, f"Failed load_study() on world_rank {world_rank}"
         study.optimize(
             objective_wrapper,
             n_trials=n_trials_per_worker,  # trials for this study.optimize() call
@@ -355,12 +362,13 @@ def objective(
                 scores = outputs['valid_score'] if 'valid_score' in outputs else outputs['train_score']
                 objective_value = np.max(scores)
                 if analyzer_class is not None:
-                    analysis = analyzer_class(
+                    analyzer = analyzer_class(
                         output_dir=input_kwargs['output_dir'],
                         device=input_kwargs['device'],
                         verbose=False,
                     )
-                    analysis.plot_training(save=True)
+                    analyzer.plot_training(save=True)
+                    analyzer.plot_inference(save=True, max_elms=30)
             sys.stdout = sys.__stdout__
             sys.stderr = sys.__stderr__
             if world_rank in [None, 0]:
