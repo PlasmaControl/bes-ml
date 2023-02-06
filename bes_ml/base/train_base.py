@@ -386,8 +386,8 @@ class Trainer_Base(Trainer_Base_Dataclass):
                 continue
 
             # # log training time
-            # self.results['epoch_time'].append(time.time() - t_start_epoch)
-            # self.results['completed_epochs'] += 1
+            self.results['epoch_time'].append(time.time() - t_start_epoch)
+            self.results['completed_epochs'] += 1
 
             # record layer statistics
             for module_name, module in self._model_alias.named_modules():
