@@ -1,5 +1,6 @@
 import dataclasses
 import itertools
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -14,10 +15,11 @@ try:
     from ..base.analyze_base import Analyzer_Base
     from ..base.sampler import RandomBatchSampler, SequentialBatchSampler
     from ...bes_data.confinement_data_tools.dataset import ConfinementDataset
+    from .confinement_data_v2 import ConfinementDataset
 except ImportError:
     from bes_ml.base.analyze_base import Analyzer_Base
     from bes_ml.base.sampler import RandomBatchSampler, SequentialBatchSampler
-    from bes_data.confinement_data_tools.dataset import ConfinementDataset
+    from bes_ml.confinement_classification.confinement_data_v2 import ConfinementDataset
 
 @dataclasses.dataclass
 class Analyzer(Analyzer_Base):
@@ -43,42 +45,60 @@ class Analyzer(Analyzer_Base):
             labels = self.test_data['labels']
             time = self.test_data['time']
 
+            signals = np.array(self.test_data['signals'])
+            labels = np.array(self.test_data['labels'])
+            # one_hot_labels = np.zeros((len(self.test_data['labels']), 4))
+            # for i in range(len(labels)):
+            #     one_hot_labels[i][labels[i]] = 1
+            # labels = np.array(one_hot_labels)
+            # breakpoint()
+
             confinement_test_dataset = ConfinementDataset(
                 data_location=self.inputs['data_location'],
-                output_dir=self.inputs['output_dir'],
                 signal_window_size=self.inputs['signal_window_size'],
                 batch_size=self.inputs['batch_size'],
                 dataset_to_ram=self.inputs['dataset_to_ram'],
-                state='test'
+                state='test',
             )
-
-            if self.inputs['dataset_to_ram']:
-                # Load datasets into ram
-                confinement_test_dataset.load_datasets()
 
             confinement_test_dataset.load_datasets(signals=signals, labels=labels, time=time)
 
-            test_data_loader = DataLoader(confinement_test_dataset,
-                                          batch_size=None,  # must be disabled when using samplers
-                                          sampler=BatchSampler(SequentialBatchSampler(confinement_test_dataset,
-                                                                                  self.inputs['batch_size'],
-                                                                                  self.inputs['signal_window_size']),
-                                                               batch_size=self.inputs['batch_size'],
-                                                               drop_last=True
-                                                               )
-                                          )
-
+            test_data_loader = DataLoader(
+                confinement_test_dataset,
+                batch_size=None,  # must be disabled when using samplers
+                sampler=BatchSampler(
+                    RandomBatchSampler(
+                        confinement_test_dataset,
+                        self.inputs['batch_size'],
+                        self.inputs['signal_window_size'],
+                    ),
+                    batch_size=self.inputs['batch_size'],
+                    drop_last=True,
+                )
+            )
 
             predictions = np.empty((len(test_data_loader) * self.inputs['batch_size'], 4), dtype=np.float32)
+            # predictions = []
+            
             for i_batch, (batch_signals, batch_labels) in enumerate(test_data_loader):
                 batch_signals = batch_signals.to(self.device)
                 batch_predictions = self.model(batch_signals)
                 predictions[i_batch * self.inputs['batch_size']:(i_batch + 1) * self.inputs['batch_size']] = \
                     batch_predictions.cpu().numpy()
-
-            self.all_labels.append(labels)
+                # for file_signals, file_labels in zip(batch_signals, batch_labels):
+                #     curr_predictions = self.model(file_signals)
+                #     predictions.append(curr_predictions.cpu().numpy())
+                
             self.all_predictions.append(predictions)
-            self.all_signals.append(signals)
+            # self.all_labels.append(labels)
+            # self.all_signals.append(signals)
+
+            for i in range(len(labels)):
+                for j in range(len(labels[i])):
+                    self.all_labels.append(labels[i][j])
+                    # self.all_predictions.append(predictions[i][j])
+                    self.all_signals.append(signals[i][j])
+
         print('Inference complete')
 
     def plot_inference(self,
@@ -89,13 +109,20 @@ class Analyzer(Analyzer_Base):
         if None in [self.all_labels, self.all_predictions, self.all_signals]:
             self.run_inference()
 
-        signals = self.all_signals[0]
-        labels = self.all_labels[0]
+        signals = self.all_signals
+        labels = self.all_labels
         preds = self.all_predictions[0]
+        
+        # preds_final = []
+        # for pred in preds:
+        #     pred_labels = np.argmax(pred, axis=1)
+        #     label_counts = Counter(pred_labels)
+        #     preds_final.append(label_counts.most_common(1)[0][0])
 
         # Pad labels and predictions to account for signal window
         l_diff = len(signals) - len(preds)
         preds = np.pad(preds, ((l_diff, 0), (0, 0)))
+        # preds_final = preds_final.extend([0] * l_diff)
 
         class_labels = ['L-Mode',
                         'H-Mode',
@@ -104,8 +131,8 @@ class Analyzer(Analyzer_Base):
                         ]
 
         fig, (ax1, ax2) = plt.subplots(nrows=2, ncols=1, figsize=(16, 9))
-
         cm = confusion_matrix(labels, preds.argmax(axis=1))
+        
         self.plot_confusion_matrix(cm,
                                    classes=class_labels,
                                    ax=ax1)
@@ -191,6 +218,7 @@ class Analyzer(Analyzer_Base):
 
 if __name__ == '__main__':
     analyzer = Analyzer()
+    analyzer.run_inference()
     analyzer.plot_training(save=True)
     analyzer.plot_inference(save=True)
     analyzer.show()

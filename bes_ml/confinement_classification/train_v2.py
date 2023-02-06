@@ -24,7 +24,7 @@ class Trainer(
 if __name__=='__main__':
     Trainer(
         dense_num_kernels=8,
-        fraction_test=0.0,
+        fraction_test=0.1,
         dataset_to_ram=True,
         do_train=True,
     )

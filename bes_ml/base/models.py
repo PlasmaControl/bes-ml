@@ -21,7 +21,7 @@ except ImportError:
 
 @dataclasses.dataclass(eq=False)
 class _Base_Features_Dataclass:
-    signal_window_size: int = 64  # power of 2; ~16-512
+    signal_window_size: int = 256  # power of 2; ~16-512
     time_slice_interval: int = 1  # power of 2; time domain slice interval (i.e. time[::interval])
     spatial_pool_size: int = 1  # power of 2; spatial pooling size
     time_pool_size: int = 1  # power of 2; time pooling size
@@ -85,7 +85,7 @@ class _Base_Features(nn.Module, _Base_Features_Dataclass):
 
         self._input_size_after_timeslice_pooling = (
             self.time_points,
-            8 // self.spatial_pool_size,
+            6 // self.spatial_pool_size,
             8 // self.spatial_pool_size,
         )
 
@@ -172,7 +172,7 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
 
         def test_bad_shape(shape):
             assert np.all(np.array(shape) >= 1), f"Bad shape: {shape}"
-
+        
         # Conv #1
         self.layer1_conv = nn.Conv3d(
             in_channels=1,
@@ -254,7 +254,7 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
         ]
         self.logger.info(f"  After maxpool #2 (output): {data_shape}")
         test_bad_shape(data_shape)
-
+        
         self.features = np.prod(data_shape, dtype=int)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -623,18 +623,18 @@ class Multi_Features_Model(
             self.cnn_features = CNN_Features(**feature_kwargs)
             self.features.append(self.cnn_features)
         assert len(self.features) > 0
-
+        
         self.feature_count = {}
         total_features = 0
         self.logger.info('Features')
         for feature in self.features:
-            feature_count = feature.forward(torch.rand([1, 1, feature.time_points, 8, 8])).numel()
+            feature_count = feature.forward(torch.rand([1, 1, feature.time_points, 6, 8])).numel()
             total_features += feature_count
             self.logger.info(f"  {feature.__class__.__name__}: {feature_count}")
             self.feature_count[feature.__class__.__name__] = feature_count
         self.feature_count['total'] = total_features
         self.logger.info(f"  Total features: {total_features}")
-
+        
         hidden_layers = []
         in_features = total_features
         for i_layer, layer_size in enumerate(self.mlp_hidden_layers):
@@ -643,7 +643,7 @@ class Multi_Features_Model(
             in_features = layer_size
             self.logger.info(f"MLP layer {i_layer+1} size: {layer_size}")
         self.hidden_layers = nn.ModuleList(hidden_layers)
-
+        
         self.output_layer = nn.Linear(
             in_features=in_features, 
             out_features=self.mlp_output_size, 
@@ -665,6 +665,7 @@ class Multi_Features_Model(
             for features in all_features:
                 assert torch.all(torch.isfinite(features))
         all_features = torch.cat(all_features, dim=1)
+        # breakpoint()
         for hidden_layer in self.hidden_layers:
             all_features = self.activation(self.dropout(hidden_layer(all_features)))
         prediction = self.output_layer(all_features)
@@ -689,7 +690,7 @@ class Multi_Features_Model(
 
     def print_model_summary(self) -> None:
         self.logger.info("MODEL SUMMARY")
-        data_shape = (1, 1, self.signal_window_size, 8, 8)
+        data_shape = (1, 1, self.signal_window_size, 6, 8)
         input_data = torch.rand(*data_shape)
 
         # catpure torchinfo.summary() output

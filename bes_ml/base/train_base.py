@@ -47,7 +47,7 @@ class Trainer_Base_Dataclass:
     log_all_ranks: bool = False
     # training parameters
     device: str | torch.device = 'auto'  # auto (default), cpu, cuda, or cuda:X
-    n_epochs: int = 2  # training epochs
+    n_epochs: int = 1  # training epochs
     optimizer_type: str = 'sgd'  # adam (default) or sgd
     sgd_momentum: float = 0.0  # momentum for SGD optimizer, 0-1
     sgd_dampening: float = 0.0  # dampening for SGD optimizer, 0-1
@@ -351,13 +351,17 @@ class Trainer_Base(Trainer_Base_Dataclass):
                         one_hot_labels = np.zeros_like(predictions)
                         for i, j in zip(one_hot_labels, labels):
                             i[j] = 1
-                        roc = metrics.roc_auc_score(
-                            one_hot_labels,
-                            predictions,
-                            multi_class='ovo',
-                            average='macro',
-                            labels=[0, 1, 2, 3],
-                        )
+                        try:
+                            roc = metrics.roc_auc_score(
+                                one_hot_labels,
+                                predictions,
+                                multi_class='ovo',
+                                average='macro',
+                                labels=[0, 1, 2, 3],
+                            )
+                        except ValueError:
+                            print('encountered ValueError, ln 363')
+                            pass
 
                 if is_train:
                     self.results['train_loss'].append(loss := (train_loss := loss.item()))
@@ -369,6 +373,10 @@ class Trainer_Base(Trainer_Base_Dataclass):
                     self.results['valid_score'].append(score := (valid_score := score.item()))
                     if self.is_classification:
                         self.results['valid_roc'].append(valid_roc := roc.item())
+                        
+            # log training time
+            self.results['epoch_time'].append(time.time() - t_start_epoch)
+            self.results['completed_epochs'] += 1
 
             # step LR scheduler
             self.lr_scheduler.step(loss)
@@ -377,9 +385,9 @@ class Trainer_Base(Trainer_Base_Dataclass):
                 # skip remainder if not main process
                 continue
 
-            # log training time
-            self.results['epoch_time'].append(time.time() - t_start_epoch)
-            self.results['completed_epochs'] += 1
+            # # log training time
+            # self.results['epoch_time'].append(time.time() - t_start_epoch)
+            # self.results['completed_epochs'] += 1
 
             # record layer statistics
             for module_name, module in self._model_alias.named_modules():
@@ -528,6 +536,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
                 if is_train:
                     self.optimizer.zero_grad()
                 # predictions are floats: regression scalars or classification logits
+                
                 predictions = self._model_alias(signal_windows)
                 if self.is_regression:
                     labels = labels.type_as(predictions)
@@ -535,11 +544,20 @@ class Trainer_Base(Trainer_Base_Dataclass):
                     if self.model.mlp_output_size == 1:
                         labels = labels.type_as(predictions)
                     else:
-                        labels = labels.type(torch.int64)
-                sample_losses = self.loss_function(
+                        try:
+                            labels = labels.type(torch.float32)
+                        except RuntimeError:
+                            labels = labels.type(torch.int64)
+                try:
+                    sample_losses = self.loss_function(
                     predictions.squeeze(),
-                    labels,
+                    labels
                 )
+                except RuntimeError:
+                    labels = labels.type(torch.int64)
+                    sample_losses = self.loss_function(
+                    predictions.squeeze(),
+                    labels)
                 sample_losses = self._apply_label_weights(sample_losses, labels)
                 batch_loss = sample_losses.mean()  # batch loss
                 if is_train:

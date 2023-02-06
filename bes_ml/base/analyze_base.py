@@ -66,7 +66,7 @@ class Analyzer_Base(
         self.test_data = None
         if self.inputs['fraction_test'] > 0.0:
             self._load_test_data()
-
+            
         self.all_predictions = None
         self.all_labels = None
         self.all_signals = None
@@ -80,21 +80,6 @@ class Analyzer_Base(
         self.is_classification = None
 
     def _load_test_data(self) -> None:
-        # restore test data
-        # data_partition_file = self.output_dir / 'data_partition.yaml'
-        # with data_partition_file.open('r') as file:
-        #     data_partition = yaml.safe_load(file)
-        # test_elms = data_partition['test_elms']
-        # with h5py.File(self.inputs['data_location'], 'r') as h5_file:
-        #     for elm_index in test_elms:
-        #         elm_key = f"{elm_index:05d}"
-        #         elm_event = h5_file[elm_key]
-        #         signals = np.array(elm_event["signals"], dtype=np.float32)  # (64, <time>)
-        #         signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (<time>, 8, 8)
-        #         labels = np.array(elm_event["labels"])
-        #         # labels, signals, valid_t0 = self._get_valid_indices(labels, signals)
-        #         # assert labels.size == valid_t0.size
-        # return
         test_data_file = self.output_dir / self.inputs['test_data_file']
         assert test_data_file.exists(), f"{test_data_file} does not exist."
         with test_data_file.open('rb') as file:

@@ -1,5 +1,6 @@
 from pathlib import Path
 import dataclasses
+import pickle
 import re
 import traceback
 
@@ -7,6 +8,7 @@ import h5py
 import numpy as np
 import torch
 import torch.utils.data
+import yaml
 from torch.utils.data import DataLoader, BatchSampler
 
 from bes_data.sample_data import sample_data_dir
@@ -27,18 +29,20 @@ class Confinement_Data_v2(
 ):
     data_location: Path|str = sample_data_dir / 'kgill_data' #location of stored data
     dataset_to_ram: bool = True # Load datasets to ram
-    batch_size: int = 64  # power of 2, like 16-128
+    batch_size: int = 128  # power of 2, like 16-128
     fraction_validation: float = 0.2  # fraction of dataset for validation
     fraction_test: float = 0.2  # fraction of dataset for testing
     num_workers: int = None  # number of subprocess workers for pytorch dataloader
     pin_memory: bool = True  # data loader pinned memory
     seed: int = None  # RNG seed for deterministic, reproducible shuffling (ELMs, sample indices, etc.)
     label_type: np.int8 | np.float32 = dataclasses.field(default=None, init=False)
+    data_partition_file: str = 'data_partition.yaml'  # data partition for training, valid., and testing
+    test_data_file: str = 'test_data.pkl'
 
     def _prepare_data(self) -> None:
         self.data_location = Path(self.data_location)
-        if self.data_location.stem != 'labeled_datasets':
-            self.data_location = self.data_location / 'labeled_datasets'
+        if self.data_location.stem != 'sample_confinement_data':
+            self.data_location = self.data_location / 'sample_confinement_data'
         self.data_location = Path(self.data_location).resolve()
         assert self.data_location.exists(), f"{self.data_location} does not exist"
 
@@ -56,8 +60,8 @@ class Confinement_Data_v2(
         self.logger.info(f"Subprocess workers per data loader: {self.num_workers}")
 
         self.logger.info(f'Loading files from {self.data_location}')
-        self.shot_nums, self.input_files = self._retrieve_filepaths()
-        self.logger.info(f'Found {len(self.input_files)} files!')
+        self.shot_nums, self.shots_at_time = self._retrieve_filepaths()
+        self.logger.info(f'Found {len(self.shots_at_time.values())} files!')
         self._make_datasets()
         self._make_data_loaders()
 
@@ -72,18 +76,20 @@ class Confinement_Data_v2(
             self.data_location = input_dir
         data_loc = Path(self.data_location)
         assert data_loc.exists(), f'Directory {data_loc} does not exist. Have you made datasets?'
-        shots = {}
+        shots_at_time = {}
+        shot_nums = set()
         for file in (data_loc.iterdir()):
+            print(file)
             try:
-                shot_num = re.findall(r'_(\d+).+.hdf5', str(file))[0]
+                shot_num = re.findall(r'_(\d+)at(\d+).hdf5', str(file))[0][0]
+                shot_nums.add(shot_num)
+                time = re.findall(r'_(\d+)at(\d+).hdf5', str(file))[0][1]
             except IndexError:
                 continue
-            if shot_num not in shots.keys():
-                shots[shot_num] = file
+            if f"{shot_num}_{time}" not in shots_at_time.keys():
+                shots_at_time[f"{shot_num}_{time}"] = file
         # Keeps them in the same order for __getitem__
-        input_files = [shots[key] for key in sorted(shots.keys())]
-        shot_nums = list(sorted(shots.keys()))
-        return shot_nums, input_files
+        return list(shot_nums), shots_at_time
     
     def _make_datasets(self):
         """
@@ -94,7 +100,7 @@ class Confinement_Data_v2(
         :rtype: tuple(TurbulenceDataset, TurbulenceDataset)
         """
         np.random.seed(self.seed)
-        shots_files = np.array(list(zip(self.shot_nums, self.input_files)))
+        shots_files = np.array(list(self.shots_at_time.items()))
         valid_idx, train_idx, test_idx = [], [], []
         if len(shots_files) >= 3:
             sf_idx = np.arange(len(shots_files), dtype=np.int32)
@@ -126,6 +132,7 @@ class Confinement_Data_v2(
             dataset_to_ram=self.dataset_to_ram,
             state='train',
         )
+
         train_dataset.shot_nums = [i[0] for i in train_files]
         train_dataset.input_files = [i[1] for i in train_files]
         train_dataset.f_lengths = train_dataset._get_f_lengths()
@@ -145,7 +152,7 @@ class Confinement_Data_v2(
         valid_dataset.input_files = [i[1] for i in valid_files]
         valid_dataset.f_lengths = valid_dataset._get_f_lengths()
         valid_dataset.valid_indices = np.cumsum(np.concatenate((np.array([0]), valid_dataset.f_lengths)))[:-1]
-
+        
         # test = copy.deepcopy(self)
         test_dataset = ConfinementDataset(
             data_location=self.data_location,
@@ -158,10 +165,25 @@ class Confinement_Data_v2(
         )
         test_dataset.shot_nums = [i[0] for i in test_files]
         test_dataset.input_files = [i[1] for i in test_files]
-        test_dataset.f_lengths = valid_dataset._get_f_lengths()
-        test_dataset.valid_indices = np.cumsum(np.concatenate((np.array([0]), test_dataset.f_lengths)))[:-1]
 
-        assert all([len(ds) > 0 for ds in [train_dataset, test_dataset, valid_dataset]]), 'There is not enough data to split datasets.'
+        # assert all([len(ds) > 0 for ds in [train_dataset, test_dataset, valid_dataset]]), 'There is not enough data to split datasets.'
+        
+        with (self.output_dir/self.data_partition_file).open('w') as data_partition_file:
+            data_partition = {
+                'data_location': self.data_location.as_posix(),
+                'train': [file.parts[-1] for file in train_dataset.input_files],
+                'validation': [file.parts[-1] for file in valid_dataset.input_files],
+                'test': [file.parts[-1] for file in test_dataset.input_files],
+            }
+            yaml.safe_dump(
+                data_partition,
+                data_partition_file,
+                default_flow_style=False,
+                sort_keys=False,
+            )
+
+        test_dataset.f_lengths = test_dataset._get_f_lengths()
+        test_dataset.valid_indices = np.cumsum(np.concatenate((np.array([0]), test_dataset.f_lengths)))[:-1]
 
         self.train_dataset = train_dataset
         self.valid_dataset = valid_dataset
@@ -171,6 +193,19 @@ class Confinement_Data_v2(
             # Load datasets into ram
             self.train_dataset.load_datasets()
             self.valid_dataset.load_datasets()
+
+        self.test_dataset.load_datasets()
+        test_data_file = self.output_dir / self.test_data_file
+        self.logger.info(f"Test data file: {test_data_file}")
+        with test_data_file.open('wb') as file:
+            pickle.dump(
+                {
+                    "signals": self.test_dataset.signals,
+                    "time": self.test_dataset.time,
+                    "labels": self.test_dataset.labels,
+                },
+                file,
+            )
 
     def _make_data_loaders(self):
         self.train_data_loader = DataLoader(
@@ -205,7 +240,7 @@ class ConfinementDataset(torch.utils.data.Dataset):
 
     def __init__(
         self,
-        signal_window_size=128,
+        signal_window_size=2048,
         batch_size=64,
         data_location=None,
         fraction_test=0.15,
@@ -233,7 +268,8 @@ class ConfinementDataset(torch.utils.data.Dataset):
 
         assert Path(self.data_location).exists(), f'{self.data_location} does not exist'
 
-        self.shot_nums, self.input_files = self._retrieve_filepaths()
+        self.shot_nums, self.shots_at_time = self._retrieve_filepaths()
+        self.input_files = list(self.shots_at_time.values())
         self.dataset_to_ram = dataset_to_ram if len(self.shot_nums) >= 3 else True
 
         # Some flags for operations and checks
@@ -267,18 +303,20 @@ class ConfinementDataset(torch.utils.data.Dataset):
             self.data_location = input_dir
         data_loc = Path(self.data_location)
         assert data_loc.exists(), f'Directory {data_loc} does not exist. Have you made datasets?'
-        shots = {}
+        shots_at_time = {}
+        shot_nums = set()
         for file in (data_loc.iterdir()):
+            print(file)
             try:
-                shot_num = re.findall(r'_(\d+).+.hdf5', str(file))[0]
+                shot_num = re.findall(r'_(\d+)at(\d+).hdf5', str(file))[0][0]
+                shot_nums.add(shot_num)
+                time = re.findall(r'_(\d+)at(\d+).hdf5', str(file))[0][1]
             except IndexError:
                 continue
-            if shot_num not in shots.keys():
-                shots[shot_num] = file
+            if f"{shot_num}_{time}" not in shots_at_time.keys():
+                shots_at_time[f"{shot_num}_{time}"] = file
         # Keeps them in the same order for __getitem__
-        self.input_files = [shots[key] for key in sorted(shots.keys())]
-        self.shot_nums = list(sorted(shots.keys()))
-        return self.shot_nums, self.input_files
+        return list(shot_nums), shots_at_time
 
     def _roll_window(self, arr, sws, bs) -> np.ndarray:
         """
@@ -294,12 +332,12 @@ class ConfinementDataset(torch.utils.data.Dataset):
         """
         return np.lib.stride_tricks.sliding_window_view(arr.view(), sws, axis=0)\
             .swapaxes(-1, 1)\
-            .reshape(bs, -1, 8, 8)
+            .reshape(bs, -1, 6, 8)
 
     def __len__(self):
         return int(sum(self.f_lengths))
 
-    def __getitem__(self, index: list):
+    def __getitem__(self, index: int):
         if self.dataset_to_ram:
             return self._get_from_ram(index)
         else:
@@ -342,7 +380,6 @@ class ConfinementDataset(torch.utils.data.Dataset):
         return
 
     def _get_from_ram(self, index):
-
         hf = self.signals[np.nonzero(self.valid_indices <= index[0])[0][-1]]
         hf_labels = self.labels[np.nonzero(self.valid_indices <= index[0])[0][-1]]
         hf_time = self.time[np.nonzero(self.valid_indices <= index[0])[0][-1]]
@@ -352,24 +389,31 @@ class ConfinementDataset(torch.utils.data.Dataset):
         hf_index = [i - idx_offset + self.signal_window_size for i in index]
         hf_index = list(range(hf_index[0] - self.signal_window_size + 1, hf_index[0])) + hf_index
 
-        signal_windows = self._roll_window(hf[hf_index], self.signal_window_size, self.batch_size)
+        if hf_index[-1] >= len(hf) - 1:
+            breakpoint()
+            hf_index = [*range(len(hf) - (2*self.signal_window_size), len(hf) - 1)]
+            
+        try:
+            signal_windows = self._roll_window(hf[hf_index], self.signal_window_size, self.batch_size)
+        except IndexError:
+            breakpoint()
+        
         labels = hf_labels[hf_index[-self.batch_size:]]
-        print(signal_windows.shape[0], self.batch_size, signal_windows.shape[1], self.signal_window_size)
+        
         assert signal_windows.shape[0] == self.batch_size and signal_windows.shape[1] == self.signal_window_size
         assert labels.shape[0] == self.batch_size
 
         batch_labels = hf_labels[hf_index]
         batch_time = hf_time[hf_index]
-        print("!!!!!!!!!!!!!!!!!!!!!!",batch_labels, batch_time, labels)
-        # if not all(batch_labels == labels[0]) or not all(np.diff(batch_time) <= 0.2):
-        #     #adjust index for bad labels
-        #     if not all(batch_labels == labels[0]):
-        #         i_offset = np.argmax(batch_labels != batch_labels[0]) + 1
-        #     else:
-        #         i_offset = np.argmax(np.diff(batch_time) >= 2e-3) + 1
+        if not all(batch_labels == labels[0]) or not all(np.diff(batch_time) <= 0.2):
+            #adjust index for bad labels
+            if not all(batch_labels == labels[0]):
+                i_offset = np.argmax(batch_labels != batch_labels[0]) + 1
+            else:
+                i_offset = np.argmax(np.diff(batch_time) >= 2e-3) + 1
 
-        #     index = [i + i_offset for i in index]
-        #     self._get_from_ram(index)
+            index = [i + i_offset for i in index]
+            self._get_from_ram(index)
 
         return torch.tensor(signal_windows, dtype=torch.float32).unsqueeze(1), torch.tensor(labels, dtype=torch.float32)
 
@@ -406,10 +450,12 @@ class ConfinementDataset(torch.utils.data.Dataset):
         :rtype: np.array
         """
         length_arr = []
-        if self.istest_ and self.labels is not None:
-            # this might be important to change for multi-shot
-            for f in self.labels:
-                length_arr.append(f)
+        if self.istest_ and Path('run_dir/test_data.pkl').exists():
+            with open('run_dir/test_data.pkl', 'rb') as f:
+                data = pickle.load(f)
+                for f in range(len(data['labels'])):
+                    length_arr.append(data['labels'][f])
+
         elif not self.istest_:
             for f in self.input_files:
                 with h5py.File(f, 'r') as ds:
@@ -423,7 +469,7 @@ class ConfinementDataset(torch.utils.data.Dataset):
             discontinuous_labels = self.batch_size * n_labels
             window_start_offset = self.signal_window_size + self.batch_size
             fs.append(np.around(len(l) * self.frac_) - window_start_offset - discontinuous_labels)
-        return np.array(fs, dtype=int)
+        return np.array(fs, dtype=int)        
 
     def load_datasets(self,
                       signals=None,
@@ -431,13 +477,12 @@ class ConfinementDataset(torch.utils.data.Dataset):
                       time=None,
                       ):
         """Load datasets into RAM"""
-
         # use data loaded into dataset externally
         if signals is not None and labels is not None:
             assert max(signals.shape) == max(labels.shape), f"Signals and Labels must be same length. Got {len(signals)} and {len(labels)}"
-            self.signals = [signals]
-            self.labels = [labels]
-            self.time = [time]
+            self.signals = signals
+            self.labels = labels
+            self.time = time
             self.f_lengths = self._get_f_lengths()
             return
 
@@ -450,48 +495,48 @@ class ConfinementDataset(torch.utils.data.Dataset):
         signals, labels, time = [], [], []
 
         self.open()
-        if len(self.shot_nums) < 3:
-            for hf in self.hf_opened:
-                n_indices = max(hf['signals'].shape)
-                # Indices for start and stop of validation and test sets
-                i_start = np.floor((1 - (self.fraction_test + self.fraction_validation)) * n_indices).astype(int)
-                i_stop = np.floor((1 - self.fraction_test) * n_indices).astype(int)
+        # if len(self.shot_nums) < 3:
+        #     for hf in self.hf_opened:
+        #         n_indices = max(hf['signals'].shape)
+        #         # Indices for start and stop of validation and test sets
+        #         i_start = np.floor((1 - (self.fraction_test + self.fraction_validation)) * n_indices).astype(int)
+        #         i_stop = np.floor((1 - self.fraction_test) * n_indices).astype(int)
 
-                if self.isvalid_:
-                    sx = np.s_[i_start:i_stop]
-                    sx_s = np.s_[:, i_start:i_stop]
-                elif self.istest_:
-                    sx = np.s_[i_stop:n_indices]
-                    sx_s = np.s_[:, i_stop:n_indices]
-                elif self.istrain_:
-                    sx = np.s_[0:i_start]
-                    sx_s = np.s_[:, 0:i_start]
+        #         if self.isvalid_:
+        #             sx = np.s_[i_start:i_stop]
+        #             sx_s = np.s_[:, i_start:i_stop]
+        #         elif self.istest_:
+        #             sx = np.s_[i_stop:n_indices]
+        #             sx_s = np.s_[:, i_stop:n_indices]
+        #         elif self.istrain_:
+        #             sx = np.s_[0:i_start]
+        #             sx_s = np.s_[:, 0:i_start]
 
-                # read_direct is faster and more memory efficient
-                arr_len = sx.stop - sx.start
-                hf2np_s = np.empty((64, arr_len))
-                hf2np_l = np.empty((arr_len,))
-                hf2np_t = np.empty((arr_len,))
+        #         # read_direct is faster and more memory efficient
+        #         arr_len = sx.stop - sx.start
+        #         hf2np_s = np.empty((64, arr_len))
+        #         hf2np_l = np.empty((arr_len,))
+        #         hf2np_t = np.empty((arr_len,))
                 
-                # hf['labels'] = np.where(hf['labels'])[1]
-                # breakpoint()
-
-                hf['signals'].read_direct(hf2np_s, sx_s, np.s_[...])
-                hf['labels'].read_direct(hf2np_l, sx, np.s_[...])
-                hf['time'].read_direct(hf2np_t, sx, np.s_[...])
-                signals.append(hf2np_s.transpose())
-                labels.append(hf2np_l)
-                time.append(hf2np_t)
-        else:
-            for i, (sn, hf) in enumerate(zip(self.shot_nums, self.hf_opened)):
-                print(f'\rProcessing shot {sn} ({i+1}/{len(self.shot_nums)})', end=' ')
-                signals_np = np.array(hf['signals']).transpose()
-                labels_np = np.array(hf['labels'])
-                time_np = np.array(hf['time'])
-                print(f'{signals_np.nbytes + labels_np.nbytes} bytes!')
-                signals.append(signals_np)
-                labels.append(labels_np)
-                time.append(time_np)
+        #         hf['signals'].read_direct(hf2np_s, sx_s, np.s_[...])
+        #         # hf['labels'].read_direct(hf2np_l, sx, np.s_[...])
+        #         hf['time'].read_direct(hf2np_t, sx, np.s_[...])
+        #         signals.append(hf2np_s.transpose())
+        #         # labels.append(hf2np_l)
+        #         labels.append(np.where(hf['labels'])[1])
+        #         time.append(hf2np_t)
+        # else:
+        for i, (sn, hf) in enumerate(zip(self.shot_nums, self.hf_opened)):
+            print(f'\rProcessing file {sn} ({i+1}/{len(self.shot_nums)})', end=' ')
+            signals_np = np.array(hf['signals']).transpose()
+            signals_np = signals_np[:,:48] # 6x8 config
+            # labels_np = np.array(hf['labels'])
+            labels_np = np.where(hf['labels'])[1]
+            time_np = np.array(hf['time'])
+            print(f'{signals_np.nbytes + labels_np.nbytes} bytes!')
+            signals.append(signals_np)
+            labels.append(labels_np)
+            time.append(time_np)
         self.close()
 
         self.signals = signals
