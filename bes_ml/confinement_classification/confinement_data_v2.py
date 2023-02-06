@@ -393,11 +393,7 @@ class ConfinementDataset(torch.utils.data.Dataset):
             breakpoint()
             hf_index = [*range(len(hf) - (2*self.signal_window_size), len(hf) - 1)]
             
-        try:
-            signal_windows = self._roll_window(hf[hf_index], self.signal_window_size, self.batch_size)
-        except IndexError:
-            breakpoint()
-        
+        signal_windows = self._roll_window(hf[hf_index], self.signal_window_size, self.batch_size)
         labels = hf_labels[hf_index[-self.batch_size:]]
         
         assert signal_windows.shape[0] == self.batch_size and signal_windows.shape[1] == self.signal_window_size
