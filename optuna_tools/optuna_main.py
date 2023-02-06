@@ -5,11 +5,14 @@ import concurrent.futures
 import time
 from typing import Callable
 import multiprocessing as mp
+import warnings
 
 import numpy as np
 import torch
 import torch.distributed
 import optuna
+
+warnings.filterwarnings(action='ignore', module='optuna')
 
 
 def fail_stale_trials(
@@ -20,10 +23,22 @@ def fail_stale_trials(
     assert db_file.exists()
     db_url = f'sqlite:///{db_file.as_posix()}'
 
-    storage = optuna.storages.RDBStorage(
-        url=db_url,
-    )
+    # connect to optuna database
+    success = False
+    attempts = 0
+    while success is False:
+        try:
+            storage = optuna.storages.RDBStorage(
+                url=db_url,
+            )
+            success = True
+        except:
+            attempts += 1
+            time.sleep(1)
+            if attempts >= 10:
+                assert False, "Failed DB connection"
 
+    # create/load optuna study
     study = optuna.load_study(
         study_name='study',
         storage=storage,
@@ -45,7 +60,6 @@ def fail_stale_trials(
 
 
 def run_optuna(
-        n_epochs: int,
         trial_generator: Callable,
         trainer_class: Callable,
         db_name: str = None,
@@ -61,22 +75,24 @@ def run_optuna(
         pruner_warmup_epochs: int = 10,  # initial epochs before pruning
         pruner_minimum_trials_at_epoch: int = 20,  # minimum trials at each epoch before pruning
         pruner_patience: int = 10,  # epochs to wait for improvement before pruning
-        maximize_score: bool = True,  #  True (default) to maximize validation score; False to minimize training loss
+        # maximize_score: bool = True,  #  True (default) to maximize validation score; False to minimize training loss
         fail_stale_trials: bool = False,  # if True, fail any stale trials
         constant_liar: bool = False,  # if True, add penalty to running trials to avoid redundant sampling
         world_size: int = None,
         world_rank: int = None,
         local_rank: int = None,
+        dry_run: bool = False,
+        logger_hash: str|int = None,
 ) -> None:
 
     assert db_name or (db_url and study_name)
 
     if db_name:
         if study_dir is None:
-            study_dir = Path(db_name)
+            study_dir = Path(db_name).resolve()
             study_name = db_name
         else:
-            study_dir = Path(study_dir)
+            study_dir = Path(study_dir).resolve()
             if not study_name:
                 study_name = 'study'
         db_file = study_dir / f'{db_name}.db'
@@ -88,41 +104,51 @@ def run_optuna(
 
     study_dir.mkdir(exist_ok=True)
 
-    storage = optuna.storages.RDBStorage(url=db_url)
-    print(f'Existing studies in storage:')
-    for study in optuna.get_all_study_summaries(db_url):
-        print(f'  Study {study.study_name} with {study.n_trials} trials')
+    if world_rank in [None, 0]:
+        # connect to optuna database
+        success = False
+        attempts = 0
+        while success is False:
+            try:
+                storage = optuna.storages.RDBStorage(url=db_url, skip_table_creation=True, skip_compatibility_check=True)
+                success = True
+            except:
+                attempts += 1
+                time.sleep(3)
+                if attempts >= 40:
+                    assert False, f"Failed DB connection with {attempts} attempts on world rank {world_rank}"
 
-    print(f"Creating/loading study {study_name}")
-    study = optuna.create_study(
-        study_name=study_name,
-        storage=storage,
-        load_if_exists=True,
-        direction='maximize' if maximize_score else 'minimize',
-    )
+        # print(f'Existing studies in storage:')
+        # for study in optuna.get_all_study_summaries(db_url):
+        #     print(f'  Study {study.study_name} with {study.n_trials} trials')
 
-    if local_rank is not None:
-        if world_size is None:
-            world_size = int(os.environ['WORLD_SIZE'])
-        if world_rank is None:
-            world_rank = int(os.environ['WORLD_RANK'])
-        assert local_rank <= world_rank
-        assert world_rank < world_size
-
-    if fail_stale_trials:
-        # FAIL any zombie trials that are stuck in `RUNNING` state
-        stale_trials = storage.get_all_trials(
-            study._study_id,
-            deepcopy=False,
-            states=(optuna.trial.TrialState.RUNNING,),
+        print(f"Creating/loading study {study_name}")
+        optuna.create_study(
+            study_name=study_name,
+            storage=storage,
+            load_if_exists=True,
+            direction='maximize',
         )
-        for stale_trial in stale_trials:
-            print(f'Setting trial {stale_trial.number} with state {stale_trial.state} to FAIL')
-            status = storage.set_trial_state_values(
-                stale_trial._trial_id,
-                optuna.trial.TrialState.FAIL,
-            )
-            print(f'Success?: {status}')
+
+    if None not in [world_size, world_rank, local_rank]:
+        assert world_rank < world_size
+        assert local_rank <= world_rank
+        torch.distributed.barrier()
+
+    # if fail_stale_trials:
+    #     # FAIL any zombie trials that are stuck in `RUNNING` state
+    #     stale_trials = storage.get_all_trials(
+    #         study._study_id,
+    #         deepcopy=False,
+    #         states=(optuna.trial.TrialState.RUNNING,),
+    #     )
+    #     for stale_trial in stale_trials:
+    #         print(f'Setting trial {stale_trial.number} with state {stale_trial.state} to FAIL')
+    #         status = storage.set_trial_state_values(
+    #             stale_trial._trial_id,
+    #             optuna.trial.TrialState.FAIL,
+    #         )
+    #         print(f'Success?: {status}')
 
     # launch workers
     worker_kwargs = {
@@ -130,7 +156,6 @@ def run_optuna(
         'study_dir': study_dir.as_posix() if study_dir else None,
         'study_name': study_name,
         'n_trials_per_worker': n_trials_per_worker,
-        'n_epochs': n_epochs,
         'trial_generator': trial_generator,
         'trainer_class': trainer_class,
         'analyzer_class': analyzer_class,
@@ -139,8 +164,13 @@ def run_optuna(
         'pruner_warmup_epochs': pruner_warmup_epochs,
         'pruner_minimum_trials_at_epoch': pruner_minimum_trials_at_epoch,
         'pruner_patience': pruner_patience,
-        'maximize_score': maximize_score,
+        # 'maximize_score': maximize_score,
         'constant_liar': constant_liar,
+        'local_rank': local_rank,
+        'world_rank': world_rank,
+        'world_size': world_size,
+        'dry_run': dry_run,
+        'logger_hash': logger_hash,
     }
     if local_rank is None:
         if n_gpus is None:
@@ -148,9 +178,7 @@ def run_optuna(
         n_workers = n_gpus * n_workers_per_device if n_gpus else n_workers_per_device
     else:
         # single-node, multi-GPU training; single worker per node
-        n_gpus = torch.cuda.device_count()
         n_workers = 1
-    assert n_workers >= 1
     if n_workers > 1:
         mp_context = mp.get_context('spawn')
         with concurrent.futures.ProcessPoolExecutor(
@@ -180,29 +208,15 @@ def run_optuna(
                     print(e)
                     print(e.args)
     else:
-        print(f"Starting worker to run {n_trials_per_worker} trials")
-        if local_rank is None:
-            print(f"Launching single worker without DPP")
-            worker(**worker_kwargs)
-        else:
-            print(f"Launching DDP worker")
-            torch.distributed.init_process_group(
-                backend='nccl',
-                world_size=world_size,
-                rank=world_rank,
-            )
+        if world_rank in [None, 0]:
+            print(f"Starting worker to run {n_trials_per_worker} trials")
+        if local_rank is not None:
             torch.distributed.barrier()
-            assert world_rank == torch.distributed.get_rank()
-            worker(
-                local_rank=local_rank,
-                world_rank=world_rank,
-                **worker_kwargs,
-            )
+        worker(**worker_kwargs)
 
 
 def worker(
         db_url: str,
-        n_epochs: int,
         trial_generator: Callable,
         trainer_class: Callable,
         study_dir: str,
@@ -215,10 +229,13 @@ def worker(
         pruner_warmup_epochs: int = 10,
         pruner_minimum_trials_at_epoch: int = 20,
         pruner_patience: int = 10,
-        maximize_score: bool = True,
+        # maximize_score: bool = True,
         constant_liar: bool = False,
         local_rank: int = None,
         world_rank: int = None,
+        world_size: int = None,
+        dry_run: bool = False,
+        logger_hash: str|int = None,
 ) -> None:
 
     sampler = optuna.samplers.TPESampler(
@@ -249,21 +266,34 @@ def worker(
             trial=trial,
             study_dir=study_dir,
             i_gpu=i_gpu if local_rank is None else local_rank,
-            n_epochs=n_epochs,
             trial_generator=trial_generator,
             trainer_class=trainer_class,
             analyzer_class=analyzer_class,
-            maximize_score=maximize_score,
+            # maximize_score=maximize_score,
             world_rank=world_rank,
+            world_size=world_size,
+            local_rank=local_rank,
+            dry_run=dry_run,
+            logger_hash=logger_hash,
         )
 
-    if local_rank is None or local_rank == 0:
-        study = optuna.load_study(
-            study_name=study_name,
-            storage=db_url,
-            sampler=sampler,
-            pruner=pruner,
-        )
+    if local_rank in [None, 0]:
+        attempts = 0
+        success = False
+        while success is False:
+            try:
+                study = optuna.load_study(
+                    study_name=study_name,
+                    storage=db_url,
+                    sampler=sampler,
+                    pruner=pruner,
+                )
+                success = True
+            except:
+                attempts += 1
+                time.sleep(2)
+                if attempts >= 15:
+                    assert False, f"Failed load_study() on world_rank {world_rank}"
         study.optimize(
             objective_wrapper,
             n_trials=n_trials_per_worker,  # trials for this study.optimize() call
@@ -279,30 +309,33 @@ def worker(
 
 def objective(
         trial: optuna.trial.Trial|optuna.integration.TorchDistributedTrial,
-        n_epochs: int,
         study_dir: str,
         trial_generator: Callable,
         trainer_class: Callable,
         analyzer_class: Callable = None,
-        maximize_score: bool = True,
+        # maximize_score: bool = True,
         i_gpu: int | str = 'auto',
         world_size: int = None,
         world_rank: int = None,
         local_rank: int = None,
+        dry_run: bool = False,
+        logger_hash: int = None,
 ) -> float:
 
     study_dir = Path(study_dir)
     assert study_dir.exists()
     trial_dir = study_dir / f'trial_{trial.number:04d}'
 
-    trial.set_user_attr('maximize_score', maximize_score)
+    # trial.set_user_attr('maximize_score', maximize_score)
+
+    if world_rank in [None, 0]:
+        print(f"Trial {trial.number} starting")
 
     with open(os.devnull, 'w') as f:
         sys.stdout = f
         sys.stderr = f
 
         input_kwargs = trial_generator(trial)
-        input_kwargs['n_epochs'] = n_epochs
         input_kwargs['output_dir'] = trial_dir.as_posix()
         input_kwargs['device'] = f'cuda:{i_gpu:d}' if isinstance(i_gpu, int) else i_gpu
 
@@ -312,60 +345,33 @@ def objective(
                 world_size=world_size,
                 world_rank=world_rank,
                 local_rank=local_rank,
+                logger_hash=logger_hash,
                 **input_kwargs,
             )
+            if dry_run is True:
+                assert False, "dry_run is True"
             outputs = trainer.train()
         except Exception as e:
             sys.stdout = sys.__stdout__
             sys.stderr = sys.__stderr__
-            print(f"Trial {trial.number} failed: {repr(e)}")
-            result = np.NAN
+            if world_rank in [None, 0]:
+                print(f"Trial {trial.number} failed: {repr(e)}")
+            objective_value = np.NAN
         else:
-            if world_rank is None or world_rank == 0:
-                result = outputs['valid_score'][-1] if maximize_score else outputs['train_loss'][-1]
+            if world_rank in [None, 0]:
+                scores = outputs['valid_score'] if 'valid_score' in outputs else outputs['train_score']
+                objective_value = np.max(scores)
                 if analyzer_class is not None:
-                    analysis = analyzer_class(
+                    analyzer = analyzer_class(
                         output_dir=input_kwargs['output_dir'],
                         device=input_kwargs['device'],
                         verbose=False,
                     )
-                    analysis.plot_training(save=True)
+                    analyzer.plot_training(save=True)
+                    analyzer.plot_inference(save=True, max_elms=30)
             sys.stdout = sys.__stdout__
             sys.stderr = sys.__stderr__
+            if world_rank in [None, 0]:
+                print(f"Trial {trial.number} finished with final/max score {scores[-1]:.3f}/{objective_value:.3f} and training time {outputs['training_time']/60:.1f} min")
 
-    return result
-
-
-# def study_example(
-#         trial: Union[optuna.trial.Trial, optuna.trial.FrozenTrial],
-# ) -> dict:
-#     input_kwargs = {
-#         'fraction_test': 0.0,
-#         'fraction_validation': 0.0,
-#         'log_time': False,
-#         'inverse_weight_label': False,
-#         'learning_rate': 10 ** trial.suggest_int('lr_exp', -6, -2),
-#         'cnn_layer1_num_kernels': 10 * trial.suggest_int('cnn_layer1_num_kernels_factor_10', 1, 8),
-#         'cnn_layer2_num_kernels': 5 * trial.suggest_int('cnn_layer2_num_kernels_factor_5', 1, 8),
-#     }
-#     return input_kwargs
-#
-#
-# if __name__ == '__main__':
-#
-#     run_optuna(
-#         db_name=study_example.__name__,
-#         n_gpus=2,  # <=2 for head node, <=4 for compute node, ==1 if run_on_cpu
-#         n_workers_per_gpu=2,  # max 3 for V100
-#         n_trials_per_worker=5,
-#         n_epochs=8,
-#         objective_func=study_example,
-#         trainer_class=elm_regression.Trainer,
-#         sampler_startup_trials=60,
-#         pruner_startup_trials=10,
-#         pruner_warmup_epochs=6,
-#         pruner_minimum_trials_at_epoch=20,
-#         pruner_patience=4,
-#         maximize_score=False,
-#         constant_liar=True,
-#     )
+    return objective_value

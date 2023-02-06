@@ -28,8 +28,6 @@ class Trainer(
         if self.inverse_weight_label and self.normalize_labels:
             assert False, "Invalid options"
 
-        self.raw_label_minmax = None
-
         super().__post_init__()  # Trainer_Base.__post_init__()
 
     def _get_valid_indices(
@@ -39,36 +37,36 @@ class Trainer(
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         active_elm_indices = np.nonzero(labels == 1)[0]
         active_elm_start_index = active_elm_indices[0]  # first active ELM index
-        n_pre_elm_phase = active_elm_start_index  # length of pre-ELM phase
-        assert labels[n_pre_elm_phase-1] == 0  # last pre-ELM element
-        assert labels[n_pre_elm_phase] == 1  # first active ELM element
-        valid_t0 = np.ones(n_pre_elm_phase, dtype=np.int32)  # size = n_pre_elm_phase
-        assert valid_t0.size == n_pre_elm_phase  # valid_t0 is length of pre-ELM phase
-        last_signal_window_start_index = n_pre_elm_phase - self.signal_window_size - 1
-        valid_t0[last_signal_window_start_index+1:] = 0
+        assert labels[active_elm_start_index-1] == 0  # last pre-ELM element
+        assert labels[active_elm_start_index] == 1  # first active ELM element
+        valid_t0 = np.zeros(labels.size, dtype=np.int32)  # size = n_pre_elm_phase
+        # assert valid_t0.size == active_elm_start_index  # valid_t0 is length of pre-ELM phase
+        last_signal_window_start_index = active_elm_start_index - self.signal_window_size - 1
+        valid_t0[:last_signal_window_start_index+1] = 1
         assert valid_t0[last_signal_window_start_index] == 1  # last signal window start with pre-ELM label
         assert valid_t0[last_signal_window_start_index+1] == 0  # first invalid signal window start with active ELM label
         if self.pre_elm_size:
             first_signal_window_start_index = last_signal_window_start_index - self.pre_elm_size + 1
-            if first_signal_window_start_index < 0:
-                first_signal_window_start_index = 0
-            valid_t0[0:first_signal_window_start_index + 1 - 1] = 0
-            # valid_t0 = valid_t0[first_signal_window_start_index:]
-            assert valid_t0[first_signal_window_start_index] == 1
-            assert valid_t0[first_signal_window_start_index - 1] == 0
-            n_valid_t0 = np.min([last_signal_window_start_index+1, self.pre_elm_size])
-            assert np.count_nonzero(valid_t0) == n_valid_t0
-        labels = np.arange(n_pre_elm_phase, 0, -1, dtype=self.label_type)
-        assert labels.size == n_pre_elm_phase
-        assert labels.min() == 1
-        assert labels.max() == n_pre_elm_phase
-        assert np.all(labels>0)
-        signals = signals[0:n_pre_elm_phase, :, :]
+            if first_signal_window_start_index > 0:
+                valid_t0[:first_signal_window_start_index] = 0
+                assert valid_t0[first_signal_window_start_index - 1] == 0
+                assert valid_t0[first_signal_window_start_index] == 1
+        # labels = np.arange(active_elm_start_index, 0, -1, dtype=self.label_type)
+        labels = np.zeros(labels.size, dtype=self.label_type)
+        labels[0:active_elm_start_index] = np.arange(active_elm_start_index, 0, -1, dtype=self.label_type)
+        labels[active_elm_start_index:] = np.nan
+        # assert labels.size == active_elm_start_index
+        assert np.nanmin(labels) == 1
+        assert np.nanmax(labels) == active_elm_start_index
+        assert np.all(labels[np.isfinite(labels)]>0)
+        valid_labels = labels[valid_t0==1]
+        assert np.all(np.isfinite(valid_labels))
+        assert np.all(valid_labels>0)
+        # signals = signals[0:active_elm_start_index, :, :]
         assert signals.shape[0] == labels.size
         assert signals.shape[0] == valid_t0.size
         if self.log_time:
             labels = np.log10(labels)
-            assert labels.min() == 0
         return labels, signals, valid_t0
 
     def _apply_label_weights(
@@ -81,43 +79,34 @@ class Trainer(
         else:
             return losses
 
-    def _apply_label_normalization(
-        self, 
-        labels: torch.Tensor = None,
-        valid_indices: torch.Tensor = None,
-    ) -> torch.Tensor:
-        if self.normalize_labels:
-            if self.raw_label_minmax is None:
-                initialize = True
-                self.raw_label_minmax = [
-                    labels[valid_indices+self.signal_window_size].min().item(), 
-                    labels[valid_indices+self.signal_window_size].max().item(),
-                ]
-                self.results['raw_label_minmax'] = self.raw_label_minmax
-                if self.log_time:
-                    assert self.raw_label_minmax[0] == 0
-                else:
-                    assert self.raw_label_minmax[0] == 1
-            else:
-                initialize = False
-            self.logger.info(
-                f"  Normalizing labels[valid_t0] to min/max = -/+ 1 " +
-                f"with raw min/max {self.raw_label_minmax[0]:.4e} {self.raw_label_minmax[1]:.4e}"
-            )
-            label_range = self.raw_label_minmax[1] - self.raw_label_minmax[0]
-            labels = ((labels - self.raw_label_minmax[0]) / label_range - 0.5) * 2
-            if initialize:
-                assert labels[valid_indices+self.signal_window_size].min() == -1
-                assert labels[valid_indices+self.signal_window_size].max() == 1
-        return labels
+    # def _apply_label_normalization(
+    #     self, 
+    #     labels: np.ndarray = None,
+    #     valid_indices: np.ndarray = None,
+    # ) -> np.ndarray:
+    #     raw_label_min = labels[valid_indices+self.signal_window_size].min()
+    #     raw_label_max = labels[valid_indices+self.signal_window_size].max()
+    #     self.results['raw_label_min'] = raw_label_min.item()
+    #     self.results['raw_label_max'] = raw_label_max.item()
+    #     self.logger.info(f"  Raw label min/max: {raw_label_min:.4e}, {raw_label_max:.4e}")
+    #     if self.normalize_labels:
+    #         self.logger.info(f"  Normalizing labels to min/max = -/+ 1")
+    #         label_range = raw_label_max - raw_label_min
+    #         labels = ((labels - raw_label_min) / label_range - 0.5) * 2
+    #     return labels
 
 
 if __name__=='__main__':
     Trainer(
+        # data_location= '/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
+        # max_elms=500,
+        signal_window_size=128,
+        batch_size=128,
+        n_epochs=1,
         dense_num_kernels=8,
-        max_elms=5,
-        n_epochs=2,
-        fraction_test=0,
-        pre_elm_size=2000,
+        fft_num_kernels=8,
+        fft_subwindows=2,
+        fft_nbins=2,
+        # minibatch_print_interval=50,
         do_train=True,
     )

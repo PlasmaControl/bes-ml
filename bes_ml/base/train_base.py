@@ -1,12 +1,13 @@
 # python library imports
+from __future__ import annotations
+
 import contextlib
 import logging
 from pathlib import Path
-from typing import Union, Tuple, Any
+import typing
 import dataclasses
 from datetime import datetime
 import time
-import os
 
 # 3rd-party imports
 import yaml
@@ -14,7 +15,8 @@ import numpy as np
 from sklearn import metrics
 import torch
 import torch.utils.data
-import torch.distributed as dist
+import torch.utils.data.distributed
+import torch.distributed
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 try:
@@ -35,15 +37,13 @@ class Trainer_Base_Dataclass:
     output_dir: Path | str = Path('run_dir')  # path to output dir.
     results_file: str = 'results.yaml'  # output training results
     inputs_file: str = 'inputs.yaml'  # save inputs to yaml
-    checkpoint_file: str = 'checkpoint.pytorch'  # pytorch save file
     save_onnx_model: bool = False  # export ONNX format
-    onnx_checkpoint_file: str = 'checkpoint.onnx'  # onnx save file
     logger_hash: str | int = None
     terminal_output: bool = True  # terminal output if True
     # Pytorch DDP (multi-GPU training)
-    world_size: int = None
-    world_rank: int = None
-    local_rank: int = None
+    world_size: int = 1
+    world_rank: int = 0
+    local_rank: int = 0
     log_all_ranks: bool = False
     # training parameters
     device: str | torch.device = 'auto'  # auto (default), cpu, cuda, or cuda:X
@@ -56,12 +56,14 @@ class Trainer_Base_Dataclass:
     lr_scheduler_patience: int = 20  # epochs to wait before triggering lr scheduler
     lr_scheduler_factor: float = 0.5  # reduction factor for lr scheduler
     lr_scheduler_threshold: float = 1e-3  # threshold for *relative* decrease in loss to *not* trigger LR scheduler
-    low_score_patience: int = 20  # epochs to wait before aborting due to low score
+    low_score_patience: int = 30  # epochs to wait before aborting due to low score
+    low_score_threshold: float = 0.95  # abort if score drops below threshold for number of patience epochs
     weight_decay: float = 1e-3  # optimizer L2 regularization factor
     minibatch_print_interval: int = 5000
     do_train: bool = False  # if True, start training at end of init
+    maximum_parameters: int = None
     # optuna integration
-    optuna_trial: Any = None  # optuna trial
+    optuna_trial: typing.Any = None  # optuna trial
     # non-init attributes visible to subclasses
     logger: logging.Logger = dataclasses.field(default=None, init=False)
     is_regression: bool = dataclasses.field(default=None, init=False)
@@ -69,8 +71,10 @@ class Trainer_Base_Dataclass:
     is_ddp: bool = dataclasses.field(default=None, init=False)
     is_main_process: bool = dataclasses.field(default=None, init=False)
     model: Multi_Features_Model = dataclasses.field(default=None, init=False)
-    train_data_loader: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
-    validation_data_loader: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
+    train_loader: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
+    valid_loader: torch.utils.data.DataLoader = dataclasses.field(default=None, init=False)
+    train_sampler: torch.utils.data.distributed.DistributedSampler = dataclasses.field(default=None, init=False)
+    valid_sampler: torch.utils.data.distributed.DistributedSampler = dataclasses.field(default=None, init=False)
     results: dict = dataclasses.field(default=None, init=False)
     _ddp_barrier: callable = dataclasses.field(default=None, init=False)
 
@@ -86,37 +90,22 @@ class Trainer_Base(Trainer_Base_Dataclass):
         self.output_dir = Path(self.output_dir).resolve()
         self.output_dir.mkdir(exist_ok=True, parents=True)
 
-        if self.world_size:
-            if self.world_rank is None:
-                self.world_rank = int(os.environ['SLURM_PROCID'])
-            if self.local_rank is None:
-                self.local_rank = int(os.environ['SLURM_LOCALID'])
-        else:
-            self.world_size = 1
-            self.world_rank = self.local_rank = 0
+        # multi-GPU/multi-node with python DistributedDataParallel (ddp)
         assert self.local_rank <= self.world_rank
-
+        assert self.world_rank < self.world_size
         self.is_ddp = self.world_size > 1
         self.is_main_process = self.world_rank == 0
 
-        if self.is_ddp:
-            dist.init_process_group(
-                'nccl' if torch.cuda.is_available() else 'gloo',
-                rank=self.world_rank,
-                world_size=self.world_size,
-            )
-
-        print(f"World size {self.world_size}  world rank {self.world_rank}  local rank {self.local_rank}")
-        self._ddp_barrier()
-
         self._create_logger()
 
-        if self.is_main_process:
-            self.logger.info(f"In main process with world rank {self.world_rank}")
-            self.logger.info(f"Using DDP: {self.is_ddp}")
-            self._print_inputs()
-            self._save_inputs_to_yaml()
-        self._ddp_barrier()
+        self.logger.info(f"Using DDP?: {self.is_ddp}")
+        if torch.cuda.is_available():
+            self.logger.info(f"CUDA local device count: {torch.cuda.device_count()}")
+        else:
+            self.logger.info(f"CUDA devices not available")
+        self.logger.info(f"world_size/world_rank/local_rank: {self.world_size}/{self.world_rank}/{self.local_rank}")
+        self._print_inputs()
+        self._save_inputs_to_yaml()
 
         # subclass must set is_regression XOR is_classification
         assert self.is_regression ^ self.is_classification  # XOR
@@ -129,8 +118,9 @@ class Trainer_Base(Trainer_Base_Dataclass):
         self._prepare_data()  # implement in data class; e.g. ELMs, confinement mode, velocimetry
 
         # validate data loaders
-        for data_loader in [self.train_data_loader, self.validation_data_loader]:
-            assert isinstance(data_loader, torch.utils.data.DataLoader) or data_loader is None
+        for data_loader in [self.train_loader, self.valid_loader]:
+            if data_loader:
+                assert isinstance(data_loader, torch.utils.data.DataLoader)
 
         self.logger.info(f"Setup time {time.time() - t_start_setup:.1f} s")
 
@@ -139,24 +129,28 @@ class Trainer_Base(Trainer_Base_Dataclass):
 
     def _ddp_barrier(self):
         if self.is_ddp:
-            dist.barrier()
+            torch.distributed.barrier()
 
     def _create_logger(self):
         """
         Use python's logging to allow simultaneous print to console and log file.
         """
+        self._ddp_barrier()
         if self.is_ddp:
             assert self.logger_hash
         if not self.logger_hash:
             self.logger_hash = int(datetime.now().timestamp())
         self.logger = logging.getLogger(name=f"{__name__}_{self.logger_hash}")
         self.logger.setLevel(logging.INFO)
+        self.logger.addHandler(logging.NullHandler())
 
-        log_file = self.output_dir / f'log.txt'
-        log_file.unlink(missing_ok=True)
-        formatter = logging.Formatter(f"Rank {self.world_rank}: %(message)s")
-        self._ddp_barrier()
         if self.is_main_process or self.log_all_ranks:
+            log_file = self.output_dir / f'log.txt'
+            log_file.unlink(missing_ok=True)
+            if self.is_ddp:
+                formatter = logging.Formatter(f"Rank {self.world_rank}: %(message)s")
+            else:
+                formatter = logging.Formatter(f"%(message)s")
             # logs to log file
             f_handler = logging.FileHandler(log_file)
             f_handler.setFormatter(formatter)
@@ -167,60 +161,58 @@ class Trainer_Base(Trainer_Base_Dataclass):
                 s_handler.setFormatter(formatter)
                 self.logger.addHandler(s_handler)
             self.logger.info(f"Logging for world rank {self.world_rank}")
-        else:
-            # null logger if not main process
-            self.logger.addHandler(logging.NullHandler())
-        self._ddp_barrier()
 
     def _print_inputs(self):
-        cls = self.__class__
-        self.logger.info(f"Class `{cls.__name__}` parameters:")
-        cls_fields = sorted(dataclasses.fields(cls), key=lambda field: field.name)
-        self_fields_dict = dataclasses.asdict(self)
-        assert set([field.name for field in cls_fields]) == set(self_fields_dict.keys())
-        for field in cls_fields:
-            if field.name in ['logger', '_ddp_barrier']:
-                continue
-            if self_fields_dict[field.name] == field.default:
-                tmp = f"  {field.name}: {self_fields_dict[field.name]}"
-            else:
-                tmp = f"  {field.name}: {self_fields_dict[field.name]}  (default {field.default})"
-            self.logger.info(tmp)
+        if self.is_main_process:
+            cls = self.__class__
+            self.logger.info(f"Class {cls.__name__} parameters:")
+            cls_fields = sorted(dataclasses.fields(cls), key=lambda field: field.name)
+            self_fields_dict = dataclasses.asdict(self)
+            assert set([field.name for field in cls_fields]) == set(self_fields_dict.keys())
+            for field in cls_fields:
+                if field.name in ['logger', '_ddp_barrier']:
+                    continue
+                if self_fields_dict[field.name] == field.default:
+                    field_str = f"  {field.name}: {self_fields_dict[field.name]}"
+                else:
+                    field_str = f"  {field.name}: {self_fields_dict[field.name]}  (default {field.default})"
+                self.logger.info(field_str)
 
     def _save_inputs_to_yaml(self):
-        filename = Path(self.output_dir / self.inputs_file)
-        self_fields_dict = dataclasses.asdict(self)
-        for skip_key in ['logger', 'optuna_trial', '_ddp_barrier']:
-            self_fields_dict.pop(skip_key)
-        for key in self_fields_dict:
-            if isinstance(self_fields_dict[key], Path):
-                self_fields_dict[key] = self_fields_dict[key].as_posix()
-        with filename.open('w') as parameters_file:
-            yaml.safe_dump(
-                self_fields_dict,
-                parameters_file,
-                default_flow_style=False,
-            )
+        if self.is_main_process:
+            filename = Path(self.output_dir / self.inputs_file)
+            self_fields_dict = dataclasses.asdict(self)
+            for skip_key in ['logger', 'optuna_trial', '_ddp_barrier']:
+                self_fields_dict.pop(skip_key)
+            for key in self_fields_dict:
+                if isinstance(self_fields_dict[key], Path):
+                    self_fields_dict[key] = self_fields_dict[key].as_posix()
+            with filename.open('w') as parameters_file:
+                yaml.safe_dump(
+                    self_fields_dict,
+                    parameters_file,
+                    default_flow_style=False,
+                )
 
     def _make_model(self) -> None:
+        self._ddp_barrier()
         model_kwargs = {
             field.name: getattr(self, field.name)
             for field in dataclasses.fields(Multi_Features_Model)
+            if field.init
         }
         self.model = Multi_Features_Model(**model_kwargs)
         if self.is_main_process:
             self.model.print_model_summary()
-            self.results['trainable_parameters'] = self.model.trainable_parameters.copy()
-            self.results['feature_count'] = self.model.feature_count.copy()
-        self._ddp_barrier()
+        if self.maximum_parameters:
+            total_parameters = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            assert total_parameters <= self.maximum_parameters, f'Model is too large with {total_parameters} parameters'
 
     def _setup_device(self) -> None:
+        self._ddp_barrier()
         if self.device == 'auto':
             self.device = f'cuda:{self.local_rank}' if torch.cuda.is_available() else 'cpu'
-        self.logger.info(f"Device {self.device}  world size {self.world_size}  " +
-                         f"world rank {self.world_rank}  local rank {self.local_rank}")
-        if torch.cuda.is_available():
-            self.logger.info(f"Device count: {torch.cuda.device_count()}")
+        self.logger.info(f"world_size/world_rank/local_rank {self.world_size}/{self.world_rank}/{self.local_rank}  device {self.device}")
         self.device = torch.device(self.device)
 
         self.model = self.model.to(self.device)
@@ -233,9 +225,9 @@ class Trainer_Base(Trainer_Base_Dataclass):
             self._model_alias = self.ddp_model
         else:
             self._model_alias = self.model
-        self._ddp_barrier()
 
     def _make_optimizer_scheduler(self) -> None:
+        self._ddp_barrier()
         assert self.optimizer_type in ['adam', 'sgd']
         if self.optimizer_type == 'adam':
             self.optimizer = torch.optim.Adam(
@@ -252,12 +244,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
                 dampening=self.sgd_dampening,
                 nesterov=self.sgd_nesterov,
             )
-        # if self.is_main_process:
-        self.logger.info(
-            f"Optimizer {self.optimizer_type.upper()} " +
-            f"with learning rate {self.learning_rate:.1e} " +
-            f"and weight decay {self.weight_decay:.1e}"
-        )
+        self.logger.info(f"Optimizer {self.optimizer_type.upper()} lr {self.learning_rate:.1e}")
         self.lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
             factor=self.lr_scheduler_factor,
@@ -266,11 +253,10 @@ class Trainer_Base(Trainer_Base_Dataclass):
             mode='min',
             verbose=True,
         )
-        self._ddp_barrier()
+        self.logger.info(f"LR scheduler with patience {self.lr_scheduler_patience}")
 
     def _prepare_data(self) -> None:
-        # implement in subclass
-        # must generate self.train_data_loader and self.validation_data_loader
+        # subclass must generate self.train_loader and self.validation_loader
         raise NotImplementedError
 
     def _setup_train(self) -> None:
@@ -280,36 +266,35 @@ class Trainer_Base(Trainer_Base_Dataclass):
         self.results['train_score'] = []
         self.results['epoch_time'] = []
         self.results['lr'] = []
+        self.results['trainable_parameters'] = self.model.trainable_parameters
+        self.results['feature_count'] = self.model.feature_count
+
+        self.logger.info(f"Training batches per epoch {len(self.train_loader)}")
+        if self.valid_loader:
+            self.results['valid_loss'] = []
+            self.results['valid_score'] = []
+            if self.is_classification:
+                self.results['valid_roc'] = []
+            self.logger.info(f"Validation batches per epoch {len(self.valid_loader)}")
 
         if self.is_regression:
             self.results['score_function_name'] = 'R2'
             self.results['loss_function_name'] = 'MSELoss'
-            self.loss_function = torch.nn.MSELoss(reduction="none")
+            self.loss_function = torch.nn.MSELoss()
         elif self.is_classification:
             self.results['score_function_name'] = 'F1'
             self.results['train_roc'] = []
             if self.model.mlp_output_size == 1:
                 assert hasattr(self, 'threshold')  # binary classification must specify threshold
                 self.results['loss_function_name'] = 'BCEWithLogitsLoss'
-                # labels are binary [0,1]; predictions are logits [-inf,inf]
-                self.loss_function = torch.nn.BCEWithLogitsLoss(reduction="none")
+                self.loss_function = torch.nn.BCEWithLogitsLoss()
             else:
                 self.results['loss_function_name'] = 'CrossEntropyLoss'
-                # labels are true class C; predictions are scores for all classes
-                self.loss_function = torch.nn.CrossEntropyLoss(reduction="none")
-
-        if self.is_main_process:
-            self.logger.info(f"Training batches per epoch {len(self.train_data_loader)}")
-        if self.validation_data_loader:
-            self.results['valid_loss'] = []
-            self.results['valid_score'] = []
-            if self.is_classification:
-                self.results['valid_roc'] = []
-            if self.is_main_process:
-                self.logger.info(f"Validation batches per epoch {len(self.validation_data_loader)}")
+                self.loss_function = torch.nn.CrossEntropyLoss()
 
     def train(self) -> dict:
 
+        self._ddp_barrier()
         self._setup_train()
 
         best_score = -np.inf
@@ -317,21 +302,22 @@ class Trainer_Base(Trainer_Base_Dataclass):
         do_optuna_prune = False
 
         # loop over epochs
-        if self.is_main_process:
-            self.logger.info(f"Begin training loop over {self.n_epochs} epochs")
+        self.logger.info(f"Begin training loop over {self.n_epochs} epochs")
         t_start_training = time.time()
         for i_epoch in range(self.n_epochs):
             t_start_epoch = time.time()
-            if self.is_main_process:
-                self.logger.info(f"Ep {i_epoch + 1:03d}: begin")
+            self.logger.info(f"Ep {i_epoch + 1:03d}: begin")
             self.results['lr'].append(self.optimizer.param_groups[0]['lr'])
-            for is_train, data_loader in zip(
-                    [True, False],
-                    [self.train_data_loader, self.validation_data_loader],
+            for is_train, data_loader, sampler in zip(
+                [True, False],
+                [self.train_loader, self.valid_loader],
+                [self.train_sampler, self.valid_sampler],
             ):
-                self._ddp_barrier()
+                # self._ddp_barrier()
                 if data_loader is None:
                     continue  # skip if validation data is empty
+                if sampler is not None:
+                    sampler.set_epoch(i_epoch)
                 # loss and predictions
                 loss, predictions, labels = self._single_epoch_loop(
                     is_train=is_train,
@@ -339,58 +325,64 @@ class Trainer_Base(Trainer_Base_Dataclass):
                 )
                 # scores
                 if self.is_regression:
-                    score = metrics.r2_score(labels, predictions)
+                    score = metrics.r2_score(labels, predictions).item()
                 elif self.is_classification:
                     if self.model.mlp_output_size == 1:
                         modified_predictions = (predictions > self.threshold).astype(int)
-                        score = metrics.f1_score(labels, modified_predictions, average='binary')
-                        roc = metrics.roc_auc_score(labels, predictions)
+                        score = metrics.f1_score(labels, modified_predictions, average='binary').item()
+                        roc = metrics.roc_auc_score(labels, predictions).item()
                     else:
                         modified_predictions = predictions.argmax(axis=1)  # select class with highest score
-                        score = metrics.f1_score(labels, modified_predictions, average='weighted')
+                        score = metrics.f1_score(labels, modified_predictions, average='weighted').item()
                         one_hot_labels = np.zeros_like(predictions)
                         for i, j in zip(one_hot_labels, labels):
                             i[j] = 1
-                        try:
-                            roc = metrics.roc_auc_score(
-                                one_hot_labels,
-                                predictions,
-                                multi_class='ovo',
-                                average='macro',
-                                labels=[0, 1, 2, 3],
-                            )
-                        except ValueError:
-                            print('encountered ValueError, ln 363')
-                            pass
+                        roc = metrics.roc_auc_score(
+                            one_hot_labels,
+                            predictions,
+                            multi_class='ovo',
+                            average='macro',
+                            labels=[0, 1, 2, 3],
+                        ).item()
+
+                if self.is_ddp:
+                    # self._ddp_barrier()
+                    tmp = torch.tensor([score], device=self.device) / self.world_size
+                    torch.distributed.all_reduce(tmp)
+                    score = tmp.item()
+                    if self.is_classification:
+                        tmp = torch.tensor([roc], device=self.device) / self.world_size
+                        torch.distributed.all_reduce(tmp)
+                        roc = tmp.item()
 
                 if is_train:
-                    self.results['train_loss'].append(loss := (train_loss := loss.item()))
-                    self.results['train_score'].append(score := (train_score := score.item()))
+                    train_loss = loss.item()
+                    train_score = score
+                    self.results['train_loss'].append(train_loss)
+                    self.results['train_score'].append(train_score)
                     if self.is_classification:
-                        self.results['train_roc'].append(train_roc := roc.item())
+                        train_roc = roc
+                        self.results['train_roc'].append(train_roc)
                 else:
-                    self.results['valid_loss'].append(loss := (valid_loss := loss.item()))
-                    self.results['valid_score'].append(score := (valid_score := score.item()))
+                    valid_loss = loss.item()
+                    valid_score = score
+                    self.results['valid_loss'].append(valid_loss)
+                    self.results['valid_score'].append(valid_score)
                     if self.is_classification:
-                        self.results['valid_roc'].append(valid_roc := roc.item())
-                        
-            # log training time
-            self.results['epoch_time'].append(time.time() - t_start_epoch)
-            self.results['completed_epochs'] += 1
+                        valid_roc = roc
+                        self.results['valid_roc'].append(valid_roc)
+
+                # end train/validation block
 
             # step LR scheduler
             self.lr_scheduler.step(loss)
 
-            if not self.is_main_process:
-                # skip remainder if not main process
-                continue
-
-            # # log training time
+            # log training time
             self.results['epoch_time'].append(time.time() - t_start_epoch)
             self.results['completed_epochs'] += 1
 
             # record layer statistics
-            for module_name, module in self._model_alias.named_modules():
+            for module_name, module in self.model.named_modules():
                 n_params = sum(p.numel() for p in module.parameters(recurse=False) if p.requires_grad)
                 if n_params == 0:
                     continue
@@ -398,11 +390,11 @@ class Trainer_Base(Trainer_Base_Dataclass):
                     attr = getattr(module, attr_name)
                     if attr is None or attr.numel() < 3:
                         continue
-                    mean = attr.mean()
-                    stdev = torch.sqrt(torch.mean((attr - mean) ** 2))
+                    mean = attr.mean().item()
+                    stdev = torch.sqrt(torch.mean((attr - mean) ** 2)).item()
                     scores = (attr - mean) / stdev
-                    skew = torch.mean(scores ** 3)
-                    kurt = torch.mean(scores ** 4) - 3
+                    skew = torch.mean(scores ** 3).item()
+                    kurt = (torch.mean(scores ** 4) - 3).item()
                     module_attr_name = f"{module_name}.{attr_name}"
                     if module_attr_name not in self.results:
                         self.results[module_attr_name] = {
@@ -417,18 +409,22 @@ class Trainer_Base(Trainer_Base_Dataclass):
                             [mean, stdev, skew, kurt],
                             ['mean', 'stdev', 'skew', 'kurt'],
                     ):
-                        self.results[module_attr_name][stat_name].append(stat_value.item())
+                        self.results[module_attr_name][stat_name].append(stat_value)
 
-            # save results to yaml
-            with (self.output_dir / self.results_file).open('w') as results_file:
-                yaml.dump(
-                    self.results,
-                    results_file,
-                    default_flow_style=False,
-                    sort_keys=False,
-                )
+            training_time = time.time() - t_start_training
+            self.results['training_time'] = training_time
 
-            # print epoch summary
+            if self.is_main_process:
+                # save results to yaml
+                with (self.output_dir / self.results_file).open('w') as results_file:
+                    yaml.dump(
+                        self.results,
+                        results_file,
+                        default_flow_style=False,
+                        sort_keys=False,
+                    )
+
+            # epoch summary
             status = f"Ep {i_epoch + 1:03d}: "
             status += f"train loss {train_loss:.4f}  "
             status += f"train {self.results['score_function_name']} {train_score:.4f}  "
@@ -447,58 +443,55 @@ class Trainer_Base(Trainer_Base_Dataclass):
                 best_score = score
                 best_epoch = i_epoch
                 self.logger.info(f"  Best score: {best_score:.4f}")
-                self.model.save_pytorch_model(filename=self.output_dir / self.checkpoint_file)
-                if self.save_onnx_model:
-                    self.model.save_onnx_model(filename=self.output_dir / self.onnx_checkpoint_file)
+                if self.is_main_process:
+                    self.model.save_pytorch_model(filename=self.output_dir / 'checkpoint.pytorch')
+                    if self.save_onnx_model:
+                        self.model.save_onnx_model(filename=self.output_dir / 'checkpoint.onnx')
 
             # optuna integration; report epoch result to optuna
             if optuna is not None and self.optuna_trial is not None:
-                # save results dict in trial user attributes
-                for stat_name in self.results:
-                    self.optuna_trial.set_user_attr(stat_name, self.results[stat_name])
-                report_value = score if self.optuna_trial.user_attrs['maximize_score'] else loss
-                assert np.isfinite(report_value)
+                self._ddp_barrier()
+                assert np.isfinite(score)
                 report_successful = False
-                tries = 1
-                while report_successful is False and tries <= 10:
+                report_attempts = 1
+                while report_successful is False and report_attempts<=10:
                     try:
-                        self.optuna_trial.report(report_value, i_epoch)
+                        self.optuna_trial.report(score, i_epoch)
+                        report_successful = True
                     except:
-                        self.logger.info("Failed optuna report, trying again...")
-                        tries += 1
+                        report_attempts += 1
                         time.sleep(2)
                     else:
                         report_successful = True
-                # break loop if report fails
+                # break epoch loop if report fails
                 if report_successful is False:
                     self.logger.info("==> Failed Optuna report, exiting training loop")
                     break
-                # break loop if pruning
+                # break epoch loop if pruning
                 if self.optuna_trial.should_prune():
                     do_optuna_prune = True
                     self.logger.info("==> Pruning trial with Optuna")
                     break  # exit epoch training loop
 
-            # break loop if score stops improving
-            if (i_epoch > 20) and (i_epoch > best_epoch + self.low_score_patience) and (score < 0.95 * best_score):
-                self.logger.info("==> Score is < 95% best score; breaking")
+            # break epoch loop if score stops improving
+            if (i_epoch > 50) and \
+                (i_epoch > best_epoch + self.low_score_patience) and \
+                (score < self.low_score_threshold * best_score):
+                self.logger.info(f"==> Score is < {self.low_score_threshold} best score; breaking")
                 break
 
-        self._ddp_barrier()
+            # end epoch block
 
-        if self.is_main_process:
-            self.logger.info(f"End training loop")
-            self.logger.info(f"Training time {time.time() - t_start_training:.1f} s")
+        self.logger.info(f"End training loop")
+        self.logger.info(f"Training time {training_time/60:.1f} min")
 
-            if hasattr(self.model, 'fft_features') and self.model.fft_features.fft_histogram:
-                fft_features = self.model.fft_features
-                self.logger.info(f"  FFT min/max:{fft_features.min:.4f}, {fft_features.max:.4f}")
-                bin_center = fft_features.bin_edges[:-1] + (fft_features.bin_edges[1] - fft_features.bin_edges[0]) / 2
-                mean = np.sum(fft_features.cummulative_hist * bin_center) / np.sum(fft_features.cummulative_hist)
-                stdev = np.sqrt(np.sum(fft_features.cummulative_hist * (bin_center - mean) ** 2) / np.sum(fft_features.cummulative_hist))
-                self.logger.info(f"  FFT mean {mean:.4f}  stdev {stdev:.4f}")
-                # for i in range(fft_features.hist_bins):
-                #     self.logger.info(f"  edge {bin_center[i]:.3}:  {fft_features.cummulative_hist[i]}")
+        if hasattr(self.model, 'fft_features') and self.model.fft_features.fft_calc_histogram:
+            fft_features = self.model.fft_features
+            self.logger.info(f"  FFT min/max:{fft_features.fft_min:.4f}, {fft_features.fft_max:.4f}")
+            bin_center = fft_features.bin_edges[:-1] + (fft_features.bin_edges[1] - fft_features.bin_edges[0]) / 2
+            mean = np.sum(fft_features.cummulative_hist * bin_center) / np.sum(fft_features.cummulative_hist)
+            stdev = np.sqrt(np.sum(fft_features.cummulative_hist * (bin_center - mean) ** 2) / np.sum(fft_features.cummulative_hist))
+            self.logger.info(f"  FFT mean {mean:.4f}  stdev {stdev:.4f}")
 
         for handler in self.logger.handlers[:]:
             handler.close()
@@ -513,7 +506,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
             self,
             is_train: bool = True,  # True for train, False for evaluation/inference
             data_loader: torch.utils.data.DataLoader = None,  # train or validation data loader
-    ) -> Union[np.ndarray, Tuple]:
+    ) -> np.ndarray|tuple:
         batch_losses = []
         all_predictions = []
         all_labels = []
@@ -544,37 +537,32 @@ class Trainer_Base(Trainer_Base_Dataclass):
                     if self.model.mlp_output_size == 1:
                         labels = labels.type_as(predictions)
                     else:
-                        try:
-                            labels = labels.type(torch.float32)
-                        except RuntimeError:
-                            labels = labels.type(torch.int64)
-                try:
-                    sample_losses = self.loss_function(
+                        labels = labels.type(torch.int64)
+                batch_loss = self.loss_function(
                     predictions.squeeze(),
                     labels
                 )
-                except RuntimeError:
-                    labels = labels.type(torch.int64)
-                    sample_losses = self.loss_function(
-                    predictions.squeeze(),
-                    labels)
-                sample_losses = self._apply_label_weights(sample_losses, labels)
-                batch_loss = sample_losses.mean()  # batch loss
+                full_batch_loss = batch_loss.detach().clone() / self.world_size
+                if self.is_ddp:
+                    torch.distributed.all_reduce(full_batch_loss)
+
                 if is_train:
                     batch_loss.backward()
                     self.optimizer.step()
 
-                batch_losses.append(batch_loss.item())  # accumulate batch losses
-                all_labels.append(labels.cpu().numpy())
+                batch_losses.append(full_batch_loss.item())  # accumulate batch losses
+                all_labels.append(labels.detach().cpu().numpy())
                 all_predictions.append(predictions.detach().cpu().numpy())
 
                 # minibatch status
-                if (i_batch + 1) % self.minibatch_print_interval == 0 and self.is_main_process:
+                if (i_batch + 1) % self.minibatch_print_interval == 0:
                     status = f"  {mode} batch {i_batch + 1:05d}/{len(data_loader):05d}  "
-                    status += f"batch loss {batch_loss:.3f} "
+                    status += f"batch loss {full_batch_loss:.3f} "
                     status += f"(ep loss {np.mean(batch_losses):.3f})  "
                     status += f"minibatch time {time.time() - t_start_minibatch:.3f} s"
                     self.logger.info(status)
+
+                # end loop over batches
 
         epoch_loss = np.mean(batch_losses)
         all_predictions = np.concatenate(all_predictions)
