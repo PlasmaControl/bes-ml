@@ -50,6 +50,9 @@ class ELM_Data(
         self.data_location = Path(self.data_location).resolve()
         assert self.data_location.exists(), f"{self.data_location} does not exist"
 
+        if self.is_ddp and self.seed is None:
+            self.logger.info('Multi-GPU training requires identical shuffling; setting seed=0')
+            self.seed = 0
         self.rng_generator = np.random.default_rng(seed=self.seed)
 
         if self.is_regression:
@@ -151,8 +154,7 @@ class ELM_Data(
             self.logger.info("Skipping validation data")
             self.validation_data = None
 
-        if n_test_elms:
-            self._ddp_barrier()
+        if n_test_elms and self.is_main_process:
             self.logger.info(f"Test data ELM events: {test_elms.size}")
             self.test_data = self._preprocess_data(
                 elm_indices=test_elms,
@@ -462,18 +464,18 @@ class ELM_Data(
         self._ddp_barrier()
         self.train_sampler = torch.utils.data.DistributedSampler(
             self.train_dataset,
-            shuffle=True if self.seed is None else False,
+            shuffle=(self.seed is None),
             drop_last=True,
         ) if self.is_ddp else None
         self.train_loader = torch.utils.data.DataLoader(
             dataset=self.train_dataset,
             sampler=self.train_sampler,
             batch_size=self.batch_size,
-            shuffle=True if (self.seed is None and self.is_ddp is False) else False,
+            shuffle=(self.seed is None and self.train_sampler is None),
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             drop_last=True,
-            persistent_workers=True if self.num_workers > 0 else False,
+            persistent_workers=(self.num_workers > 0),
         )
         if self.validation_dataset:
             self._ddp_barrier()
@@ -490,7 +492,7 @@ class ELM_Data(
                 num_workers=self.num_workers,
                 pin_memory=self.pin_memory,
                 drop_last=True,
-                persistent_workers=True if self.num_workers > 0 else False,
+                persistent_workers=(self.num_workers > 0),
             )
 
 
