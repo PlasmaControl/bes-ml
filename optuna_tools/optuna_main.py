@@ -128,7 +128,8 @@ def run_optuna(
         # for study in optuna.get_all_study_summaries(db_url):
         #     print(f'  Study {study.study_name} with {study.n_trials} trials')
 
-        print(f"Rank {world_rank}: Creating/loading study {study_name}")
+        if world_rank == 0:
+            print(f"Creating/loading study {study_name}")
         optuna.create_study(
             study_name=study_name,
             storage=storage,
@@ -183,7 +184,7 @@ def run_optuna(
     else:
         n_workers = 1
     if world_rank == 0:
-        print(f"Rank {world_rank}: workers {n_workers}")
+        print(f"Number of Optuna workers {n_workers}")
     if n_workers > 1:
         mp_context = mp.get_context('spawn')
         with concurrent.futures.ProcessPoolExecutor(
@@ -214,7 +215,7 @@ def run_optuna(
                     print(e.args)
     else:
         if world_rank == 0:
-            print(f"Rank {world_rank}: worker running {n_trials_per_worker} trials")
+            print(f"Each Optuna worker running {n_trials_per_worker} trials")
         if world_size > 1:
             torch.distributed.barrier()
         worker(**worker_kwargs)
@@ -266,8 +267,6 @@ def worker(
                 # device=torch.device('cuda', local_rank),
             )
             i_gpu = local_rank
-        if world_rank == 0:
-            print(f"Rank {world_rank}: i_gpu {i_gpu}")
         return objective(
             trial=trial,
             study_dir=study_dir,
@@ -284,7 +283,7 @@ def worker(
         )
 
     if world_rank == 0:
-        print(f"Rank {world_rank}: initiating worker")
+        print(f"Optuna worker: running {n_trials_per_worker} trials sequentially")
         attempts = 0
         success = False
         while success is False:
@@ -296,12 +295,11 @@ def worker(
                     pruner=pruner,
                 )
                 success = True
-                print(f"Rank {world_rank}: loaded study {study_name}")
             except:
                 attempts += 1
                 time.sleep(2)
                 if attempts >= 15:
-                    assert False, f"Failed load_study() on world_rank {world_rank}"
+                    assert False, f"Worker: Failed load_study()"
         study.optimize(
             objective_wrapper,
             n_trials=n_trials_per_worker,  # trials for this study.optimize() call
@@ -335,11 +333,11 @@ def objective(
     trial_dir = study_dir / f'trial_{trial.number:04d}'
 
     if world_rank == 0:
-        print(f"Rank {world_rank}: Trial {trial.number} starting")
+        print(f"Trial {trial.number}: starting")
 
     with open(os.devnull, 'w') as f:
-        # sys.stdout = f
-        # sys.stderr = f
+        sys.stdout = f
+        sys.stderr = f
 
         input_kwargs = trial_generator(trial)
         input_kwargs['output_dir'] = trial_dir.as_posix()
@@ -362,7 +360,7 @@ def objective(
             sys.stderr = sys.__stderr__
             objective_value = np.NAN
             if world_rank == 0:
-                print(f"Rank {world_rank}: Trial {trial.number} failed: {repr(e)}")
+                print(f"Trial {trial.number}: failed with error {repr(e)}")
         else:
             scores = outputs['valid_score'] if 'valid_score' in outputs else outputs['train_score']
             objective_value = np.max(scores)
@@ -378,7 +376,7 @@ def objective(
             sys.stdout = sys.__stdout__
             sys.stderr = sys.__stderr__
             if world_rank == 0:
-                print(f"Rank {world_rank}: Trial {trial.number} finished with final/max score {scores[-1]:.3f}/{objective_value:.3f} and training time {outputs['training_time']/60:.1f} min")
+                print(f"Trial {trial.number}: finished with final/max score {scores[-1]:.3f}/{objective_value:.3f} and time {outputs['training_time']/60:.1f} min")
             
     if world_size > 1:
         torch.distributed.barrier()
