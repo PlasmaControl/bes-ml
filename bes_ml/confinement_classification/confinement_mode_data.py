@@ -133,7 +133,7 @@ class Confinement_Mode_Data(
             self.logger.info("Skipping validation data")
             self.validation_data = None
 
-        if n_test_confinement_modes:
+        if n_test_confinement_modes and self.is_main_process:
             self._ddp_barrier()
             self.logger.info(f"Test data confinement mode events: {test_confinement_modes.size}")
             self.test_data = self._preprocess_data(

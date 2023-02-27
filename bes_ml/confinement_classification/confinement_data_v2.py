@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 import dataclasses
 import pickle
@@ -29,7 +31,7 @@ class Confinement_Data_v2(
 ):
     data_location: Path|str = sample_data_dir / 'kgill_data' #location of stored data
     dataset_to_ram: bool = True # Load datasets to ram
-    batch_size: int = 128  # power of 2, like 16-128
+    batch_size: int = 64  # power of 2, like 16-128
     fraction_validation: float = 0.2  # fraction of dataset for validation
     fraction_test: float = 0.2  # fraction of dataset for testing
     num_workers: int = None  # number of subprocess workers for pytorch dataloader
@@ -41,8 +43,8 @@ class Confinement_Data_v2(
 
     def _prepare_data(self) -> None:
         self.data_location = Path(self.data_location)
-        if self.data_location.stem != 'sample_confinement_data':
-            self.data_location = self.data_location / 'sample_confinement_data'
+        if self.data_location.stem != 'small':
+            self.data_location = self.data_location / 'small'
         self.data_location = Path(self.data_location).resolve()
         assert self.data_location.exists(), f"{self.data_location} does not exist"
 
@@ -182,32 +184,32 @@ class Confinement_Data_v2(
                 sort_keys=False,
             )
 
-        test_dataset.f_lengths = test_dataset._get_f_lengths()
-        test_dataset.valid_indices = np.cumsum(np.concatenate((np.array([0]), test_dataset.f_lengths)))[:-1]
+        # test_dataset.f_lengths = test_dataset._get_f_lengths()
+        # test_dataset.valid_indices = np.cumsum(np.concatenate((np.array([0]), test_dataset.f_lengths)))[:-1]
 
         self.train_dataset = train_dataset
         self.valid_dataset = valid_dataset
-        self.test_dataset = test_dataset
+        # self.test_dataset = test_dataset
 
         if self.dataset_to_ram:
             # Load datasets into ram
             self.train_dataset.load_datasets()
             self.valid_dataset.load_datasets()
 
-        self.test_dataset.load_datasets()
-        test_data_file = self.output_dir / self.test_data_file
-        self.logger.info(f"Test data file: {test_data_file}")
-        with test_data_file.open('wb') as file:
-            pickle.dump(
-                {
-                    "signals": self.test_dataset.signals,
-                    "time": self.test_dataset.time,
-                    "labels": self.test_dataset.labels,
-                },
-                file,
-            )
+        # self.test_dataset.load_datasets()
+        # test_data_file = self.output_dir / self.test_data_file
+        # self.logger.info(f"Test data file: {test_data_file}")
+        # with test_data_file.open('wb') as file:
+        #     pickle.dump(
+        #         {
+        #             "signals": self.test_dataset.signals,
+        #             "time": self.test_dataset.time,
+        #             "labels": self.test_dataset.labels,
+        #         },
+        #         file,
+        #     )
 
-    def _make_data_loaders(self):
+    def _make_data_loaders(self):      
         self.train_loader = DataLoader(
             self.train_dataset,
             batch_size=None,  # must be disabled when using samplers
@@ -388,14 +390,12 @@ class ConfinementDataset(torch.utils.data.Dataset):
         idx_offset = self.valid_indices[(self.valid_indices <= index[0])][-1].astype(int)
         hf_index = [i - idx_offset + self.signal_window_size for i in index]
         hf_index = list(range(hf_index[0] - self.signal_window_size + 1, hf_index[0])) + hf_index
-
-        if hf_index[-1] >= len(hf) - 1:
-            breakpoint()
-            hf_index = [*range(len(hf) - (2*self.signal_window_size), len(hf) - 1)]
             
         signal_windows = self._roll_window(hf[hf_index], self.signal_window_size, self.batch_size)
         labels = hf_labels[hf_index[-self.batch_size:]]
         
+        # print(len(index), signal_windows.shape[0], self.batch_size, signal_windows.shape[1], self.signal_window_size)
+
         assert signal_windows.shape[0] == self.batch_size and signal_windows.shape[1] == self.signal_window_size
         assert labels.shape[0] == self.batch_size
 
@@ -446,16 +446,18 @@ class ConfinementDataset(torch.utils.data.Dataset):
         :rtype: np.array
         """
         length_arr = []
-        if self.istest_ and Path('run_dir/test_data.pkl').exists():
-            with open('run_dir/test_data.pkl', 'rb') as f:
-                data = pickle.load(f)
-                for f in range(len(data['labels'])):
-                    length_arr.append(data['labels'][f])
+        # if self.istest_ and Path('run_dir/test_data.pkl').exists():
+        #     with open('run_dir/test_data.pkl', 'rb') as f:
+        #         data = pickle.load(f)
+        #         for f in range(len(data['labels'])):
+        #             length_arr.append(data['labels'][f])
 
-        elif not self.istest_:
+        # elif not self.istest_:
+        if not self.istest_:
             for f in self.input_files:
                 with h5py.File(f, 'r') as ds:
                     length_arr.append(np.array(ds['labels']))
+            self.close()
         else:
             return [0]
 
