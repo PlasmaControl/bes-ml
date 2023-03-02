@@ -76,6 +76,7 @@ def run_optuna(
         pruner_warmup_epochs: int = 10,  # initial epochs before pruning
         pruner_minimum_trials_at_epoch: int = 20,  # minimum trials at each epoch before pruning
         pruner_patience: int = 10,  # epochs to wait for improvement before pruning
+        pruner_min_delta: float = 1e-3,
         # maximize_score: bool = True,  #  True (default) to maximize validation score; False to minimize training loss
         # fail_stale_trials: bool = False,  # if True, fail any stale trials
         constant_liar: bool = False,  # if True, add penalty to running trials to avoid redundant sampling
@@ -169,6 +170,7 @@ def run_optuna(
         'pruner_warmup_epochs': pruner_warmup_epochs,
         'pruner_minimum_trials_at_epoch': pruner_minimum_trials_at_epoch,
         'pruner_patience': pruner_patience,
+        'pruner_min_delta': pruner_min_delta,
         # 'maximize_score': maximize_score,
         'constant_liar': constant_liar,
         'local_rank': local_rank,
@@ -220,6 +222,13 @@ def run_optuna(
             torch.distributed.barrier()
         worker(**worker_kwargs)
 
+def study_callback(
+        study: optuna.study.Study,
+        trial: optuna.trial.FrozenTrial,
+) -> None:
+    # stop study process after single successful trial
+    if trial.state != optuna.trial.TrialState.FAIL:
+        study.stop()
 
 def worker(
         db_url: str,
@@ -235,6 +244,7 @@ def worker(
         pruner_warmup_epochs: int = 10,
         pruner_minimum_trials_at_epoch: int = 20,
         pruner_patience: int = 10,
+        pruner_min_delta: float = 1e-3,
         # maximize_score: bool = True,
         constant_liar: bool = False,
         local_rank: int = 0,
@@ -258,6 +268,7 @@ def worker(
     pruner = optuna.pruners.PatientPruner(
         pruner,
         patience=pruner_patience,
+        min_delta=pruner_min_delta,
     )
 
     def objective_wrapper(trial) -> float:
@@ -304,6 +315,7 @@ def worker(
             objective_wrapper,
             n_trials=n_trials_per_worker,  # trials for this study.optimize() call
             gc_after_trial=True,
+            callbacks=[study_callback],
         )
     else:
         for _ in range(n_trials_per_worker):
@@ -311,7 +323,6 @@ def worker(
                 objective_wrapper(None)
             except:
                 pass
-
 
 def objective(
         trial: optuna.trial.Trial|optuna.integration.TorchDistributedTrial,
@@ -349,7 +360,7 @@ def objective(
                 world_size=world_size,
                 world_rank=world_rank,
                 local_rank=local_rank,
-                logger_hash=logger_hash,
+                logger_hash=f"{logger_hash}_{trial.number}",
                 **input_kwargs,
             )
             if dry_run is True:
