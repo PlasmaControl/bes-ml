@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import dataclasses
 import pickle
@@ -10,9 +11,6 @@ import torch.utils.data
 import h5py
 import yaml
 import matplotlib.pyplot as plt
-
-import psutil
-import os 
 
 try:
     from .train_base import Trainer_Base_Dataclass
@@ -29,7 +27,7 @@ class Confinement_Mode_Data(
     Trainer_Base_Dataclass,
     Multi_Features_Model_Dataclass,
 ):
-    data_location: Path|str = '/global/homes/k/kevinsg/m3586/kgill/bes-ml/bes_data/sample_data/kgill_data/small_confinement_data.hdf5'  # path to data; dir or file depending on task
+    data_location: Path|str = '/global/homes/k/kevinsg/m3586/kgill/bes-ml/bes_data/sample_data/kgill_data/sample_confinement_data/'  # path to data; dir or file depending on task
     batch_size: int = 64  # power of 2, like 16-128
     fraction_validation: float = 0.2  # fraction of dataset for validation
     fraction_test: float = 0.2  # fraction of dataset for testing
@@ -44,18 +42,12 @@ class Confinement_Mode_Data(
     data_partition_file: str = 'data_partition.yaml'  # data partition for training, valid., and testing
     max_events: int = None
 
-    def get_memory_usage(self):
-        print('RAM memory percent used:', psutil.virtual_memory()[2])
-        print('RAM Available (GB):', psutil.virtual_memory()[1]/1000000000)
-        total_memory, used_memory, free_memory = map(
-            int, os.popen('free -t -m').readlines()[-1].split()[1:])
-        print("RAM memory percent used:", round((used_memory/total_memory) * 100, 2))
-
     def _prepare_data(self) -> None:
 
         self.data_location = Path(self.data_location).resolve()
         assert self.data_location.exists(), f"{self.data_location} does not exist"
-        
+        self.data_files = os.listdir(self.data_location)
+
         if self.is_ddp and self.seed is None:
             self.logger.info('Multi-GPU training requires identical shuffling; setting seed=0')
             self.seed = 0
@@ -78,20 +70,19 @@ class Confinement_Mode_Data(
 
     def _get_data(self) -> None:
         self._ddp_barrier()
-        self.logger.info(f"Data file: {self.data_location}")
+        self.logger.info(f"Data folder: {self.data_location}")
+        self.logger.info(f"confinement modes in data file: {len(self.data_files)}")
 
-        with h5py.File(self.data_location, "r") as data_file:
-            self.logger.info(f"confinement modes in data file: {len(data_file)}")
-            good_keys = []
-            for key in data_file:
-                good_keys.append(key)
-            indices = np.array(
-                [int(key) for key in good_keys],
-                dtype=int,
-            )
-            time_frames = sum([data_file[key]['signals'].shape[1] for key in good_keys])
+        keys=[]
+        for idx, file in enumerate(os.listdir(self.data_location)):
+            keys.append(idx)
+        indices = np.array(
+            [int(key) for key in keys],
+            dtype=int,
+        )
+        
         self.logger.info(f"confinement mode events: {indices.size}")
-        self.logger.info(f"Total time frames for confinement mode events: {time_frames:,}")
+        # self.logger.info(f"Total time frames for confinement mode events: {time_frames:,}")
 
         # shuffle confinement mode events
         self.rng_generator.shuffle(indices)
@@ -128,16 +119,8 @@ class Confinement_Mode_Data(
 
         self._ddp_barrier()
         self.logger.info(f"Training data confinement mode events: {training_confinement_modes.size}")
-
-        if self.is_ddp:
-            i_gpu = self.local_rank
-            local_training_confinement_modes = training_confinement_modes[i_gpu::4]
-            local_validation_confinement_modes = validation_confinement_modes[i_gpu::4]
-            print(local_training_confinement_modes, local_validation_confinement_modes)
-
-
         self.train_data = self._preprocess_data(
-            indices=local_training_confinement_modes if self.is_ddp else training_confinement_modes,
+            indices=training_confinement_modes,
             shuffle_indices=True,
             # oversample_active_elm=self.oversample_active_elm if self.is_classification else False,
             is_train_data=True,
@@ -147,7 +130,7 @@ class Confinement_Mode_Data(
             self._ddp_barrier()
             self.logger.info(f"Validation data confinement mode events: {validation_confinement_modes.size}")
             self.validation_data = self._preprocess_data(
-                indices=local_validation_confinement_modes if self.is_ddp else validation_confinement_modes,
+                indices=validation_confinement_modes,
                 # save_filename='validation_confinement_modes',
             )
         else:
@@ -155,6 +138,7 @@ class Confinement_Mode_Data(
             self.validation_data = None
 
         if n_test_confinement_modes and self.is_main_process:
+            self._ddp_barrier()
             self.logger.info(f"Test data confinement mode events: {test_confinement_modes.size}")
             self.test_data = self._preprocess_data(
                 indices=test_confinement_modes,
@@ -192,17 +176,16 @@ class Confinement_Mode_Data(
             self.logger.info(f"  Plotting valid indices: {save_filename}_**.pdf")
             i_page = 1
             axes_twinx = [axis.twinx() for axis in axes.flat]
-        with h5py.File(self.data_location, 'r') as h5_file:
-            confinement_mode_data = []
-            for i_confinement_mode, confinement_mode_index in enumerate(indices):
+        confinement_mode_data = []
+        for i_confinement_mode, confinement_mode_index in enumerate(indices):
+            file_path = self.data_location / self.data_files[confinement_mode_index]
+            with h5py.File(file_path, 'r') as confinement_mode_event:
                 if i_confinement_mode%10 == 0:
                     self.logger.info(f"  confinement mode event {i_confinement_mode:04d}/{indices.size:04d}")
-                    # self.get_memory_usage()
                 confinement_mode_key = f"{confinement_mode_index:05d}"
-                confinement_mode_event = h5_file[confinement_mode_key]
-                signals = np.array(confinement_mode_event["signals"], dtype=np.float32)  # (48, <time>)
+                signals = np.array(confinement_mode_event["signals"][:48,:], dtype=np.float32)  # (48, <time>)
                 signals = np.transpose(signals, (1, 0)).reshape(-1, 6, 8)  # reshape to (<time>, 6, 8)
-                labels = np.array(confinement_mode_event["labels"], dtype=self.label_type)
+                labels = np.where(confinement_mode_event["labels"])[1]
                 labels, signals, valid_t0 = self._get_valid_indices(labels, signals)
                 if save_filename and self.is_main_process:
                     if i_confinement_mode % 12 == 0:
@@ -232,9 +215,9 @@ class Confinement_Mode_Data(
                             transparent=True,
                         )
                         i_page += 1
-                confinement_mode_data.append(
-                    {'signals': signals, 'labels': labels, 'valid_t0': valid_t0}
-                )
+            confinement_mode_data.append(
+                {'signals': signals, 'labels': labels, 'valid_t0': valid_t0}
+            )
 
         self.logger.info('  Finished reading confinement mode event data')
 
@@ -466,19 +449,18 @@ class Confinement_Mode_Data(
         self._ddp_barrier()
         self.train_sampler = torch.utils.data.DistributedSampler(
             self.train_dataset,
-            shuffle=(self.seed is None),
+            shuffle=True if self.seed is None else False,
             drop_last=True,
         ) if self.is_ddp else None
-        # self.train_sampler = None
         self.train_loader = torch.utils.data.DataLoader(
             dataset=self.train_dataset,
             sampler=self.train_sampler,
             batch_size=self.batch_size,
-            shuffle=(self.seed is None and self.train_sampler is None),
+            shuffle=True if (self.seed is None and self.is_ddp is False) else False,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             drop_last=True,
-            persistent_workers=(self.num_workers > 0),
+            persistent_workers=True if self.num_workers > 0 else False,
         )
         if self.validation_dataset:
             self._ddp_barrier()
@@ -487,7 +469,6 @@ class Confinement_Mode_Data(
                 shuffle=False,
                 drop_last=True,
             ) if self.is_ddp else None
-            # self.valid_sampler = None
             self.valid_loader = torch.utils.data.DataLoader(
                 dataset=self.validation_dataset,
                 sampler=self.valid_sampler,

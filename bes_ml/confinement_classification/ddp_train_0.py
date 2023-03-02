@@ -61,7 +61,7 @@ class Trainer(
             return losses
 
 if __name__=='__main__':
-
+    
     WORLD_SIZE = int(os.environ.get('SLURM_NTASKS'))
     WORLD_RANK = int(os.environ.get('SLURM_PROCID'))
     LOCAL_RANK = int(os.environ.get('SLURM_LOCALID'))
@@ -77,15 +77,15 @@ if __name__=='__main__':
     )
 
     Trainer(
-        # num_workers=1,
+        # num_workers=0,
         # pin_memory=False,
-        max_events = 100,
-        data_location = '/global/homes/k/kevinsg/m3586/kgill/bes-ml/bes_data/sample_data/kgill_data/balanced_6x8/confinement_data.hdf5',
+        # max_events = 100,
+        data_location = '/global/homes/k/kevinsg/m3586/kgill/bes-ml/bes_data/sample_data/kgill_data/small_confinement_data.hdf5',
         signal_window_size=128,
         batch_size=256,
         fraction_test=0,
-        fraction_validation=0.5,
-        n_epochs=2,
+        fraction_validation=0,
+        n_epochs=350,
         do_train=True,
         dense_num_kernels=8,
         fft_num_kernels=8,

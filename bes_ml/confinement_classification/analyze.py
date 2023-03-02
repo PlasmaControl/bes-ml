@@ -16,10 +16,12 @@ try:
     from ..base.sampler import RandomBatchSampler, SequentialBatchSampler
     from ...bes_data.confinement_data_tools.dataset import ConfinementDataset
     from .confinement_data_v2 import ConfinementDataset
+    from .confinement_mode_data import Confinement_Mode_Dataset
 except ImportError:
     from bes_ml.base.analyze_base import Analyzer_Base
     from bes_ml.base.sampler import RandomBatchSampler, SequentialBatchSampler
     from bes_ml.confinement_classification.confinement_data_v2 import ConfinementDataset
+    from bes_ml.confinement_classification.confinement_mode_data import Confinement_Mode_Dataset
 
 @dataclasses.dataclass
 class Analyzer(Analyzer_Base):
@@ -43,39 +45,47 @@ class Analyzer(Analyzer_Base):
 
             signals = self.test_data['signals']
             labels = self.test_data['labels']
-            time = self.test_data['time']
+            sample_indices = self.test_data['sample_indices']
 
-            signals = np.array(self.test_data['signals'])
-            labels = np.array(self.test_data['labels'])
-            # one_hot_labels = np.zeros((len(self.test_data['labels']), 4))
-            # for i in range(len(labels)):
-            #     one_hot_labels[i][labels[i]] = 1
-            # labels = np.array(one_hot_labels)
-            # breakpoint()
+            # signals = np.array(self.test_data['signals'])
+            # labels = np.array(self.test_data['labels'])
 
-            confinement_test_dataset = ConfinementDataset(
-                data_location=self.inputs['data_location'],
-                signal_window_size=self.inputs['signal_window_size'],
-                batch_size=self.inputs['batch_size'],
-                dataset_to_ram=self.inputs['dataset_to_ram'],
-                state='test',
-            )
-
-            confinement_test_dataset.load_datasets(signals=signals, labels=labels, time=time)
-
-            test_data_loader = DataLoader(
-                confinement_test_dataset,
-                batch_size=None,  # must be disabled when using samplers
-                sampler=BatchSampler(
-                    RandomBatchSampler(
-                        confinement_test_dataset,
-                        self.inputs['batch_size'],
-                        self.inputs['signal_window_size'],
-                    ),
-                    batch_size=self.inputs['batch_size'],
-                    drop_last=True,
+            confinement_mode_test_dataset = Confinement_Mode_Dataset(
+                    signals=signals,
+                    labels=labels,
+                    sample_indices=sample_indices,
+                    signal_window_size=self.inputs['signal_window_size'],
                 )
-            )
+            # confinement_test_dataset = ConfinementDataset(
+            #     data_location=self.inputs['data_location'],
+            #     signal_window_size=self.inputs['signal_window_size'],
+            #     batch_size=self.inputs['batch_size'],
+            #     dataset_to_ram=self.inputs['dataset_to_ram'],
+            #     state='test',
+            # )
+
+            # confinement_test_dataset.load_datasets(signals=signals, labels=labels, time=time)
+            test_data_loader = torch.utils.data.DataLoader(
+                dataset=confinement_mode_test_dataset,
+                batch_size=self.inputs['batch_size'],
+                shuffle=False,
+                num_workers=2 if torch.cuda.is_available() else 0,
+                pin_memory=False,
+                drop_last=False,
+                )
+            # test_data_loader = DataLoader(
+            #     confinement_test_dataset,
+            #     batch_size=None,  # must be disabled when using samplers
+            #     sampler=BatchSampler(
+            #         RandomBatchSampler(
+            #             confinement_test_dataset,
+            #             self.inputs['batch_size'],
+            #             self.inputs['signal_window_size'],
+            #         ),
+            #         batch_size=self.inputs['batch_size'],
+            #         drop_last=True,
+            #     )
+            # )
 
             predictions = np.empty((len(test_data_loader) * self.inputs['batch_size'], 4), dtype=np.float32)
             # predictions = []
@@ -83,6 +93,7 @@ class Analyzer(Analyzer_Base):
             for i_batch, (batch_signals, batch_labels) in enumerate(test_data_loader):
                 batch_signals = batch_signals.to(self.device)
                 batch_predictions = self.model(batch_signals)
+                # breakpoint()
                 predictions[i_batch * self.inputs['batch_size']:(i_batch + 1) * self.inputs['batch_size']] = \
                     batch_predictions.cpu().numpy()
                 # for file_signals, file_labels in zip(batch_signals, batch_labels):

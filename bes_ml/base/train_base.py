@@ -125,6 +125,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
         self.logger.info(f"Setup time {time.time() - t_start_setup:.1f} s")
 
         if self.do_train:
+            # torch.cuda.set_device(self.world_rank)
             self.train()
 
     def _ddp_barrier(self):
@@ -529,7 +530,6 @@ class Trainer_Base(Trainer_Base_Dataclass):
                 if is_train:
                     self.optimizer.zero_grad()
                 # predictions are floats: regression scalars or classification logits
-                
                 predictions = self._model_alias(signal_windows)
                 if self.is_regression:
                     labels = labels.type_as(predictions)

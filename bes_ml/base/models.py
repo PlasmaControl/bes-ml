@@ -23,7 +23,7 @@ except ImportError:
 
 @dataclasses.dataclass(eq=False)
 class _Base_Features_Dataclass:
-    signal_window_size: int = 256  # power of 2; ~16-512
+    signal_window_size: int = 128  # power of 2; ~16-512
     time_slice_interval: int = 1  # power of 2; time domain slice interval (i.e. time[::interval])
     spatial_pool_size: int = 1  # power of 2; spatial pooling size
     time_pool_size: int = 1  # power of 2; time pooling size

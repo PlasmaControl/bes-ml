@@ -2,12 +2,12 @@
 
 #SBATCH --account=m3586
 #SBATCH --constraint=gpu
-#SBATCH --time=01:30:00
-#SBATCH --qos=regular
+#SBATCH --time=00:30:00
+#SBATCH --qos=debug
 
 #SBATCH --array=0-0%8
 
-#SBATCH --nodes=2
+#SBATCH --nodes=4
 #SBATCH --ntasks-per-node=4
 #SBATCH --cpus-per-task=32
 #SBATCH --gpus-per-node=4
