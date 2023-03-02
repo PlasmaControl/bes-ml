@@ -136,12 +136,14 @@ class ELM_Data(
 
         self._ddp_barrier()
         self.logger.info(f"Training data ELM events: {training_elms.size}")
+        self._memory_diagnostics()
         self.train_data = self._preprocess_data(
             elm_indices=training_elms,
             shuffle_indices=True,
             oversample_active_elm=self.oversample_active_elm if self.is_classification else False,
             is_train_data=True,
         )
+        self._memory_diagnostics()
 
         if n_validation_elms:
             self._ddp_barrier()
@@ -150,6 +152,7 @@ class ELM_Data(
                 elm_indices=validation_elms,
                 save_filename='validation_elms',
             )
+            self._memory_diagnostics()
         else:
             self.logger.info("Skipping validation data")
             self.validation_data = None
@@ -443,6 +446,7 @@ class ELM_Data(
     def _make_datasets(self) -> None:
         self._ddp_barrier()
         self.logger.info('Making datasets')
+        self._memory_diagnostics()
         self.train_dataset = ELM_Dataset(
             signals=self.train_data[0],
             labels=self.train_data[1],
@@ -450,6 +454,7 @@ class ELM_Data(
             signal_window_size = self.signal_window_size,
             prediction_horizon=self.prediction_horizon if hasattr(self, 'prediction_horizon') else 0,
         )
+        self._memory_diagnostics()
 
         self._ddp_barrier()
         self.validation_dataset = ELM_Dataset(
@@ -467,6 +472,7 @@ class ELM_Data(
             shuffle=(self.seed is None),
             drop_last=True,
         ) if self.is_ddp else None
+        self._memory_diagnostics()
         self.train_loader = torch.utils.data.DataLoader(
             dataset=self.train_dataset,
             sampler=self.train_sampler,
@@ -477,6 +483,7 @@ class ELM_Data(
             drop_last=True,
             persistent_workers=(self.num_workers > 0),
         )
+        self._memory_diagnostics()
         if self.validation_dataset:
             self._ddp_barrier()
             self.valid_sampler = torch.utils.data.DistributedSampler(
