@@ -405,6 +405,9 @@ class Trainer_Base(Trainer_Base_Dataclass):
 
             # end train/validation block
 
+            training_time = time.time() - t_start_training
+            self.results['training_time'] = training_time
+
             # step LR scheduler
             self.lr_scheduler.step(loss)
 
@@ -443,9 +446,6 @@ class Trainer_Base(Trainer_Base_Dataclass):
                                 ['mean', 'stdev', 'skew', 'kurt'],
                         ):
                             self.results[module_attr_name][stat_name].append(stat_value)
-
-                training_time = time.time() - t_start_training
-                self.results['training_time'] = training_time
 
                 # save results to yaml
                 with (self.output_dir / self.results_file).open('w') as results_file:
