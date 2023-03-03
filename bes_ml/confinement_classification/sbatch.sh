@@ -3,7 +3,7 @@
 #SBATCH --account=m3586
 #SBATCH --constraint=gpu
 #SBATCH --qos=debug
-#SBATCH --time=00:30:00
+#SBATCH --time=00:15:00
 
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -19,7 +19,7 @@ cd ${HOME}/ml/scratch || exit
 echo $PWD
 
 START_TIME=$(date +%s)
-srun python ${SLURM_SUBMIT_DIR}/train_v2.py
+srun python ${SLURM_SUBMIT_DIR}/train_v4.py
 EXIT_CODE=$?
 END_TIME=$(date +%s)
 ELAPSED=$(( END_TIME - START_TIME ))

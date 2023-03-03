@@ -75,11 +75,13 @@ class Trainer(
 
 if __name__=='__main__':
     Trainer(
-        data_location = '/global/homes/k/kevinsg/m3586/kgill/bes-ml/bes_data/sample_data/kgill_data/balanced_6x8/confinement_data.hdf5',
+        data_location = '/global/homes/k/kevinsg/m3586/kgill/bes-ml/bes_data/sample_data/kgill_data/large_confinement_data.hdf5',
+        max_events=3,
         signal_window_size=128,
         batch_size=256,
         n_epochs=1,
         fraction_test=0,
+        # fraction_validation=0,
         dense_num_kernels=8,
         fft_num_kernels=8,
         fft_subwindows=2,

@@ -1,6 +1,3 @@
 *.out
-*.hdf5
-../../bes_data/sample_data/kgill_data/merge.py
-../../bes_data/sample_data/kgill_data/split.py
 old/
 5841440_0_run_dir_/
