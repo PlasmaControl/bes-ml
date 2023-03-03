@@ -1,10 +1,13 @@
+from __future__ import annotations
 from pathlib import Path
 import shutil
+import datetime
 from typing import Union, Sequence
 import subprocess
 from typing import Callable
 
 import numpy as np
+from scipy import stats
 import matplotlib.pyplot as plt
 import seaborn as sns
 import yaml
@@ -42,6 +45,18 @@ def open_study(
     assert study_name and db_url
 
     study = optuna.load_study(study_name=study_name, storage=db_url)
+
+    storage = study._storage
+
+    failed_trial_time_limit = datetime.timedelta(hours=13)
+
+    for trial in study.get_trials():
+        if trial.state is optuna.trial.TrialState.RUNNING:
+            time_since_start = datetime.datetime.now() - trial.datetime_start
+            # print(time_since_start)
+            if time_since_start > failed_trial_time_limit:
+                print(f"Trial {trial.number} start: {time_since_start}, setting to `FAIL`")
+                storage.set_trial_state_values(trial._trial_id, optuna.trial.TrialState.FAIL)
 
     return study
 
@@ -269,16 +284,34 @@ def summarize_study(
     )
 
     trials = study.get_trials()
+    best_values = {}
     for trial in trials:
-        tmp = f"  Trial {trial.number}  state {trial.state}"
+        tmp = f"  Trial {trial.number:3d}  {trial.state.name:8s}"
         if trial.state is optuna.trial.TrialState.FAIL:
             continue
-        if 'train_score' in trial.user_attrs:
-            tmp += f"  ep {len(trial.user_attrs['train_score'])}"
-            tmp += f"  train_score {trial.user_attrs['train_score'][-1]:.4f}"
-            if 'valid_score' in trial.user_attrs:
-                tmp += f"  valid_score {trial.user_attrs['valid_score'][-1]:.4f}"
+        values = np.array(list(trial.intermediate_values.values()))
+        tmp += f"  Ep {values.size:3d}"
+        if len(values>0):
+            tmp += f"  Score last/best {values[-1]:.3f}/{values.max():.3f}"
+        if values.size > 40:
+            lg = stats.linregress(y=values[-15:], x=range(15))
+            tmp += f"  Final slope {lg.slope*1e3:.3f}"
+        if trial.state is optuna.trial.TrialState.RUNNING:
+            duration = datetime.datetime.now() - trial.datetime_start
+            tmp += f"  Time {duration} (running)"
+        else:
+            best_values[trial.number] = values.max()
+            duration = trial.datetime_complete - trial.datetime_start
+            tmp += f"  Time {duration}"
         print(tmp)
+
+    median_value = np.quantile(list(best_values.values()), 0.5)
+    print(f"Median best value: {median_value:.3f}")
+
+    sorted_trial_ids = sorted(list(best_values.keys()), key=best_values.get, reverse=True)
+    print("Top trials")
+    for i in sorted_trial_ids[0:10]:
+        print(f"  Trial {i:3d} best score {best_values[i]:.3f}")
 
     print(f"Total trials: {len(trials)}")
 
@@ -291,7 +324,7 @@ def summarize_study(
     ]:
         n_state = sum([int(trial.state == state) for trial in trials])
         count += n_state
-        print(f"{state} trial count: {n_state}")
+        print(f"{state.name} trial count: {n_state}")
 
     assert count == len(trials)
 

@@ -94,8 +94,8 @@ class Trainer_Base(Trainer_Base_Dataclass):
         self.output_dir.mkdir(exist_ok=True, parents=True)
 
         # multi-GPU/multi-node with python DistributedDataParallel (ddp)
-        assert self.local_rank <= self.world_rank
         assert self.world_rank < self.world_size
+        assert self.local_rank <= self.world_rank
         self.is_ddp = self.world_size > 1
         self.is_main_process = self.world_rank == 0
 
@@ -118,7 +118,9 @@ class Trainer_Base(Trainer_Base_Dataclass):
         self._make_model()
         self._setup_device()
         self._make_optimizer_scheduler()
+        self._memory_diagnostics()
         self._prepare_data()  # implement in data class; e.g. ELMs, confinement mode, velocimetry
+        self._memory_diagnostics()
 
         # validate data loaders
         for data_loader in [self.train_loader, self.valid_loader]:
@@ -153,6 +155,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
                     self.logger.info(f"    Data {mem.data//(1024**2)} MB")
                     self.logger.info(f"    Swap {mem.swap//(1024**2)} MB")
                     self.logger.info(f"    Lib {mem.lib//(1024**2)} MB")
+
 
     def _ddp_barrier(self):
         if self.is_ddp:
@@ -194,7 +197,8 @@ class Trainer_Base(Trainer_Base_Dataclass):
             cls = self.__class__
             self.logger.info(f"Class {cls.__name__} parameters:")
             cls_fields = sorted(dataclasses.fields(cls), key=lambda field: field.name)
-            self_fields_dict = dataclasses.asdict(self)
+            # self_fields_dict = dataclasses.asdict(self)
+            self_fields_dict = dict((field.name, getattr(self, field.name)) for field in dataclasses.fields(self))
             assert set([field.name for field in cls_fields]) == set(self_fields_dict.keys())
             for field in cls_fields:
                 if field.name in ['logger', '_ddp_barrier']:
@@ -208,7 +212,8 @@ class Trainer_Base(Trainer_Base_Dataclass):
     def _save_inputs_to_yaml(self):
         if self.is_main_process:
             filename = Path(self.output_dir / self.inputs_file)
-            self_fields_dict = dataclasses.asdict(self)
+            # self_fields_dict = dataclasses.asdict(self)
+            self_fields_dict = dict((field.name, getattr(self, field.name)) for field in dataclasses.fields(self))
             for skip_key in ['logger', 'optuna_trial', '_ddp_barrier']:
                 self_fields_dict.pop(skip_key)
             for key in self_fields_dict:
@@ -341,9 +346,9 @@ class Trainer_Base(Trainer_Base_Dataclass):
                 [self.train_sampler, self.valid_sampler],
             ):
                 # self._ddp_barrier()
-                if data_loader is None:
+                if not data_loader:
                     continue  # skip if validation data is empty
-                if sampler is not None:
+                if sampler:
                     sampler.set_epoch(i_epoch)
                 # loss and predictions
                 loss, predictions, labels = self._single_epoch_loop(
@@ -373,7 +378,6 @@ class Trainer_Base(Trainer_Base_Dataclass):
                         ).item()
 
                 if self.is_ddp:
-                    # self._ddp_barrier()
                     tmp = torch.tensor([score], device=self.device) / self.world_size
                     torch.distributed.all_reduce(tmp)
                     score = tmp.item()
@@ -399,49 +403,50 @@ class Trainer_Base(Trainer_Base_Dataclass):
                         valid_roc = roc
                         self.results['valid_roc'].append(valid_roc)
 
-                # end train/validation block
-
-            # step LR scheduler
-            self.lr_scheduler.step(loss)
-
-            # log training time
-            self.results['epoch_time'].append(time.time() - t_start_epoch)
-            self.results['completed_epochs'] += 1
-
-            # record layer statistics
-            for module_name, module in self.model.named_modules():
-                n_params = sum(p.numel() for p in module.parameters(recurse=False) if p.requires_grad)
-                if n_params == 0:
-                    continue
-                for attr_name in ['weight', 'bias']:
-                    attr = getattr(module, attr_name)
-                    if attr is None or attr.numel() < 3:
-                        continue
-                    mean = attr.mean().item()
-                    stdev = torch.sqrt(torch.mean((attr - mean) ** 2)).item()
-                    scores = (attr - mean) / stdev
-                    skew = torch.mean(scores ** 3).item()
-                    kurt = (torch.mean(scores ** 4) - 3).item()
-                    module_attr_name = f"{module_name}.{attr_name}"
-                    if module_attr_name not in self.results:
-                        self.results[module_attr_name] = {
-                            'size': attr.numel(),
-                            'shape': list(attr.size()),
-                            'mean': [],
-                            'stdev': [],
-                            'skew': [],
-                            'kurt': [],
-                        }
-                    for stat_value, stat_name in zip(
-                            [mean, stdev, skew, kurt],
-                            ['mean', 'stdev', 'skew', 'kurt'],
-                    ):
-                        self.results[module_attr_name][stat_name].append(stat_value)
+            # end train/validation block
 
             training_time = time.time() - t_start_training
             self.results['training_time'] = training_time
 
+            # step LR scheduler
+            self.lr_scheduler.step(loss)
+
             if self.is_main_process:
+
+                # log training time
+                self.results['epoch_time'].append(time.time() - t_start_epoch)
+                self.results['completed_epochs'] += 1
+
+                # record layer statistics
+                for module_name, module in self.model.named_modules():
+                    n_params = sum(p.numel() for p in module.parameters(recurse=False) if p.requires_grad)
+                    if n_params == 0:
+                        continue
+                    for attr_name in ['weight', 'bias']:
+                        attr = getattr(module, attr_name)
+                        if attr is None or attr.numel() < 3:
+                            continue
+                        mean = attr.mean().item()
+                        stdev = torch.sqrt(torch.mean((attr - mean) ** 2)).item()
+                        scores = (attr - mean) / stdev
+                        skew = torch.mean(scores ** 3).item()
+                        kurt = (torch.mean(scores ** 4) - 3).item()
+                        module_attr_name = f"{module_name}.{attr_name}"
+                        if module_attr_name not in self.results:
+                            self.results[module_attr_name] = {
+                                'size': attr.numel(),
+                                'shape': list(attr.size()),
+                                'mean': [],
+                                'stdev': [],
+                                'skew': [],
+                                'kurt': [],
+                            }
+                        for stat_value, stat_name in zip(
+                                [mean, stdev, skew, kurt],
+                                ['mean', 'stdev', 'skew', 'kurt'],
+                        ):
+                            self.results[module_attr_name][stat_name].append(stat_value)
+
                 # save results to yaml
                 with (self.output_dir / self.results_file).open('w') as results_file:
                     yaml.dump(
@@ -450,6 +455,15 @@ class Trainer_Base(Trainer_Base_Dataclass):
                         default_flow_style=False,
                         sort_keys=False,
                     )
+
+                # best score and save model
+                if score > best_score:
+                    best_score = score
+                    best_epoch = i_epoch
+                    self.logger.info(f"  Best score: {best_score:.4f}")
+                    self.model.save_pytorch_model(filename=self.output_dir / 'checkpoint.pytorch')
+                    if self.save_onnx_model:
+                        self.model.save_onnx_model(filename=self.output_dir / 'checkpoint.onnx')
 
             # epoch summary
             status = f"Ep {i_epoch + 1:03d}: "
@@ -465,19 +479,8 @@ class Trainer_Base(Trainer_Base_Dataclass):
             status += f"ep time {time.time() - t_start_epoch:.1f} s "
             self.logger.info(status)
 
-            # best score and save model
-            if score > best_score:
-                best_score = score
-                best_epoch = i_epoch
-                self.logger.info(f"  Best score: {best_score:.4f}")
-                if self.is_main_process:
-                    self.model.save_pytorch_model(filename=self.output_dir / 'checkpoint.pytorch')
-                    if self.save_onnx_model:
-                        self.model.save_onnx_model(filename=self.output_dir / 'checkpoint.onnx')
-
             # optuna integration; report epoch result to optuna
-            if optuna is not None and self.optuna_trial is not None:
-                self._ddp_barrier()
+            if optuna and self.optuna_trial:
                 assert np.isfinite(score)
                 report_successful = False
                 report_attempts = 1

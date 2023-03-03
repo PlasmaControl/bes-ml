@@ -107,6 +107,7 @@ if __name__=='__main__':
         fft_num_kernels=8,
         fft_subwindows=2,
         fft_nbins=2,
+        memory_diagnostics=True,
         # minibatch_print_interval=50,
         do_train=True,
     )
