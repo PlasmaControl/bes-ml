@@ -9,6 +9,7 @@ import inspect
 import dataclasses
 
 import numpy as np
+import scipy.signal
 import torch
 import torch.nn as nn
 import torchinfo
@@ -22,7 +23,7 @@ except ImportError:
 
 
 @dataclasses.dataclass(eq=False)
-class _Base_Features_Dataclass:
+class Base_Features_Dataclass:
     signal_window_size: int = 64  # power of 2; ~16-512
     time_slice_interval: int = 1  # power of 2; time domain slice interval (i.e. time[::interval])
     spatial_pool_size: int = 1  # power of 2; spatial pooling size
@@ -36,7 +37,7 @@ class _Base_Features_Dataclass:
 
 
 @dataclasses.dataclass(eq=False)
-class _Base_Features(nn.Module, _Base_Features_Dataclass):
+class Base_Features(nn.Module, Base_Features_Dataclass):
 
     def __post_init__(self):
         super().__init__()  # nn.Module.__init__()
@@ -103,12 +104,12 @@ class _Base_Features(nn.Module, _Base_Features_Dataclass):
 
 
 @dataclasses.dataclass(eq=False)
-class _Dense_Features_Dataclass(_Base_Features_Dataclass):
+class Dense_Features_Dataclass(Base_Features_Dataclass):
     dense_num_kernels: int = 0
 
 
 @dataclasses.dataclass(eq=False)
-class Dense_Features(_Dense_Features_Dataclass, _Base_Features):
+class Dense_Features(Dense_Features_Dataclass, Base_Features):
 
     def __post_init__(self):
         super().__post_init__()
@@ -131,7 +132,7 @@ class Dense_Features(_Dense_Features_Dataclass, _Base_Features):
 
 
 @dataclasses.dataclass(eq=False)
-class _CNN_Features_Dataclass(_Base_Features_Dataclass):
+class CNN_Features_Dataclass(Base_Features_Dataclass):
     cnn_layer1_num_kernels: int = 0
     cnn_layer1_kernel_time_size: int = 5  # must be odd
     cnn_layer1_kernel_spatial_size: int = 3
@@ -145,7 +146,7 @@ class _CNN_Features_Dataclass(_Base_Features_Dataclass):
 
 
 @dataclasses.dataclass(eq=False)
-class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
+class CNN_Features(CNN_Features_Dataclass, Base_Features):
 
     def __post_init__(self):
         super().__post_init__()
@@ -269,7 +270,44 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
 
 
 @dataclasses.dataclass(eq=False)
-class _FFT_Features_Dataclass(_Base_Features_Dataclass):
+class FIR_Features_Dataclass(Base_Features_Dataclass):
+    fir_num_kernels: int = 0
+    fir_taps: int = 51  # must be odd
+    fir_cutoffs: Iterable = ((0.06, 0.16),)  # in units of f_nyquist; must be shape (*, 2)
+    fir_width: float = 0.02  # in units of f_nyquist
+
+
+@dataclasses.dataclass(eq=False)
+class FIR_Features(FIR_Features_Dataclass, Base_Features):
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        assert self.fir_taps % 2 == 1, "FIR taps must be odd int"
+
+        self.fir_cutoffs = np.array(self.fir_cutoffs)
+        assert self.fir_cutoffs.shape[1] == 2, "FIR cutoffs must be shape (*,2)"
+        assert np.all(self.fir_cutoffs<1), "FIR cutoffs must be < f_nyquist"
+
+        self.n_bands = self.fir_cutoffs.shape[0]
+
+        self.b_coeffs = np.array([
+            scipy.signal.firwin(
+                numtaps=self.fir_taps,
+                cutoff=self.fir_cutoffs[i_band,:],
+                pass_zero=False,
+                width=self.fir_width,
+            ) for i_band in np.arange(self.n_bands)
+        ])
+        print(self.b_coeffs.shape, self.b_coeffs)
+
+    def forward(self, x):
+        x = self._time_interval_and_pooling(x)  # shape [ <batch>, 1, <time>, <space>, <space> ]
+        return torch.zeros(x.shape[0], self.fir_num_kernels)
+
+
+@dataclasses.dataclass(eq=False)
+class FFT_Features_Dataclass(Base_Features_Dataclass):
     fft_num_kernels: int = 0
     fft_nbins: int = 2
     fft_subwindows: int = 1
@@ -283,7 +321,7 @@ class _FFT_Features_Dataclass(_Base_Features_Dataclass):
 
 
 @dataclasses.dataclass(eq=False)
-class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
+class FFT_Features(FFT_Features_Dataclass, Base_Features):
 
     def __post_init__(self):
         super().__post_init__()
@@ -431,13 +469,13 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
 
 
 @dataclasses.dataclass(eq=False)
-class _DCT_Features_Dataclass(_Base_Features_Dataclass):
+class DCT_Features_Dataclass(Base_Features_Dataclass):
     dct_num_kernels: int = 0
     dct_nbins: int = 2
 
 
 @dataclasses.dataclass(eq=False)
-class DCT_Features(_DCT_Features_Dataclass, _Base_Features):
+class DCT_Features(DCT_Features_Dataclass, Base_Features):
 
     def __post_init__(self):
         super().__post_init__()
@@ -498,14 +536,14 @@ class DCT_Features(_DCT_Features_Dataclass, _Base_Features):
 
 
 @dataclasses.dataclass(eq=False)
-class _DWT_Features_Dataclass(_Base_Features_Dataclass):
+class DWT_Features_Dataclass(Base_Features_Dataclass):
     dwt_num_kernels: int = 0
     dwt_wavelet: str = 'db4'
     dwt_level: int = -1
 
 
 @dataclasses.dataclass(eq=False)
-class DWT_Features(_DWT_Features_Dataclass, _Base_Features):
+class DWT_Features(DWT_Features_Dataclass, Base_Features):
 
     def __post_init__(self):
         super().__post_init__()
@@ -593,11 +631,12 @@ class DWT_Features(_DWT_Features_Dataclass, _Base_Features):
 
 @dataclasses.dataclass(eq=False)
 class Multi_Features_Model_Dataclass(
-    _Dense_Features_Dataclass,
-    _CNN_Features_Dataclass,
-    _FFT_Features_Dataclass,
-    _DCT_Features_Dataclass,
-    _DWT_Features_Dataclass,
+    Dense_Features_Dataclass,
+    CNN_Features_Dataclass,
+    FFT_Features_Dataclass,
+    FIR_Features_Dataclass,
+    DCT_Features_Dataclass,
+    DWT_Features_Dataclass,
 ):
     mlp_hidden_layers: Iterable = (32, 16)  # size and number of MLP hidden layers
     mlp_output_size: int = 1
@@ -617,8 +656,9 @@ class Multi_Features_Model(
             self.fft_num_kernels == 0 and
             self.dct_num_kernels == 0 and
             self.dwt_num_kernels == 0 and
-            (self.cnn_layer1_num_kernels == 0 and self.cnn_layer2_num_kernels == 0)
-        ) is False, "All features are inactive"
+            (self.cnn_layer1_num_kernels == 0 and self.cnn_layer2_num_kernels == 0) and
+            self.fir_num_kernels == 0
+        ) is False, "No active features"
 
         if self.logger is None:
             self.logger = logging.getLogger(__name__)
@@ -656,6 +696,10 @@ class Multi_Features_Model(
             feature_kwargs = get_feature_class_parameters(CNN_Features)
             self.cnn_features = CNN_Features(**feature_kwargs)
             self.features.append(self.cnn_features)
+        if self.fir_num_kernels > 0:
+            feature_kwargs = get_feature_class_parameters(FIR_Features)
+            self.fir_features = FIR_Features(**feature_kwargs)
+            self.features.append(self.fir_features)
         assert len(self.features) > 0
 
         self.feature_count = {}
