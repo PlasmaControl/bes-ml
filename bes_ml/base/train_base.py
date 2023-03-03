@@ -8,6 +8,7 @@ import typing
 import dataclasses
 from datetime import datetime
 import time
+import psutil, os, sys
 
 # 3rd-party imports
 import yaml
@@ -64,6 +65,8 @@ class Trainer_Base_Dataclass:
     maximum_parameters: int = None
     # optuna integration
     optuna_trial: typing.Any = None  # optuna trial
+    # diagnostics
+    memory_diagnostics: bool = False
     # non-init attributes visible to subclasses
     logger: logging.Logger = dataclasses.field(default=None, init=False)
     is_regression: bool = dataclasses.field(default=None, init=False)
@@ -127,6 +130,29 @@ class Trainer_Base(Trainer_Base_Dataclass):
         if self.do_train:
             # torch.cuda.set_device(self.world_rank)
             self.train()
+
+    def _memory_diagnostics(self):
+        if self.memory_diagnostics:
+            pid = os.getpid()
+            p = psutil.Process(pid=pid)
+            with p.oneshot():
+                self.logger.info("** Memory state **")
+                self.logger.info(f"    This process PID and name: {p.pid} {p.name()}")
+                self.logger.info(f"    Threads: {p.num_threads()}")
+                for child in p.children():
+                    self.logger.info(f"    Child PID and name: {child.pid} {child.name()}")
+                for open_file in p.open_files():
+                    self.logger.info(f"    Open file: {open_file.path}")
+                mem = p.memory_full_info()
+                self.logger.info(f"    RSS {mem.rss//(1024**2)} MB (percent {p.memory_percent('rss'):.1f})")
+                self.logger.info(f"    VMS {mem.vms//(1024**2)} MB (percent {p.memory_percent('vms'):.1f})")
+                self.logger.info(f"    USS {mem.uss//(1024**2)} MB (percent {p.memory_percent('uss'):.1f})")
+                if sys.platform.startswith('linux'):
+                    self.logger.info(f"    PSS {mem.pss//(1024**2)} MB")
+                    self.logger.info(f"    Shared {mem.shared//(1024**2)} MB")
+                    self.logger.info(f"    Data {mem.data//(1024**2)} MB")
+                    self.logger.info(f"    Swap {mem.swap//(1024**2)} MB")
+                    self.logger.info(f"    Lib {mem.lib//(1024**2)} MB")
 
     def _ddp_barrier(self):
         if self.is_ddp:

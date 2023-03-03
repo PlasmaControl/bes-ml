@@ -23,7 +23,6 @@ except ImportError:
     from bes_ml.base.models import Multi_Features_Model_Dataclass
     from bes_ml.base.utilities import merge_pdfs
 
-
 @dataclasses.dataclass(eq=False)
 class Confinement_Mode_Data(
     Trainer_Base_Dataclass,
@@ -43,13 +42,6 @@ class Confinement_Mode_Data(
     clip_sigma: float = 8.0  # remove signal windows with abs(standardized_signals) > n_sigma
     data_partition_file: str = 'data_partition.yaml'  # data partition for training, valid., and testing
     max_events: int = None
-
-    def get_memory_usage(self):
-        print('RAM memory percent used:', psutil.virtual_memory()[2])
-        print('RAM Available (GB):', psutil.virtual_memory()[1]/1000000000)
-        total_memory, used_memory, free_memory = map(
-            int, os.popen('free -t -m').readlines()[-1].split()[1:])
-        print("RAM memory percent used:", round((used_memory/total_memory) * 100, 2))
 
     def _prepare_data(self) -> None:
 
@@ -129,15 +121,16 @@ class Confinement_Mode_Data(
         self._ddp_barrier()
         self.logger.info(f"Training data confinement mode events: {training_confinement_modes.size}")
 
-        if self.is_ddp:
-            i_gpu = self.local_rank
-            local_training_confinement_modes = training_confinement_modes[i_gpu::4]
-            local_validation_confinement_modes = validation_confinement_modes[i_gpu::4]
-            print(local_training_confinement_modes, local_validation_confinement_modes)
+        # if self.is_ddp:
+        #     i_gpu = self.local_rank
+        #     local_training_confinement_modes = training_confinement_modes[i_gpu::4]
+        #     local_validation_confinement_modes = validation_confinement_modes[i_gpu::4]
+        #     print(local_training_confinement_modes, local_validation_confinement_modes)
 
 
         self.train_data = self._preprocess_data(
-            indices=local_training_confinement_modes if self.is_ddp else training_confinement_modes,
+            # indices=local_training_confinement_modes if self.is_ddp else training_confinement_modes,
+            indices=training_confinement_modes,
             shuffle_indices=True,
             # oversample_active_elm=self.oversample_active_elm if self.is_classification else False,
             is_train_data=True,
@@ -147,7 +140,8 @@ class Confinement_Mode_Data(
             self._ddp_barrier()
             self.logger.info(f"Validation data confinement mode events: {validation_confinement_modes.size}")
             self.validation_data = self._preprocess_data(
-                indices=local_validation_confinement_modes if self.is_ddp else validation_confinement_modes,
+                # indices=local_validation_confinement_modes if self.is_ddp else validation_confinement_modes,
+                indices=validation_confinement_modes,
                 # save_filename='validation_confinement_modes',
             )
         else:
@@ -198,6 +192,7 @@ class Confinement_Mode_Data(
                 if i_confinement_mode%10 == 0:
                     self.logger.info(f"  confinement mode event {i_confinement_mode:04d}/{indices.size:04d}")
                     # self.get_memory_usage()
+                    self._memory_diagnostics()
                 confinement_mode_key = f"{confinement_mode_index:05d}"
                 confinement_mode_event = h5_file[confinement_mode_key]
                 signals = np.array(confinement_mode_event["signals"], dtype=np.float32)  # (48, <time>)
@@ -238,17 +233,44 @@ class Confinement_Mode_Data(
 
         self.logger.info('  Finished reading confinement mode event data')
 
-        packaged_labels = np.concatenate([confinement_mode['labels'] for confinement_mode in confinement_mode_data], axis=0)
-        packaged_signals = np.concatenate([confinement_mode['signals'] for confinement_mode in confinement_mode_data], axis=0)
-        packaged_valid_t0 = np.concatenate([confinement_mode['valid_t0'] for confinement_mode in confinement_mode_data], axis=0)
         index_count = 0
         packaged_window_start = np.array([], dtype=int)
         for confinement_mode in confinement_mode_data:
+            self._memory_diagnostics()
             packaged_window_start = np.append(
                 packaged_window_start,
                 index_count,
             )
             index_count += confinement_mode['labels'].size
+        
+        self._memory_diagnostics()
+        packaged_labels = np.concatenate([confinement_mode['labels'] for confinement_mode in confinement_mode_data], axis=0)
+        # packaged_signals = np.concatenate([confinement_mode['signals'] for confinement_mode in confinement_mode_data], axis=0)
+        packaged_valid_t0 = np.concatenate([confinement_mode['valid_t0'] for confinement_mode in confinement_mode_data], axis=0)
+        self._memory_diagnostics()
+        packaged_signals = np.empty([packaged_labels.shape[0], 6, 8])
+        start_index = 0
+        while len(confinement_mode_data)>0:
+            self._memory_diagnostics()
+            confinement_mode = confinement_mode_data.pop(0)
+            signals = confinement_mode['signals']
+            packaged_signals[start_index:start_index+signals.shape[0]] = signals
+            start_index = signals.shape[0]
+            del confinement_mode
+
+        self._memory_diagnostics()
+
+        # breakpoint()
+
+        # index_count = 0
+        # packaged_window_start = np.array([], dtype=int)
+        # for confinement_mode in confinement_mode_data:
+        #     self._memory_diagnostics()
+        #     packaged_window_start = np.append(
+        #         packaged_window_start,
+        #         index_count,
+        #     )
+        #     index_count += confinement_mode['labels'].size
 
         assert packaged_labels.size == packaged_valid_t0.size
 

@@ -60,7 +60,8 @@ class Analyzer_Base(
         model_kwargs = {field.name: self.inputs[field.name] for field in fields if field.init}
         self.model = Multi_Features_Model(**model_kwargs)
         self.model = self.model.to(self.device)
-        checkpoint_file = self.output_dir / self.inputs['checkpoint_file']
+        # checkpoint_file = self.output_dir / self.inputs['checkpoint_file']
+        checkpoint_file = self.output_dir / 'checkpoint.pytorch'
         assert checkpoint_file.exists(), f"{checkpoint_file} does not exist"
         model_state_dict = torch.load(
             checkpoint_file,

@@ -80,7 +80,7 @@ if __name__=='__main__':
         # num_workers=0,
         # pin_memory=False,
         # max_events = 100,
-        data_location = '/global/homes/k/kevinsg/m3586/kgill/bes-ml/bes_data/sample_data/kgill_data/small_confinement_data.hdf5',
+        data_location = '/global/homes/k/kevinsg/m3586/kgill/bes-ml/bes_data/sample_data/kgill_data/large_confinement_data.hdf5',
         signal_window_size=128,
         batch_size=256,
         fraction_test=0,
@@ -95,5 +95,6 @@ if __name__=='__main__':
         world_size = WORLD_SIZE,
         world_rank = WORLD_RANK,
         local_rank = LOCAL_RANK,
+        memory_diagnostics=True,
         # log_all_ranks = True,
     )
