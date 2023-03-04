@@ -13,6 +13,7 @@ import scipy.signal
 import torch
 import torch.nn as nn
 import torchinfo
+import torchaudio
 import pywt
 from pytorch_wavelets.dwt.transform1d import DWT1DForward
 
@@ -291,18 +292,29 @@ class FIR_Features(FIR_Features_Dataclass, Base_Features):
 
         self.n_bands = self.fir_cutoffs.shape[0]
 
-        self.b_coeffs = np.array([
+        self.b_coeffs = torch.tensor([
             scipy.signal.firwin(
                 numtaps=self.fir_taps,
                 cutoff=self.fir_cutoffs[i_band,:],
                 pass_zero=False,
                 width=self.fir_width,
             ) for i_band in np.arange(self.n_bands)
-        ])
-        print(self.b_coeffs.shape, self.b_coeffs)
+        ], dtype=torch.float32)
+        self.a_coeffs = torch.zeros_like(self.b_coeffs)
+        self.a_coeffs[:,0] = 1
+        # print(self.b_coeffs.shape, self.b_coeffs.dtype, self.b_coeffs)
+        # print(self.a_coeffs.shape, self.a_coeffs.dtype, self.a_coeffs)
 
     def forward(self, x):
         x = self._time_interval_and_pooling(x)  # shape [ <batch>, 1, <time>, <space>, <space> ]
+        output = torchaudio.functional.lfilter(
+            waveform=x.movedim((1,2), (3,4)),
+            a_coeffs=self.a_coeffs,
+            b_coeffs=self.b_coeffs,
+            clamp=False,
+            batching=False,
+        ).squeeze().movedim((-2,-1), (1,2))
+        # print(x.shape, output.shape)
         return torch.zeros(x.shape[0], self.fir_num_kernels)
 
 

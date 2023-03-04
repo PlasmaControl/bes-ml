@@ -99,7 +99,7 @@ class Trainer(
 if __name__=='__main__':
     Trainer(
         # data_location= '/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
-        # max_elms=500,
+        # max_elms=5,
         signal_window_size=128,
         batch_size=128,
         fraction_test=0,
@@ -110,6 +110,11 @@ if __name__=='__main__':
             [0.25, 0.35],
         ],
         dense_num_kernels=8,
+        # standardize_fft=False,
+        # standardize_signals=False,
+        # clip_sigma=None,
+        # normalize_labels=False,
+        debug=True,
         fft_num_kernels=8,
         fft_subwindows=2,
         fft_nbins=2,
