@@ -126,9 +126,14 @@ class Dense_Features(Dense_Features_Dataclass, Base_Features):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.debug:
+            assert torch.all(torch.isfinite(self.conv.bias))
+            assert torch.all(torch.isfinite(self.conv.weight))
         x = self._time_interval_and_pooling(x)
         x = self.conv(x)
         x = self._flatten_activation_dropout(x)
+        if self.debug:
+            assert torch.all(torch.isfinite(x))
         return x
 
 
@@ -143,7 +148,12 @@ class CNN_Features_Dataclass(Base_Features_Dataclass):
     cnn_layer2_kernel_time_size: int = 5  # must be odd
     cnn_layer2_kernel_spatial_size: int = 3
     cnn_layer2_maxpool_time_size: int = 4  # must be power of 2
-    cnn_layer2_maxpool_spatial_size: int = 2  # must be power of 2
+    cnn_layer2_maxpool_spatial_size: int = 1  # must be power of 2
+    # FIR filter
+    cnn_fir_taps: int = None  # must be odd
+    cnn_fir_cutoffs: Iterable = ((0.06, 0.16),)  # in units of f_nyquist; must be shape (*, 2)
+    cnn_fir_width: float = 0.02  # in units of f_nyquist
+    cnn_fir_include_raw: bool = True  # add raw signal to FIR output
 
 
 @dataclasses.dataclass(eq=False)
@@ -151,6 +161,31 @@ class CNN_Features(CNN_Features_Dataclass, Base_Features):
 
     def __post_init__(self):
         super().__post_init__()
+
+        if self.cnn_fir_taps:
+            assert self.cnn_fir_taps % 2 == 1, "FIR taps must be odd int"
+            self.cnn_fir_cutoffs = np.array(self.cnn_fir_cutoffs)
+            assert self.cnn_fir_cutoffs.shape[1] == 2, "FIR cutoffs must be shape (*,2)"
+            assert np.all(self.cnn_fir_cutoffs<1), "FIR cutoffs must be < f_nyquist"
+            self.n_bands = self.cnn_fir_cutoffs.shape[0]
+            self.b_coeffs = torch.tensor([
+                scipy.signal.firwin(
+                    numtaps=self.cnn_fir_taps,
+                    cutoff=self.cnn_fir_cutoffs[i_band,:],
+                    pass_zero=False,
+                    width=self.cnn_fir_width,
+                ) for i_band in np.arange(self.n_bands)
+            ], dtype=torch.float32)
+            self.a_coeffs = torch.zeros_like(self.b_coeffs)
+            self.a_coeffs[:,0] = 1
+            # if self.debug:
+            #     self.logger.info(self.b_coeffs.shape, self.b_coeffs.dtype, self.b_coeffs)
+            #     self.logger.info(self.a_coeffs.shape, self.a_coeffs.dtype, self.a_coeffs)
+            self.in_channels = self.n_bands
+            if self.cnn_fir_include_raw:
+                self.in_channels += 1
+        else:
+            self.in_channels = 1
 
         assert (
             np.log2(self.cnn_layer1_maxpool_spatial_size).is_integer() and
@@ -177,7 +212,7 @@ class CNN_Features(CNN_Features_Dataclass, Base_Features):
 
         # Conv #1
         self.layer1_conv = nn.Conv3d(
-            in_channels=1,
+            in_channels=self.in_channels,
             out_channels=self.cnn_layer1_num_kernels,
             kernel_size=(
                 self.cnn_layer1_kernel_time_size,
@@ -186,6 +221,8 @@ class CNN_Features(CNN_Features_Dataclass, Base_Features):
             ),
             padding=((self.cnn_layer1_kernel_time_size-1)//2, 0, 0),  # pad time dimension
         )
+        if self.debug:
+            self.logger.info(f"Conv1 layer size {self.layer1_conv.weight.shape}")
         data_shape = [
             self.cnn_layer1_num_kernels,
             data_shape[1],  # time dim unchanged due to padding
@@ -227,6 +264,8 @@ class CNN_Features(CNN_Features_Dataclass, Base_Features):
             ),
             padding=((self.cnn_layer2_kernel_time_size-1)//2, 0, 0),
         )
+        if self.debug:
+            self.logger.info(f"Conv2 layer size {self.layer2_conv.weight.shape}")
         data_shape = [
             self.cnn_layer2_num_kernels,
             data_shape[1],
@@ -261,6 +300,24 @@ class CNN_Features(CNN_Features_Dataclass, Base_Features):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self._time_interval_and_pooling(x)
+        if self.cnn_fir_taps:
+            # apply FIR filters
+            x_filtered = torchaudio.functional.lfilter(
+                waveform=x.movedim((-4,-3), (-2,-1)),
+                a_coeffs=self.a_coeffs,
+                b_coeffs=self.b_coeffs,
+                clamp=False,
+                batching=False,
+            ).squeeze(dim=-3).movedim((-2,-1), (-4,-3))
+            if self.debug:
+                assert x_filtered.shape[-4] == self.n_bands
+                assert np.array_equal(x.shape[-3:], x_filtered.shape[-3:]), "FIR filter malfunctioned"
+            if self.cnn_fir_include_raw:
+                x_filtered = torch.concat((x_filtered, x), dim=-4)
+                if self.debug:
+                    self.logger.info(f'x shape {x.shape}  x_filtered shape {x_filtered.shape}')
+                    assert x_filtered.shape[-4] == self.n_bands + 1
+            x = x_filtered
         x = self.activation(self.dropout(self.layer1_conv(x)))
         x = self.layer1_maxpool(x)
         x = self.activation(self.dropout(self.layer2_conv(x)))
@@ -276,6 +333,16 @@ class FIR_Features_Dataclass(Base_Features_Dataclass):
     fir_taps: int = 51  # must be odd
     fir_cutoffs: Iterable = ((0.06, 0.16),)  # in units of f_nyquist; must be shape (*, 2)
     fir_width: float = 0.02  # in units of f_nyquist
+    fir_layer1_num_kernels: int = 0
+    fir_layer1_kernel_time_size: int = 5  # must be odd
+    fir_layer1_kernel_spatial_size: int = 3
+    fir_layer1_maxpool_time_size: int = 4  # must be power of 2
+    fir_layer1_maxpool_spatial_size: int = 1  # must be power of 2
+    fir_layer2_num_kernels: int = 0
+    fir_layer2_kernel_time_size: int = 5  # must be odd
+    fir_layer2_kernel_spatial_size: int = 3
+    fir_layer2_maxpool_time_size: int = 4  # must be power of 2
+    fir_layer2_maxpool_spatial_size: int = 2  # must be power of 2
 
 
 @dataclasses.dataclass(eq=False)
@@ -285,13 +352,10 @@ class FIR_Features(FIR_Features_Dataclass, Base_Features):
         super().__post_init__()
 
         assert self.fir_taps % 2 == 1, "FIR taps must be odd int"
-
         self.fir_cutoffs = np.array(self.fir_cutoffs)
         assert self.fir_cutoffs.shape[1] == 2, "FIR cutoffs must be shape (*,2)"
         assert np.all(self.fir_cutoffs<1), "FIR cutoffs must be < f_nyquist"
-
         self.n_bands = self.fir_cutoffs.shape[0]
-
         self.b_coeffs = torch.tensor([
             scipy.signal.firwin(
                 numtaps=self.fir_taps,
@@ -302,19 +366,25 @@ class FIR_Features(FIR_Features_Dataclass, Base_Features):
         ], dtype=torch.float32)
         self.a_coeffs = torch.zeros_like(self.b_coeffs)
         self.a_coeffs[:,0] = 1
-        # print(self.b_coeffs.shape, self.b_coeffs.dtype, self.b_coeffs)
-        # print(self.a_coeffs.shape, self.a_coeffs.dtype, self.a_coeffs)
+        if self.debug:
+            self.logger.info(self.b_coeffs.shape, self.b_coeffs.dtype, self.b_coeffs)
+            self.logger.info(self.a_coeffs.shape, self.a_coeffs.dtype, self.a_coeffs)
 
     def forward(self, x):
         x = self._time_interval_and_pooling(x)  # shape [ <batch>, 1, <time>, <space>, <space> ]
-        output = torchaudio.functional.lfilter(
-            waveform=x.movedim((1,2), (3,4)),
+        # apply FIR filters
+        x_filtered = torchaudio.functional.lfilter(
+            waveform=x.movedim((-4,-3), (-2,-1)),
             a_coeffs=self.a_coeffs,
             b_coeffs=self.b_coeffs,
             clamp=False,
             batching=False,
-        ).squeeze().movedim((-2,-1), (1,2))
-        # print(x.shape, output.shape)
+        ).squeeze().movedim((-2,-1), (-4,-3))
+        if self.debug:
+            assert x_filtered.shape[-4] == self.n_bands
+            assert np.array_equal(x.shape[-3:], x_filtered.shape[-3:]), "FIR filter malfunctioned"
+        if self.debug:
+            assert torch.all(torch.isfinite(x))
         return torch.zeros(x.shape[0], self.fir_num_kernels)
 
 
