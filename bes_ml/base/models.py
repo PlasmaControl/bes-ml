@@ -168,19 +168,16 @@ class CNN_Features(CNN_Features_Dataclass, Base_Features):
             assert self.cnn_fir_cutoffs.shape[1] == 2, "FIR cutoffs must be shape (*,2)"
             assert np.all(self.cnn_fir_cutoffs<1), "FIR cutoffs must be < f_nyquist"
             self.n_bands = self.cnn_fir_cutoffs.shape[0]
-            self.b_coeffs = torch.tensor([
+            self.b_coeffs = torch.tensor(np.array([
                 scipy.signal.firwin(
                     numtaps=self.cnn_fir_taps,
                     cutoff=self.cnn_fir_cutoffs[i_band,:],
                     pass_zero=False,
                     width=self.cnn_fir_width,
                 ) for i_band in np.arange(self.n_bands)
-            ], dtype=torch.float32)
+            ]), dtype=torch.float32)
             self.a_coeffs = torch.zeros_like(self.b_coeffs)
             self.a_coeffs[:,0] = 1
-            # if self.debug:
-            #     self.logger.info(self.b_coeffs.shape, self.b_coeffs.dtype, self.b_coeffs)
-            #     self.logger.info(self.a_coeffs.shape, self.a_coeffs.dtype, self.a_coeffs)
             self.in_channels = self.n_bands
             if self.cnn_fir_include_raw:
                 self.in_channels += 1
@@ -206,6 +203,8 @@ class CNN_Features(CNN_Features_Dataclass, Base_Features):
         self.logger.info("CNN transformation")
         data_shape = [1] + self._input_size_after_timeslice_pooling
         self.logger.info(f"  Input after pre-pooling, pre-slicing: {data_shape}")
+        data_shape[0] = self.in_channels
+        self.logger.info(f"  Input with FIR and/or raw: {data_shape}")
 
         def test_bad_shape(shape):
             assert np.all(np.array(shape) >= 1), f"Bad shape: {shape}"
@@ -222,7 +221,7 @@ class CNN_Features(CNN_Features_Dataclass, Base_Features):
             padding=((self.cnn_layer1_kernel_time_size-1)//2, 0, 0),  # pad time dimension
         )
         if self.debug:
-            self.logger.info(f"Conv1 layer size {self.layer1_conv.weight.shape}")
+            self.logger.info(f"  Conv1 kernel numel {self.layer1_conv.weight.numel()} size {self.layer1_conv.weight.shape}")
         data_shape = [
             self.cnn_layer1_num_kernels,
             data_shape[1],  # time dim unchanged due to padding
@@ -265,7 +264,7 @@ class CNN_Features(CNN_Features_Dataclass, Base_Features):
             padding=((self.cnn_layer2_kernel_time_size-1)//2, 0, 0),
         )
         if self.debug:
-            self.logger.info(f"Conv2 layer size {self.layer2_conv.weight.shape}")
+            self.logger.info(f"  Conv2 kernel numel {self.layer2_conv.weight.numel()} size {self.layer2_conv.weight.shape}")
         data_shape = [
             self.cnn_layer2_num_kernels,
             data_shape[1],
@@ -315,7 +314,6 @@ class CNN_Features(CNN_Features_Dataclass, Base_Features):
             if self.cnn_fir_include_raw:
                 x_filtered = torch.concat((x_filtered, x), dim=-4)
                 if self.debug:
-                    self.logger.info(f'x shape {x.shape}  x_filtered shape {x_filtered.shape}')
                     assert x_filtered.shape[-4] == self.n_bands + 1
             x = x_filtered
         x = self.activation(self.dropout(self.layer1_conv(x)))
@@ -366,9 +364,6 @@ class FIR_Features(FIR_Features_Dataclass, Base_Features):
         ], dtype=torch.float32)
         self.a_coeffs = torch.zeros_like(self.b_coeffs)
         self.a_coeffs[:,0] = 1
-        if self.debug:
-            self.logger.info(self.b_coeffs.shape, self.b_coeffs.dtype, self.b_coeffs)
-            self.logger.info(self.a_coeffs.shape, self.a_coeffs.dtype, self.a_coeffs)
 
     def forward(self, x):
         x = self._time_interval_and_pooling(x)  # shape [ <batch>, 1, <time>, <space>, <space> ]
@@ -383,7 +378,6 @@ class FIR_Features(FIR_Features_Dataclass, Base_Features):
         if self.debug:
             assert x_filtered.shape[-4] == self.n_bands
             assert np.array_equal(x.shape[-3:], x_filtered.shape[-3:]), "FIR filter malfunctioned"
-        if self.debug:
             assert torch.all(torch.isfinite(x))
         return torch.zeros(x.shape[0], self.fir_num_kernels)
 
@@ -795,20 +789,21 @@ class Multi_Features_Model(
         self.feature_count['total'] = total_features
         self.logger.info(f"  Total features: {total_features}")
 
+        self.logger.info("MLP")
         hidden_layers = []
         in_features = total_features
         for i_layer, layer_size in enumerate(self.mlp_hidden_layers):
             layer = nn.Linear(in_features=in_features, out_features=layer_size)
             hidden_layers.append(layer)
             in_features = layer_size
-            self.logger.info(f"MLP layer {i_layer+1} size: {layer_size}")
+            self.logger.info(f"  MLP layer {i_layer+1} numel {layer.weight.numel()} shape {layer.weight.shape}")
         self.hidden_layers = nn.ModuleList(hidden_layers)
 
         self.output_layer = nn.Linear(
             in_features=in_features, 
             out_features=self.mlp_output_size, 
         )
-        self.logger.info(f"MLP output size: {self.mlp_output_size}")
+        self.logger.info(f"  MLP output size: {self.mlp_output_size}")
 
         self.activation_function = getattr(nn, self.activation_name)
         if self.activation_name == 'LeakyReLu':
