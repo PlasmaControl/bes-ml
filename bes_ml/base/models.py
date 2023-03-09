@@ -168,20 +168,28 @@ class CNN_Features(CNN_Features_Dataclass, Base_Features):
             assert self.cnn_fir_cutoffs.shape[1] == 2, "FIR cutoffs must be shape (*,2)"
             assert np.all(self.cnn_fir_cutoffs<1), "FIR cutoffs must be < f_nyquist"
             self.n_bands = self.cnn_fir_cutoffs.shape[0]
-            self.b_coeffs = torch.tensor(np.array([
-                scipy.signal.firwin(
-                    numtaps=self.cnn_fir_taps,
-                    cutoff=self.cnn_fir_cutoffs[i_band,:],
-                    pass_zero=False,
-                    width=self.cnn_fir_width,
-                ) for i_band in np.arange(self.n_bands)
-            ]), dtype=torch.float32)
-            self.a_coeffs = torch.zeros_like(self.b_coeffs)
+            self.b_coeffs = torch.nn.Parameter(
+                torch.tensor(
+                    np.array([
+                        scipy.signal.firwin(
+                            numtaps=self.cnn_fir_taps,
+                            cutoff=self.cnn_fir_cutoffs[i_band,:],
+                            pass_zero=False,
+                            width=self.cnn_fir_width,
+                        ) for i_band in np.arange(self.n_bands)
+                    ]),
+                    dtype=torch.float32,
+                ),
+                requires_grad=False,
+            )
+            self.a_coeffs = torch.nn.Parameter(torch.zeros_like(self.b_coeffs), requires_grad=False)
             self.a_coeffs[:,0] = 1
             self.in_channels = self.n_bands
             if self.cnn_fir_include_raw:
                 self.in_channels += 1
         else:
+            self.a_coeffs = None
+            self.b_coeffs = None
             self.in_channels = 1
 
         assert (
