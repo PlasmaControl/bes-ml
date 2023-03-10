@@ -870,9 +870,10 @@ class Multi_Features_Model(
 
         # capture torchinfo.summary() output
         tmp_io = io.StringIO()
+        out_save = sys.stdout
         sys.stdout = tmp_io
         torchinfo.summary(self, input_data=input_data, device=torch.device('cpu'))
-        sys.stdout = sys.__stdout__
+        sys.stdout = out_save
         self.logger.info('\n'+tmp_io.getvalue())
         # print model summary
         total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)

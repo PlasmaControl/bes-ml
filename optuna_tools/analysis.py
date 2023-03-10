@@ -122,7 +122,7 @@ def plot_study(
 
     trials = []
     for trial in completed_trials:
-        trial_dir = study_dir / f"trial_{trial.number:04d}"
+        trial_dir = study_dir / f"trial_{trial.number:05d}"
         # assert trial_dir.exists(), f"Did not find trial dir {trial_dir}"
         if not trial_dir.exists():
             continue
@@ -223,7 +223,7 @@ def plot_trial(
         trial_dir = Path(trial_dir)
     elif study_dir is not None and trial_number is not None:
         study_dir = Path(study_dir)
-        trial_dir = study_dir / f"trial_{trial_number:04d}"
+        trial_dir = study_dir / f"trial_{trial_number:05d}"
     assert trial_dir.exists()
     trial_result = analyzer(trial_dir, device=device)
     trial_result.plot_training(save=save)
@@ -263,7 +263,7 @@ def plot_trial(
 #     for i in np.arange(n_trials):
 #         i_trial = sorted_indices[i]
 #         trial = trials[i_trial]
-#         trial_dir = study_dir / f'trial_{trial.number:04d}'
+#         trial_dir = study_dir / f'trial_{trial.number:05d}'
 #         run = analyzer(trial_dir, device=device)
 #         run.plot_training_epochs()
 #         # run.plot_valid_indices_analysis()
