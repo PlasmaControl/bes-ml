@@ -305,6 +305,9 @@ def summarize_study(
             tmp += f"  Time {duration}"
         print(tmp)
 
+    if len(best_values) <= 9:
+        return
+
     median_value = np.quantile(list(best_values.values()), 0.5)
     print(f"Median best value: {median_value:.3f}")
 

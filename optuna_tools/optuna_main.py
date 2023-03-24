@@ -36,7 +36,7 @@ def fail_stale_trials(
             success = True
         except:
             attempts += 1
-            time.sleep(1)
+            time.sleep(2)
             if attempts >= 10:
                 assert False, "Failed DB connection"
 
@@ -121,11 +121,11 @@ def run_optuna(
                 success = True
             except:
                 attempts += 1
-                time.sleep(1)
+                time.sleep(2)
                 if attempts >= 40:
                     assert False, f"Failed DB connection with {attempts} attempts on world rank {world_rank}"
 
-        print(f"Creating/loading study {study_name}")
+        # print(f"Creating/loading study {study_name}")
         optuna.create_study(
             study_name=study_name,
             storage=storage,
@@ -133,9 +133,10 @@ def run_optuna(
             direction='maximize',
         )
 
-    if world_size > 1:
-        async_handle = torch.distributed.barrier(async_op=True)
-        async_handle.wait(timeout=timedelta(seconds=30))
+    # if world_size > 1:
+    #     torch.distributed.barrier()
+        # async_handle = torch.distributed.barrier(async_op=True)
+        # async_handle.wait(timeout=timedelta(seconds=30))
 
     # if fail_stale_trials:
     #     # FAIL any zombie trials that are stuck in `RUNNING` state
@@ -167,7 +168,6 @@ def run_optuna(
         'pruner_minimum_trials_at_epoch': pruner_minimum_trials_at_epoch,
         'pruner_patience': pruner_patience,
         'pruner_min_delta': pruner_min_delta,
-        # 'maximize_score': maximize_score,
         'constant_liar': constant_liar,
         'local_rank': local_rank,
         'world_rank': world_rank,
@@ -182,8 +182,6 @@ def run_optuna(
         n_workers = n_gpus * n_workers_per_device if n_gpus else n_workers_per_device
     else:
         n_workers = 1
-    if world_rank == 0:
-        print(f"Number of Optuna workers {n_workers}")
     if n_workers > 1:
         mp_context = mp.get_context('spawn')
         with concurrent.futures.ProcessPoolExecutor(
@@ -202,7 +200,7 @@ def run_optuna(
                     **worker_kwargs,
                 )
                 futures.append(future)
-                time.sleep(1)
+                # time.sleep(2)
             concurrent.futures.wait(futures)
             for i_future, future in enumerate(futures):
                 if future.exception() is None:
@@ -213,8 +211,6 @@ def run_optuna(
                     print(e)
                     print(e.args)
     else:
-        if world_rank == 0:
-            print(f"Each Optuna worker running {n_trials_per_worker} trials")
         worker(**worker_kwargs)
 
 
@@ -242,7 +238,6 @@ def worker(
         pruner_minimum_trials_at_epoch: int = 20,
         pruner_patience: int = 10,
         pruner_min_delta: float = 1e-3,
-        # maximize_score: bool = True,
         constant_liar: bool = False,
         local_rank: int = 0,
         world_rank: int = 0,
@@ -271,9 +266,10 @@ def worker(
 
     def objective_wrapper(trial) -> float:
         if world_size > 1:
+            torch.distributed.barrier()
             trial = optuna.integration.TorchDistributedTrial(trial)
             i_gpu = local_rank
-        return objective(
+        value = objective(
             trial=trial,
             study_dir=study_dir,
             i_gpu=i_gpu,
@@ -286,9 +282,9 @@ def worker(
             dry_run=dry_run,
             logger_hash=logger_hash,
         )
+        return value
 
     if world_rank == 0:
-        print(f"Optuna worker: running {n_trials_per_worker} trials sequentially")
         attempts = 0
         success = False
         while success is False:
@@ -324,7 +320,6 @@ def objective(
         trial_generator: Callable,
         trainer_class: Callable,
         analyzer_class: Callable = None,
-        # maximize_score: bool = True,
         i_gpu: int | str = 'auto',
         world_size: int = 1,
         world_rank: int = 0,
@@ -337,22 +332,17 @@ def objective(
     assert study_dir.exists()
     trial_dir = study_dir / f'trial_{trial.number:05d}'
 
-    if world_rank == 0:
-        print(f"Trial {trial.number}: starting")
     if world_size > 1:
-        async_handle = torch.distributed.barrier(async_op=True)
-        async_handle.wait(timeout=timedelta(seconds=30))
+        torch.distributed.barrier()
 
     with open(os.devnull, 'w') as f:
         sys.stdout = f
         sys.stderr = f
-
         input_kwargs = trial_generator(trial)
-
+        input_kwargs['output_dir'] = trial_dir.as_posix()
+        input_kwargs['device'] = f'cuda:{i_gpu:d}' if isinstance(i_gpu, int) else i_gpu
         try:
             trainer = trainer_class(
-                output_dir=trial_dir.as_posix(),
-                device=f'cuda:{i_gpu:d}' if isinstance(i_gpu, int) else i_gpu,
                 optuna_trial=trial,
                 world_size=world_size,
                 world_rank=world_rank,
@@ -369,15 +359,9 @@ def objective(
             objective_value = np.NAN
             if world_rank == 0:
                 print(f"Trial {trial.number}: failed with error {repr(e)}")
-            if world_size > 1:
-                async_handle = torch.distributed.barrier(async_op=True)
-                async_handle.wait(timeout=timedelta(seconds=30))
         else:
             scores = outputs['valid_score'] if 'valid_score' in outputs else outputs['train_score']
             objective_value = np.max(scores)
-            if world_size > 1:
-                async_handle = torch.distributed.barrier(async_op=True)
-                async_handle.wait(timeout=timedelta(seconds=30))
             if world_rank == 0:
                 if analyzer_class is not None:
                     analyzer = analyzer_class(
@@ -389,7 +373,5 @@ def objective(
                     analyzer.plot_inference(save=True, max_elms=30)
             sys.stdout = sys.__stdout__
             sys.stderr = sys.__stderr__
-            if world_rank == 0:
-                print(f"Trial {trial.number}: finished with final/max score {scores[-1]:.3f}/{objective_value:.3f} and time {outputs['training_time']/60:.1f} min")
             
     return objective_value
