@@ -7,6 +7,7 @@ import sys
 from typing import Iterable
 import inspect
 import dataclasses
+import time
 
 import numpy as np
 import scipy.signal
@@ -215,7 +216,9 @@ class CNN_Features(CNN_Features_Dataclass, Base_Features):
         self.logger.info(f"  Input with FIR and/or raw: {data_shape}")
 
         def test_bad_shape(shape):
-            assert np.all(np.array(shape) >= 1), f"Bad shape: {shape}"
+            if np.all(np.array(shape) >= 1) is False:
+                self.logger.info(f"Bad shape: {shape}")
+                assert False, f"Bad shape: {shape}"
 
         # Conv #1
         self.layer1_conv = nn.Conv3d(
@@ -433,6 +436,11 @@ class FFT_Features(FFT_Features_Dataclass, Base_Features):
         self.reset_histogram()
         self.fft_calc_histogram = False
 
+        def test_bad_shape(shape):
+            if np.all(np.array(shape) >= 1) is False:
+                self.logger.info(f"Bad shape: {shape}")
+                assert False, f"Bad shape: {shape}"
+
         self.logger.info("FFT transformation")
 
         # data_shape = tuple([1]+list(self._input_size_after_timeslice_pooling))
@@ -450,6 +458,7 @@ class FFT_Features(FFT_Features_Dataclass, Base_Features):
             data_shape[5],
         ]
         self.logger.info(f"  After bin-averaged FFT: {data_shape}")
+        test_bad_shape(data_shape)
 
         self.conv = nn.Conv3d(
             in_channels=self.fft_subwindows,
@@ -470,6 +479,7 @@ class FFT_Features(FFT_Features_Dataclass, Base_Features):
             data_shape[5] - (self.fft_kernel_spatial_size-1),
         ]
         self.logger.info(f"  After conv: {data_shape}")
+        test_bad_shape(data_shape)
 
         # maxpool
         self.fft_maxpool = nn.MaxPool3d(
@@ -488,6 +498,7 @@ class FFT_Features(FFT_Features_Dataclass, Base_Features):
             data_shape[5] // self.fft_maxpool_spatial_size,
         ]
         self.logger.info(f"  After maxpool: {data_shape}")
+        test_bad_shape(data_shape)
 
         self.features = np.prod(data_shape, dtype=int)
         self.logger.info(f"  Total FFT features {self.features}")
@@ -869,18 +880,28 @@ class Multi_Features_Model(
         input_data = torch.rand(*data_shape)
 
         # capture torchinfo.summary() output
-        tmp_io = io.StringIO()
-        out_save = sys.stdout
-        sys.stdout = tmp_io
-        torchinfo.summary(self, input_data=input_data, device=torch.device('cpu'))
-        sys.stdout = out_save
-        self.logger.info('\n'+tmp_io.getvalue())
+        # stdout_save = sys.stdout
+        # try:
+        #     tmp_io = io.StringIO()
+        #     sys.stdout = tmp_io
+        #     self.logger.info("MODEL SUMMARY 2")
+        #     torchinfo.summary(self, input_data=input_data, device=torch.device('cpu'))
+        #     self.logger.info("MODEL SUMMARY 3")
+        #     time.sleep(1)
+        # except:
+        #     sys.stdout = stdout_save
+        #     raise RuntimeError("torchinfo.summary() failed")
+        # else:
+        #     sys.stdout = stdout_save
+        # finally:
+        #     tmp_io.close()
+        # self.logger.info('\n'+tmp_io.getvalue())
         # print model summary
         total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
         self.logger.info(f"Model contains {total_parameters} trainable parameters")
-        self.logger.info(f'Single input size: {input_data.shape}')
-        output = self(input_data)
-        self.logger.info(f"Single output size: {output.shape}")
+        # self.logger.info(f'Single input size: {input_data.shape}')
+        # output = self(input_data)
+        # self.logger.info(f"Single output size: {output.shape}")
 
         self.trainable_parameters = {}
         self.logger.info("Trainable parameters")
