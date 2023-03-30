@@ -1,6 +1,8 @@
 # default run directory
 run_dir*/
 study_test/
+Experiment*/
+MNIST/
 
 # data files
 *.pkl
