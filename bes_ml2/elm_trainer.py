@@ -1,6 +1,7 @@
 import dataclasses
 import os
 
+import torch
 import pytorch_lightning as pl
 from pytorch_lightning import loggers
 from pytorch_lightning import callbacks as cb
@@ -22,7 +23,6 @@ class BES_Trainer(
     gradient_clip_value: int = None
     version: str = None
     wandb_log: bool = False
-    wandb_log_frequency: int = 20
     early_stopping_min_delta: float = 1e-3
     early_stopping_patience: int = 10
     enable_progress_bar: bool = True
@@ -86,9 +86,9 @@ class BES_Trainer(
             version=self.version,
         )
         self.pl_loggers.append(tb_logger)
-
         version_str = tb_logger.version if tb_logger.version is str else f"version_{tb_logger.version}"
-
+        self.model.log_dir = tb_logger.log_dir
+        
         if self.wandb_log:
             wandb_logger = loggers.WandbLogger(
                 save_dir=experiment_dir,
@@ -98,7 +98,6 @@ class BES_Trainer(
             wandb_logger.watch(
                 self.model, 
                 log='all', 
-                log_freq=self.wandb_log_frequency,
             )
             self.pl_loggers.append(wandb_logger)
 
@@ -148,7 +147,8 @@ class BES_Trainer(
             callbacks=self.callbacks,
             enable_model_summary=False,
             enable_progress_bar=self.enable_progress_bar,
-            log_every_n_steps=20,
+            accelerator='gpu' if torch.cuda.is_available() else None,
+            devices=torch.cuda.device_count() if torch.cuda.is_available() else None,
         )
 
     def run_all(self):
@@ -161,11 +161,14 @@ class BES_Trainer(
 
 if __name__=='__main__':
     trainer = BES_Trainer(
-        max_epochs=10,
-        batch_size=32,
+        data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
+        max_elms=100,
+        max_epochs=8,
+        weight_decay=1e-5,
+        batch_size=256,
         fraction_validation=0.1,
         fraction_test=0.1,
-        # max_elms=5,
         wandb_log=True,
+        gradient_clip_value=0.05,
     )
     trainer.run_all()

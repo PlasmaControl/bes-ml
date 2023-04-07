@@ -12,7 +12,6 @@ import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 from pytorch_lightning import callbacks as cb
 from pytorch_lightning.utilities.model_summary import ModelSummary
-from pytorch_lightning.core.mixins import HyperparametersMixin
 
 import wandb
 
@@ -282,6 +281,8 @@ class BES_Trainer(
             callbacks=callbacks,
             enable_model_summary=False,
             enable_progress_bar=self.enable_progress_bar,
+            accelerator='gpu' if torch.cuda.is_available() else None,
+            devices=torch.cuda.device_count() if torch.cuda.is_available() else None,
         )
 
     def fit_and_test(self):

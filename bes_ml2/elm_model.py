@@ -145,26 +145,25 @@ class Model(
         print(f"  CNN parameters {cnn_parameters:,}")
         print(f"  MLP parameters {mlp_parameters:,}")
 
-        self.full_model = torch.nn.Sequential(
-            self.featurize,
-            self.mlp,
-        )
+        # self.full_model = torch.nn.Sequential(
+        #     self.featurize,
+        #     self.mlp,
+        # )
 
     def forward(self, x: torch.Tensor):
-        # features = self.featurize(x)
-        # prediction = self.mlp(features)
-        return self.full_model(x)
+        features = self.featurize(x)
+        prediction = self.mlp(features)
+        return prediction
 
 
 @dataclasses.dataclass(eq=False)
-class Model_PL_DataClass(
-    Model_DataClass,
-):
+class Model_PL_DataClass(Model_DataClass):
     lr: float = 1e-3
     lr_scheduler_patience: int = 2
     lr_scheduler_threshold: float = 1e-3
     weight_decay: float = 1e-3
     gradient_clip_value: int = None  # added here for save_hyperparameters()
+    log_dir: str = '.'
 
 @dataclasses.dataclass(eq=False)
 class Model_PL(
@@ -195,7 +194,7 @@ class Model_PL(
     def training_step(self, batch, batch_idx) -> torch.Tensor:
         loss = self._shared_step(batch=batch, batch_idx=batch_idx)
         self.log("train_loss", self.mse_loss)
-        self.log("train_score", self.r2_score)
+        # self.log("train_score", self.r2_score)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -211,55 +210,54 @@ class Model_PL(
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0) -> dict:
         signals, labels = batch
-        predictions = self.model(signals)
+        predictions = self(signals)
         return {
             'labels': labels,
             'predictions': predictions,
         }
     
-    def on_predict_epoch_end(self, results) -> None:
-        fig, axes = plt.subplots(ncols=3, nrows=2, figsize=(12, 6))
-        i_page = 1
-        plt.suptitle(f"Inference on ELMs in test dataset (page {i_page})")
-        axes_twinx = [axis.twinx() for axis in axes.flat]
-        for i_elm, result in enumerate(results):
-            labels = torch.concat([batch['labels'] for batch in result]).squeeze()
-            predictions = torch.concat([batch['predictions'] for batch in result]).squeeze()
-            assert labels.shape[0] == predictions.shape[0]
-            dataloader = self.trainer.predict_dataloaders[i_elm]
-            dataset: elm_data.ELM_Predict_Dataset = dataloader.dataset
-            signal = dataset.signals[..., 2, 3].squeeze()
-            assert signal.shape[0] == labels.shape[0]-1+self.signal_window_size
-            time = (np.arange(signal.numel()) - dataset.active_elm_start_index)/1e3
-            if i_elm % 6 == 0:
-                for i_axis in range(axes.size):
-                    axes.flat[i_axis].clear()
-                    axes_twinx[i_axis].clear()
-            plt.figure(fig)
-            plt.sca(axes.flat[i_elm%6])
-            plt.plot(time[self.signal_window_size-1:], labels, label='Label')
-            plt.plot(time[self.signal_window_size-1:], predictions, label='Prediction')
-            plt.ylabel("Label | Prediction")
-            plt.xlabel('Time to ELM (ms)')
-            plt.legend(fontsize='small', loc='upper right')
-            twinx = axes_twinx[i_elm%6]
-            twinx.plot(time, signal, label='Signal', color='C2')
-            twinx.set_ylabel('Scaled signal')
-            twinx.legend(fontsize='small', loc='lower right')
-            if i_elm % 6 == 5 or i_elm == len(results)-1:
-                plt.tight_layout()
-                filename = f'inference_{i_page:02d}'
-                filepath = os.path.join(self.logger.log_dir, filename)
-                plt.savefig(filepath+'.pdf', format='pdf', transparent=True)
-                plt.savefig(filepath+'.png', format='png', transparent=True)
-                for logger in self.loggers:
-                    exp = logger.experiment
-                    if hasattr(exp, 'add_figure'):
-                        exp.add_figure(filename, fig, close=False)
-                    if hasattr(exp, 'add_image'):
-                        exp.add_image(key='inference', images=[filepath+'.png'])
-                i_page += 1
-        plt.close(fig)
+    # def on_predict_epoch_end(self, results) -> None:
+    #     fig, axes = plt.subplots(ncols=3, nrows=2, figsize=(12, 6))
+    #     i_page = 1
+    #     plt.suptitle(f"Inference on ELMs in test dataset (page {i_page})")
+    #     axes_twinx = [axis.twinx() for axis in axes.flat]
+    #     for i_elm, result in enumerate(results):
+    #         labels = torch.concat([batch['labels'] for batch in result]).squeeze()
+    #         predictions = torch.concat([batch['predictions'] for batch in result]).squeeze()
+    #         assert labels.shape[0] == predictions.shape[0]
+    #         dataloader = self.trainer.predict_dataloaders[i_elm]
+    #         dataset: elm_data.ELM_Predict_Dataset = dataloader.dataset
+    #         signal = dataset.signals[..., 2, 3].squeeze()
+    #         assert signal.shape[0] == labels.shape[0]-1+self.signal_window_size
+    #         time = (np.arange(signal.numel()) - dataset.active_elm_start_index)/1e3
+    #         if i_elm % 6 == 0:
+    #             for i_axis in range(axes.size):
+    #                 axes.flat[i_axis].clear()
+    #                 axes_twinx[i_axis].clear()
+    #         plt.sca(axes.flat[i_elm%6])
+    #         plt.plot(time[self.signal_window_size-1:], labels, label='Label')
+    #         plt.plot(time[self.signal_window_size-1:], predictions, label='Prediction')
+    #         plt.ylabel("Label | Prediction")
+    #         plt.xlabel('Time to ELM (ms)')
+    #         plt.legend(fontsize='small', loc='upper right')
+    #         twinx = axes_twinx[i_elm%6]
+    #         twinx.plot(time, signal, label='Signal', color='C2')
+    #         twinx.set_ylabel('Scaled signal')
+    #         twinx.legend(fontsize='small', loc='lower right')
+    #         if i_elm % 6 == 5 or i_elm == len(results)-1:
+    #             plt.tight_layout()
+    #             filename = f'inference_{i_page:02d}'
+    #             filepath = os.path.join(self.log_dir, filename)
+    #             plt.savefig(filepath+'.pdf', format='pdf', transparent=True)
+    #             plt.savefig(filepath+'.png', format='png', transparent=True)
+    #             for logger in self.loggers:
+    #                 exp = logger.experiment
+    #                 if isinstance(logger, loggers.TensorBoardLogger) and hasattr(exp, 'add_figure'):
+    #                     exp.add_figure(filename, fig, close=False)
+    #                 if isinstance(logger, loggers.WandbLogger) and hasattr(exp, 'add_image'):
+    #                     exp.add_image(key='inference', images=[filepath+'.png'])
+    #             i_page += 1
+    #     plt.close(fig)
 
 
     def configure_optimizers(self):

@@ -1,3 +1,4 @@
+from __future__ import annotations
 import dataclasses
 from pathlib import Path
 
@@ -97,7 +98,7 @@ class ELM_Predict_Dataset(torch.utils.data.Dataset):
 
 @dataclasses.dataclass(eq=False)
 class ELM_Datamodule_Dataclass():
-    elm_h5_file: Path|str = sample_elm_data_file  # path to data; dir or file depending on task
+    data_file: Path|str = sample_elm_data_file.as_posix()  # path to data; dir or file depending on task
     batch_size: int = 128  # power of 2, like 32-256
     signal_window_size: int = 128  # power of 2, like 64-512
     num_workers: int = 4  # number of subprocess workers for pytorch dataloader
@@ -146,9 +147,9 @@ class ELM_Datamodule(
         if self.all_elm_indices is not None:
             print("Reusing previous ELM indices read and split")
             return
-        print(f"Data file: {self.elm_h5_file}")
+        print(f"Data file: {self.data_file}")
         # gather ELM indices
-        with h5py.File(self.elm_h5_file, "r") as elm_h5:
+        with h5py.File(self.data_file, "r") as elm_h5:
             print(f"  ELM events in data file: {len(elm_h5)}")
             self.all_elm_indices = [int(elm_key) for elm_key in elm_h5]
         # bad ELM events to ignore?
@@ -220,7 +221,7 @@ class ELM_Datamodule(
             # package ELM events into pytorch dataset
             print(f"Reading ELM events for dataset `{dataset_stage}`")
             elm_data = []
-            with h5py.File(self.elm_h5_file, 'r') as h5_file:
+            with h5py.File(self.data_file, 'r') as h5_file:
                 if indices.size >= 5:
                     print(f"  Initial indices: {indices[:5]}")
                 for i_elm, elm_index in enumerate(indices):
@@ -360,7 +361,8 @@ class ELM_Datamodule(
         signal_max = np.array(-np.inf)
         n_bins = 200
         cummulative_hist = np.zeros(n_bins, dtype=int)
-        stat_interval = sample_indices.size//1000 if sample_indices.size>1e6 else 1
+        stat_samples = int(1e4)
+        stat_interval = np.max([1, sample_indices.size//stat_samples])
         for i in sample_indices[::stat_interval]:
             signal_window = signals[i: i + self.signal_window_size, :, :]
             signal_min = np.min([signal_min, signal_window.min()])
