@@ -193,20 +193,20 @@ class Model_PL(
 
     def training_step(self, batch, batch_idx) -> torch.Tensor:
         loss = self._shared_step(batch=batch, batch_idx=batch_idx)
-        self.log("train_loss", self.mse_loss)
+        self.log("train_loss", self.mse_loss, sync_dist=True)
         # self.log("train_score", self.r2_score)
         return loss
 
     def validation_step(self, batch, batch_idx):
         self._shared_step(batch=batch, batch_idx=batch_idx)
-        self.log("val_loss", self.mse_loss)
-        self.log("val_score", self.r2_score)
+        self.log("val_loss", self.mse_loss, sync_dist=True)
+        self.log("val_score", self.r2_score, sync_dist=True)
 
     def test_step(self, batch, batch_idx):
         self._shared_step(batch=batch, batch_idx=batch_idx)
-        self.log("test_loss", self.mse_loss)
-        self.log("test_score", self.r2_score)
-        self.log("hp_metric", self.r2_score)
+        self.log("test_loss", self.mse_loss, sync_dist=True)
+        self.log("test_score", self.r2_score, sync_dist=True)
+        self.log("hp_metric", self.r2_score, sync_dist=True)
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0) -> dict:
         signals, labels = batch

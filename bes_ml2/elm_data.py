@@ -98,7 +98,7 @@ class ELM_Predict_Dataset(torch.utils.data.Dataset):
 
 @dataclasses.dataclass(eq=False)
 class ELM_Datamodule_Dataclass():
-    data_file: Path|str = sample_elm_data_file.as_posix()  # path to data; dir or file depending on task
+    data_file: str = sample_elm_data_file.as_posix()  # path to data; dir or file depending on task
     batch_size: int = 128  # power of 2, like 32-256
     signal_window_size: int = 128  # power of 2, like 64-512
     num_workers: int = 4  # number of subprocess workers for pytorch dataloader

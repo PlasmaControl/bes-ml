@@ -98,6 +98,7 @@ class BES_Trainer(
             wandb_logger.watch(
                 self.model, 
                 log='all', 
+                log_freq=50,
             )
             self.pl_loggers.append(wandb_logger)
 
@@ -149,6 +150,7 @@ class BES_Trainer(
             enable_progress_bar=self.enable_progress_bar,
             accelerator='gpu' if torch.cuda.is_available() else None,
             devices=torch.cuda.device_count() if torch.cuda.is_available() else None,
+            log_every_n_steps=50,
         )
 
     def run_all(self):
