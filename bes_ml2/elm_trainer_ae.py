@@ -8,7 +8,7 @@ from pytorch_lightning.utilities.model_summary import ModelSummary
 import wandb
 
 import elm_data
-import elm_model
+import elm_model_ae as elm_model
 
 
 @dataclasses.dataclass(eq=False)
@@ -98,7 +98,7 @@ class BES_Trainer(
             wandb_logger.watch(
                 self.model, 
                 log='all', 
-                log_freq=20,
+                log_freq=10,
             )
             self.pl_loggers.append(wandb_logger)
 
@@ -106,8 +106,7 @@ class BES_Trainer(
         self.callbacks = [
             cb.LearningRateMonitor(),
             cb.EarlyStopping(
-                monitor='val_score',
-                mode='max',
+                monitor='val_loss',
                 min_delta=self.early_stopping_min_delta,
                 patience=self.early_stopping_patience,
             ),
@@ -149,7 +148,7 @@ class BES_Trainer(
             callbacks=self.callbacks,
             enable_model_summary=False,
             enable_progress_bar=self.enable_progress_bar,
-            log_every_n_steps=20,
+            log_every_n_steps=10,
             num_nodes=self.num_nodes,
             accelerator="auto",
             # strategy="auto",
@@ -161,18 +160,19 @@ class BES_Trainer(
         assert self.trainer and self.model and self.datamodule
         self.trainer.fit(self.model, datamodule=self.datamodule)
         self.trainer.test(datamodule=self.datamodule, ckpt_path='best')
-        self.trainer.predict(datamodule=self.datamodule, ckpt_path='best')
+        # self.trainer.predict(datamodule=self.datamodule, ckpt_path='best')
 
 
 if __name__=='__main__':
     trainer = BES_Trainer(
         # data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
         max_elms=100,
-        max_epochs=8,
+        max_epochs=20,
         lr=1e-3,
+        dropout=0.02,
         # weight_decay=1e-5,
         # gradient_clip_value=0.05,
-        batch_size=128,
+        batch_size=512,
         fraction_validation=0.1,
         fraction_test=0.1,
         wandb_log=True,
