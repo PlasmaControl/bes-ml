@@ -139,6 +139,17 @@ class ELM_Datamodule(
         self.train_elm_indices = None
         self.validation_elm_indices = None
 
+        print(f'Initiating {self.__class__.__name__}')
+        class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
+        for field_name in dataclasses.asdict(self):
+            value = getattr(self, field_name)
+            field_str = f"  {field_name}: {value}"
+            default_value = class_fields_dict[field_name].default
+            if value != default_value:
+                field_str += f" (default {default_value})"
+            print(field_str)
+
+
     def prepare_data(self):
         # only called in main process
         pass

@@ -14,8 +14,16 @@ import elm_data
 
 
 @dataclasses.dataclass(eq=False)
-class Model_DataClass:
+class Model_Base_Dataclass:
     signal_window_size: int = 128  # power of 2; ~16-512
+    leaky_relu_slope: float = 1e-2
+    dropout: float = 0.1
+
+
+@dataclasses.dataclass(eq=False)
+class Torch_Model_CNN01_Dataclass(
+    Model_Base_Dataclass,
+):
     cnn_layer1_num_kernels: int = 8
     cnn_layer1_kernel_time_size: int = 5
     cnn_layer1_kernel_spatial_size: int = 3
@@ -26,14 +34,12 @@ class Model_DataClass:
     cnn_layer2_maxpool_time: int = 4
     mlp_layer1_size: int = 32
     mlp_layer2_size: int = 16
-    leaky_relu_slope: float = 1e-2
-    dropout: float = 0.1
 
 
 @dataclasses.dataclass(eq=False)
-class Model(
+class Torch_Model_CNN01(
     torch.nn.Module,
-    Model_DataClass,
+    Torch_Model_CNN01_Dataclass,
 ):
     
     def __post_init__(self):
@@ -153,27 +159,40 @@ class Model(
 
 
 @dataclasses.dataclass(eq=False)
-class Model_PL_DataClass(Model_DataClass):
+class Lit_Model_CNN01_Dataclass(
+    Torch_Model_CNN01_Dataclass,
+):
     lr: float = 1e-3
     lr_scheduler_patience: int = 2
     lr_scheduler_threshold: float = 1e-3
     weight_decay: float = 1e-3
-    gradient_clip_value: int = None  # added here for save_hyperparameters()
     log_dir: str = '.'
 
+
 @dataclasses.dataclass(eq=False)
-class Model_PL(
+class Lit_Model_CNN01(
     pl.LightningModule,
-    Model_PL_DataClass,
+    Lit_Model_CNN01_Dataclass,
 ):
     
     def __post_init__(self):
         super().__init__()
         self.example_input_array = torch.zeros((2, 1, self.signal_window_size, 8, 8), dtype=torch.float32)
         self.save_hyperparameters(ignore=['lr_scheduler_patience', 'lr_scheduler_threshold'])
-        model_class_fields_dict = {field.name: field for field in dataclasses.fields(Model_DataClass)}
-        model_kwargs = {key: getattr(self, key) for key in model_class_fields_dict}
-        self.model = Model(**model_kwargs)
+
+        print(f'Initiating {self.__class__.__name__}')
+        class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
+        for field_name in dataclasses.asdict(self):
+            value = getattr(self, field_name)
+            field_str = f"  {field_name}: {value}"
+            default_value = class_fields_dict[field_name].default
+            if value != default_value:
+                field_str += f" (default {default_value})"
+            print(field_str)
+
+        model_fields_dict = {field.name: field for field in dataclasses.fields(Torch_Model_CNN01)}
+        model_kwargs = {key: getattr(self, key) for key in model_fields_dict}
+        self.model = Torch_Model_CNN01(**model_kwargs)
         self.mse_loss = torchmetrics.MeanSquaredError()
         self.r2_score = torchmetrics.R2Score()
         self.monitor_metric = 'val_score'
@@ -254,7 +273,6 @@ class Model_PL(
                         logger.log_image(key='inference', images=[filepath+'.png'])
                 i_page += 1
         plt.close(fig)
-
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(
