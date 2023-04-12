@@ -70,16 +70,16 @@ class Lightning_Model(pl.LightningModule):
         signals, labels = batch
         predictions = self(signals)
         self.mse_loss(predictions, labels)
-        self.r2_score(predictions, labels)
         self.log("val_loss", self.mse_loss)
+        self.r2_score(predictions, labels)
         self.log("val_score", self.r2_score)
 
     def test_step(self, batch, batch_idx):
         signals, labels = batch
         predictions = self(signals)
         self.mse_loss(predictions, labels)
-        self.r2_score(predictions, labels)
         self.log("test_loss", self.mse_loss)
+        self.r2_score(predictions, labels)
         self.log("test_score", self.r2_score)
         self.log("hp_metric", self.r2_score)
 
@@ -151,3 +151,36 @@ class Lightning_Model(pl.LightningModule):
             ),
             'monitor': self.monitor_metric,
         }
+
+
+@dataclasses.dataclass(eq=False)
+class Lightning_Unsupervised_Model(Lightning_Model):
+    monitor_metric: str = 'val_loss'
+
+    def __post_init__(self):
+        super().__post_init__()
+
+    def training_step(self, batch, batch_idx) -> torch.Tensor:
+        signals, _ = batch
+        predictions = self(signals)
+        loss = self.mse_loss(predictions, signals)
+        self.log("train_loss", self.mse_loss)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        signals, _ = batch
+        predictions = self(signals)
+        self.mse_loss(predictions, signals)
+        self.log("val_loss", self.mse_loss)
+
+    def test_step(self, batch, batch_idx):
+        signals, _ = batch
+        predictions = self(signals)
+        self.mse_loss(predictions, signals)
+        self.log("test_loss", self.mse_loss)
+
+    def predict_step(self, batch, batch_idx, dataloader_idx=0) -> dict:
+        pass
+    
+    def on_predict_epoch_end(self, results) -> None:
+        pass

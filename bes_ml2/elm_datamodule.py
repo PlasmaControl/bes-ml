@@ -117,8 +117,7 @@ class ELM_Datamodule_Dataclass():
     prepare_data_per_node: bool = None  # hack to avoid error between dataclass and LightningDataModule
 
 
-pl.LightningDataModule()
-@dataclasses.dataclass(init=True, eq=False)
+@dataclasses.dataclass(eq=False)
 class ELM_Datamodule(
         ELM_Datamodule_Dataclass,
         pl.LightningDataModule,
