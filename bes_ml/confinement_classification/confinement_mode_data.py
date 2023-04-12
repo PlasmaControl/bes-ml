@@ -40,6 +40,8 @@ class Confinement_Mode_Data(
     standardize_signals: bool = True,  # if True, standardize signals based on training data mean~0, stdev~1
     standardize_fft: bool = True,  # if True, standardize FFTs based on training data log10(FFT^2) mean~0, stdev~1
     clip_sigma: float = 8.0  # remove signal windows with abs(standardized_signals) > n_sigma
+    clip_signals: float = None # clip (remove) signals at +/- N Volts
+    clamp_signals: float = None # clamp (keep windows) signals at +/- N Volts
     data_partition_file: str = 'data_partition.yaml'  # data partition for training, valid., and testing
     max_events: int = None
 
@@ -82,6 +84,7 @@ class Confinement_Mode_Data(
                 dtype=int,
             )
             time_frames = sum([data_file[key]['signals'].shape[1] for key in good_keys])
+
         self.logger.info(f"confinement mode events: {indices.size}")
         self.logger.info(f"Total time frames for confinement mode events: {time_frames:,}")
 
@@ -121,15 +124,7 @@ class Confinement_Mode_Data(
         self._ddp_barrier()
         self.logger.info(f"Training data confinement mode events: {training_confinement_modes.size}")
 
-        # if self.is_ddp:
-        #     i_gpu = self.local_rank
-        #     local_training_confinement_modes = training_confinement_modes[i_gpu::4]
-        #     local_validation_confinement_modes = validation_confinement_modes[i_gpu::4]
-        #     print(local_training_confinement_modes, local_validation_confinement_modes)
-
-
         self.train_data = self._preprocess_data(
-            # indices=local_training_confinement_modes if self.is_ddp else training_confinement_modes,
             indices=training_confinement_modes,
             shuffle_indices=True,
             # oversample_active_elm=self.oversample_active_elm if self.is_classification else False,
@@ -140,7 +135,6 @@ class Confinement_Mode_Data(
             self._ddp_barrier()
             self.logger.info(f"Validation data confinement mode events: {validation_confinement_modes.size}")
             self.validation_data = self._preprocess_data(
-                # indices=local_validation_confinement_modes if self.is_ddp else validation_confinement_modes,
                 indices=validation_confinement_modes,
                 # save_filename='validation_confinement_modes',
             )
@@ -153,6 +147,7 @@ class Confinement_Mode_Data(
             self.test_data = self._preprocess_data(
                 indices=test_confinement_modes,
                 # save_filename='test_confinement_modes',
+                is_test_data=True,
             )
             test_data_file = self.output_dir / self.test_data_file
             self.logger.info(f"Test data file: {test_data_file}")
@@ -179,6 +174,7 @@ class Confinement_Mode_Data(
         oversample_active_elm: bool = False,
         save_filename: str = '',
         is_train_data: bool = False,
+        is_test_data: bool = False,
     ) -> tuple:
         if save_filename and self.is_main_process:
             plt.ioff()
@@ -188,17 +184,30 @@ class Confinement_Mode_Data(
             axes_twinx = [axis.twinx() for axis in axes.flat]
         with h5py.File(self.data_location, 'r') as h5_file:
             confinement_mode_data = []
+            time_counts = []
+            for i_confinement_mode, confinement_mode_index in enumerate(indices):
+                confinement_mode_key = f"{confinement_mode_index:05d}"
+                time_counts.append(h5_file[confinement_mode_key]["signals"].shape[1])
+            time_count = np.sum(time_counts)
+            packaged_signals = np.empty((time_count, 6, 8), dtype=np.float32)
+            start_index = 0
             for i_confinement_mode, confinement_mode_index in enumerate(indices):
                 if i_confinement_mode%10 == 0:
                     self.logger.info(f"  confinement mode event {i_confinement_mode:04d}/{indices.size:04d}")
-                    # self.get_memory_usage()
-                    self._memory_diagnostics()
                 confinement_mode_key = f"{confinement_mode_index:05d}"
-                confinement_mode_event = h5_file[confinement_mode_key]
+                confinement_mode_event = h5_file[confinement_mode_key]                
                 signals = np.array(confinement_mode_event["signals"], dtype=np.float32)  # (48, <time>)
                 signals = np.transpose(signals, (1, 0)).reshape(-1, 6, 8)  # reshape to (<time>, 6, 8)
                 labels = np.array(confinement_mode_event["labels"], dtype=self.label_type)
-                labels, signals, valid_t0 = self._get_valid_indices(labels, signals)
+                labels, valid_t0 = self._get_valid_indices(labels)
+      
+                # clamp (keep) signals at +/- 2.0 V
+                if self.clamp_signals:
+                    signals[np.where(signals>self.clamp_signals)] = self.clamp_signals
+                    signals[np.where(signals<-self.clamp_signals)] = -self.clamp_signals
+
+                packaged_signals[start_index:start_index + signals.shape[0]] = signals
+                start_index += signals.shape[0]
                 if save_filename and self.is_main_process:
                     if i_confinement_mode % 12 == 0:
                         for i_axis in range(axes.size):
@@ -210,13 +219,22 @@ class Confinement_Mode_Data(
                     twinx.set_ylabel('Raw signal/10')
                     twinx.legend(fontsize='x-small', loc='upper right')
                     plt.sca(axes.flat[i_confinement_mode%12])
-                    plt.plot(labels, label='Label', color='C0')
+                    # plt.plot(labels, label='Label', color='C0')
+                    if 0 in labels:
+                        mode = 'L-mode'
+                    if 1 in labels:
+                        mode = 'H-mode'
+                    if 2 in labels:
+                        mode = 'QH-mode'
+                    if 3 in labels:
+                        mode = 'WP QH-mode'
                     if self.is_classification:
-                        plt.ylabel('Label')
+                        plt.ylabel(mode)
                     else:
                         plt.ylabel('Time to ELM onset (mu-s)')
                     plt.legend(fontsize='x-small', loc='upper left')
-                    plt.title(f"ELM index {confinement_mode_key}")
+                    # plt.title(f"Confinement mode index {confinement_mode_key}")
+                    plt.title("Shot "+str(confinement_mode_key)[:6]+" at time "+str(confinement_mode_key)[6:])
                     plt.xlabel('Time (mu-s)')
                     if i_confinement_mode%12==11 or i_confinement_mode==indices.size-1:
                         plt.tight_layout()
@@ -228,49 +246,21 @@ class Confinement_Mode_Data(
                         )
                         i_page += 1
                 confinement_mode_data.append(
-                    {'signals': signals, 'labels': labels, 'valid_t0': valid_t0}
+                    {'labels': labels, 'valid_t0': valid_t0}
                 )
 
         self.logger.info('  Finished reading confinement mode event data')
-
+        
+        packaged_labels = np.concatenate([confinement_mode['labels'] for confinement_mode in confinement_mode_data], axis=0)
+        packaged_valid_t0 = np.concatenate([confinement_mode['valid_t0'] for confinement_mode in confinement_mode_data], axis=0)
         index_count = 0
         packaged_window_start = np.array([], dtype=int)
         for confinement_mode in confinement_mode_data:
-            self._memory_diagnostics()
             packaged_window_start = np.append(
                 packaged_window_start,
                 index_count,
             )
             index_count += confinement_mode['labels'].size
-        
-        self._memory_diagnostics()
-        packaged_labels = np.concatenate([confinement_mode['labels'] for confinement_mode in confinement_mode_data], axis=0)
-        # packaged_signals = np.concatenate([confinement_mode['signals'] for confinement_mode in confinement_mode_data], axis=0)
-        packaged_valid_t0 = np.concatenate([confinement_mode['valid_t0'] for confinement_mode in confinement_mode_data], axis=0)
-        self._memory_diagnostics()
-        packaged_signals = np.empty([packaged_labels.shape[0], 6, 8])
-        start_index = 0
-        while len(confinement_mode_data)>0:
-            self._memory_diagnostics()
-            confinement_mode = confinement_mode_data.pop(0)
-            signals = confinement_mode['signals']
-            packaged_signals[start_index:start_index+signals.shape[0]] = signals
-            start_index = signals.shape[0]
-            del confinement_mode
-
-        self._memory_diagnostics()
-
-        # breakpoint()
-
-        # index_count = 0
-        # packaged_window_start = np.array([], dtype=int)
-        # for confinement_mode in confinement_mode_data:
-        #     self._memory_diagnostics()
-        #     packaged_window_start = np.append(
-        #         packaged_window_start,
-        #         index_count,
-        #     )
-        #     index_count += confinement_mode['labels'].size
 
         assert packaged_labels.size == packaged_valid_t0.size
 
@@ -283,7 +273,7 @@ class Confinement_Mode_Data(
         # valid indices for data sampling
         packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
         packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
-
+        
         assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices]))
         assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices + self.signal_window_size]))
 
@@ -292,18 +282,57 @@ class Confinement_Mode_Data(
             sample_indices=packaged_valid_t0_indices,
             signals=packaged_signals,
         )
-        self.logger.info(f"  Raw signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
+        self.logger.info(f" Raw signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
+
+        # clip at +/- N volts
+        if self.clip_signals:
+            self.logger.info(f"  -> Clipping signal windows beyond +/- {self.clip_signals} V")
+            mask = []
+            for i in packaged_valid_t0_indices:
+                signal_window = packaged_signals[i: i + self.signal_window_size, :, :]
+                mask.append((signal_window.min() >= -self.clip_signals) and (signal_window.max() <= self.clip_signals))
+            packaged_valid_t0_indices = packaged_valid_t0_indices[mask]
+            stats = self._get_statistics(
+                sample_indices=packaged_valid_t0_indices,
+                signals=packaged_signals,
+            )
+            self.logger.info(f"  Clipped signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
+
+        if self.mlp_output_size == 3:
+            if not is_test_data:
+                for local_gpu in range(torch.cuda.device_count()):
+                    if self.local_rank == local_gpu:
+                        packaged_labels = packaged_labels - 1
+                    self._ddp_barrier()
+            else:
+                packaged_labels = packaged_labels - 1
+
+        if self.mlp_output_size == 1:
+            packaged_labels = packaged_labels - packaged_labels.min()
+            packaged_labels[np.where(packaged_labels>0)[0]] = packaged_labels[np.where(packaged_labels>0)[0]]/packaged_labels.max()
+
         if is_train_data:
             self.results['raw_train_signal_mean'] = stats['mean']
             self.results['raw_train_signal_stdev'] = stats['stdev']
+        del confinement_mode_data
 
         # standardize signals with mean~0 and stdev~1
         if self.standardize_signals:
+            self.logger.info(f" Signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
             assert self.results['raw_train_signal_mean'] and self.results['raw_train_signal_stdev']
             mean = self.results['raw_train_signal_mean']
             stdev = self.results['raw_train_signal_stdev']
+
             self.logger.info(f"  -> Standardizing signals with mean {mean:.4f} and stdev {stdev:.4f} from training data")
-            packaged_signals = (packaged_signals - mean) / stdev
+            
+            if not is_test_data:
+                for local_gpu in range(torch.cuda.device_count()):
+                    if self.local_rank == local_gpu:
+                        packaged_signals = (packaged_signals - mean) / stdev
+                    self._ddp_barrier()
+            else:
+                packaged_signals = (packaged_signals - mean) / stdev
+                
             stats = self._get_statistics(
                 sample_indices=packaged_valid_t0_indices,
                 signals=packaged_signals,
@@ -491,7 +520,6 @@ class Confinement_Mode_Data(
             shuffle=(self.seed is None),
             drop_last=True,
         ) if self.is_ddp else None
-        # self.train_sampler = None
         self.train_loader = torch.utils.data.DataLoader(
             dataset=self.train_dataset,
             sampler=self.train_sampler,
@@ -509,7 +537,6 @@ class Confinement_Mode_Data(
                 shuffle=False,
                 drop_last=True,
             ) if self.is_ddp else None
-            # self.valid_sampler = None
             self.valid_loader = torch.utils.data.DataLoader(
                 dataset=self.validation_dataset,
                 sampler=self.valid_sampler,

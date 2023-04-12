@@ -130,7 +130,6 @@ class Trainer_Base(Trainer_Base_Dataclass):
         self.logger.info(f"Setup time {time.time() - t_start_setup:.1f} s")
 
         if self.do_train:
-            # torch.cuda.set_device(self.world_rank)
             self.train()
 
     def _memory_diagnostics(self):
@@ -330,6 +329,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
         self._setup_train()
 
         best_score = -np.inf
+        best_valid_loss = np.inf
         best_epoch = 0
         do_optuna_prune = False
 
@@ -369,13 +369,16 @@ class Trainer_Base(Trainer_Base_Dataclass):
                         one_hot_labels = np.zeros_like(predictions)
                         for i, j in zip(one_hot_labels, labels):
                             i[j] = 1
-                        roc = metrics.roc_auc_score(
-                            one_hot_labels,
-                            predictions,
-                            multi_class='ovo',
-                            average='macro',
-                            labels=[0, 1, 2, 3],
-                        ).item()
+                        try:
+                            roc = metrics.roc_auc_score(
+                                one_hot_labels,
+                                predictions,
+                                multi_class='ovo',
+                                average='macro',
+                                labels=np.arange(self.mlp_output_size),
+                            ).item()
+                        except ValueError:
+                            roc = 0
 
                 if self.is_ddp:
                     tmp = torch.tensor([score], device=self.device) / self.world_size
@@ -464,7 +467,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
                     self.model.save_pytorch_model(filename=self.output_dir / 'checkpoint.pytorch')
                     if self.save_onnx_model:
                         self.model.save_onnx_model(filename=self.output_dir / 'checkpoint.onnx')
-
+                                            
             # epoch summary
             status = f"Ep {i_epoch + 1:03d}: "
             status += f"train loss {train_loss:.4f}  "

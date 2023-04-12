@@ -712,7 +712,7 @@ class Multi_Features_Model(
             for features in all_features:
                 assert torch.all(torch.isfinite(features))
         all_features = torch.cat(all_features, dim=1)
-        # breakpoint()
+        
         for hidden_layer in self.hidden_layers:
             all_features = self.activation(self.dropout(hidden_layer(all_features)))
         prediction = self.output_layer(all_features)

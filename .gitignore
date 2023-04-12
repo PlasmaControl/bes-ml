@@ -41,3 +41,7 @@ profile/*.out
 # confinement classification task
 bes_ml/confinement_classification/old/
 bes_ml/confinement_classification/ddp_*
+bes_ml/confinement_classification/*.out
+bes_ml/confinement_classification/*.sh
+bes_ml/confinement_classification/new_train.py
+
