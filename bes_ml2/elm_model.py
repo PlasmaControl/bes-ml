@@ -18,10 +18,12 @@ class Model_Base_Dataclass:
     signal_window_size: int = 128  # power of 2; ~16-512
     leaky_relu_slope: float = 1e-2
     dropout: float = 0.1
+    mlp_layers_size: tuple = (64, 32)
 
 
 @dataclasses.dataclass(eq=False)
-class Torch_Model_CNN01_Dataclass(
+class Torch_Model_CNN01(
+    torch.nn.Module,
     Model_Base_Dataclass,
 ):
     cnn_layer1_num_kernels: int = 8
@@ -34,17 +36,20 @@ class Torch_Model_CNN01_Dataclass(
     cnn_layer2_maxpool_time: int = 4
     mlp_layer1_size: int = 32
     mlp_layer2_size: int = 16
-
-
-@dataclasses.dataclass(eq=False)
-class Torch_Model_CNN01(
-    torch.nn.Module,
-    Torch_Model_CNN01_Dataclass,
-):
     
     def __post_init__(self):
         super().__init__()
-        print('Constructing CNN')
+
+        print(f'Initiating {self.__class__.__name__}')
+        class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
+        for field_name in dataclasses.asdict(self):
+            value = getattr(self, field_name)
+            field_str = f"  {field_name}: {value}"
+            default_value = class_fields_dict[field_name].default
+            if value != default_value:
+                field_str += f" (default {default_value})"
+            print(field_str)
+
         assert np.log2(self.signal_window_size).is_integer(), 'Signal window must be power of 2'
         assert self.cnn_layer1_kernel_time_size % 2 == 1, 'Kernel time size must be odd'
         assert self.cnn_layer2_kernel_time_size % 2 == 1, 'Kernel time size must be odd'
@@ -159,26 +164,16 @@ class Torch_Model_CNN01(
 
 
 @dataclasses.dataclass(eq=False)
-class Lit_Model_CNN01_Dataclass(
-    Torch_Model_CNN01_Dataclass,
+class Torch_Model_CNN02(
+    torch.nn.Module,
+    Model_Base_Dataclass,
 ):
-    lr: float = 1e-3
-    lr_scheduler_patience: int = 2
-    lr_scheduler_threshold: float = 1e-3
-    weight_decay: float = 1e-3
-    log_dir: str = '.'
-
-
-@dataclasses.dataclass(eq=False)
-class Lit_Model_CNN01(
-    pl.LightningModule,
-    Lit_Model_CNN01_Dataclass,
-):
+    cnn_num_kernels: tuple = (16,16,16)
+    cnn_kernel_time_size: tuple = (8,4,4)
+    cnn_kernel_spatial_size: tuple = (3, 3, 3)
     
     def __post_init__(self):
         super().__init__()
-        self.example_input_array = torch.zeros((2, 1, self.signal_window_size, 8, 8), dtype=torch.float32)
-        self.save_hyperparameters(ignore=['lr_scheduler_patience', 'lr_scheduler_threshold'])
 
         print(f'Initiating {self.__class__.__name__}')
         class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
@@ -190,15 +185,125 @@ class Lit_Model_CNN01(
                 field_str += f" (default {default_value})"
             print(field_str)
 
-        model_fields_dict = {field.name: field for field in dataclasses.fields(Torch_Model_CNN01)}
-        model_kwargs = {key: getattr(self, key) for key in model_fields_dict}
-        self.model = Torch_Model_CNN01(**model_kwargs)
+        assert np.log2(self.signal_window_size).is_integer(), 'Signal window must be power of 2'
+        nlayers = len(self.cnn_num_kernels)
+        assert nlayers == len(self.cnn_kernel_spatial_size)
+        assert nlayers == len(self.cnn_kernel_time_size)
+        for time_dim in self.cnn_kernel_time_size:
+            assert np.log2(time_dim).is_integer(), 'Kernel time dims must be power of 2'
+
+        print("Constructing CNN layers")
+
+        in_channels = 1
+        data_shape = [in_channels, self.signal_window_size, 8, 8]
+        print(f"  Input data shape {data_shape}")
+
+        self.cnn_layers = torch.nn.Sequential()
+
+        # CNN layers
+        for i in range(nlayers):
+            kernel = (
+                self.cnn_kernel_time_size[i],
+                self.cnn_kernel_spatial_size[i],
+                self.cnn_kernel_spatial_size[i],
+            )
+            stride = (self.cnn_kernel_time_size[i], 1, 1)
+            conv3d = torch.nn.Conv3d(
+                in_channels=in_channels if i==0 else self.cnn_num_kernels[i-1],
+                out_channels=self.cnn_num_kernels[i],
+                kernel_size=kernel,
+                stride=stride,
+            )
+            data_shape = conv3d(torch.zeros(size=data_shape)).size()
+            print(f"  Data shape after CNN layer {i}: {data_shape}")
+            assert np.all(np.array(data_shape) >= 1), f"Bad data shape {data_shape} after CNN layer {i}"
+            self.cnn_layers.extend([
+                conv3d,
+                torch.nn.Dropout(p=self.dropout),
+                torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope),
+            ])
+
+        cnn_features = np.prod(data_shape)
+        print(f"  CNN output features: {cnn_features}")
+            
+        # MLP layers
+        self.mlp_layers = torch.nn.Sequential(torch.nn.Flatten())
+        for i, layer_size in enumerate(self.mlp_layers_size):
+            self.mlp_layers.extend([
+                torch.nn.Linear(
+                    in_features=cnn_features if i==0 else self.mlp_layers_size[i-1],
+                    out_features=layer_size,
+                ),
+                torch.nn.Dropout(p=self.dropout),
+                torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope),
+            ])
+
+        # output node
+        self.mlp_layers.append(
+            torch.nn.Linear(in_features=self.mlp_layers_size[-1], out_features=1)
+        )
+
+        # parameter count
+        total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"Total parameters {total_parameters:,}")
+        cnn_parameters = sum(p.numel() for p in self.cnn_layers.parameters() if p.requires_grad)
+        mlp_parameters = sum(p.numel() for p in self.mlp_layers.parameters() if p.requires_grad)
+        print(f"  CNN parameters {cnn_parameters:,}")
+        print(f"  MLP parameters {mlp_parameters:,}")
+
+    def forward(self, signals: torch.Tensor):
+        features = self.cnn_layers(signals)
+        prediction = self.mlp_layers(features)
+        return prediction
+
+
+@dataclasses.dataclass(eq=False)
+class Lit_Model(pl.LightningModule):
+    lr: float = 1e-3
+    lr_scheduler_patience: int = 2
+    lr_scheduler_threshold: float = 1e-3
+    weight_decay: float = 1e-3
+    log_dir: str = '.'
+    monitor_metric: str = 'val_score'
+    
+    def __post_init__(self):
+        super().__init__()
+        self.torch_model = None
+
+    def set_torch_model(self, torch_model: Model_Base_Dataclass = None):
+        assert torch_model
+        self.torch_model = torch_model
+        dataclasses.asdict(self)
+        dataclasses.asdict(torch_model)
+        instance_fields = dataclasses.asdict(self) | dataclasses.asdict(torch_model)
+        self.save_hyperparameters(
+            instance_fields,
+            ignore=[
+                'lr_scheduler_patience', 
+                'lr_scheduler_threshold', 
+            ],
+        )
+
+        print(f'Initiating {self.__class__.__name__}')
+        class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
+        for field_name in dataclasses.asdict(self):
+            value = getattr(self, field_name)
+            field_str = f"  {field_name}: {value}"
+            default_value = class_fields_dict[field_name].default
+            if value != default_value:
+                field_str += f" (default {default_value})"
+            print(field_str)
+
+        self.signal_window_size = self.torch_model.signal_window_size
+        self.example_input_array = torch.zeros(
+            (2, 1, self.signal_window_size, 8, 8), 
+            dtype=torch.float32,
+        )
         self.mse_loss = torchmetrics.MeanSquaredError()
         self.r2_score = torchmetrics.R2Score()
-        self.monitor_metric = 'val_score'
 
     def forward(self, signals):
-        return self.model(signals)
+        return self.torch_model(signals)
 
     def training_step(self, batch, batch_idx) -> torch.Tensor:
         signals, labels = batch
@@ -288,7 +393,7 @@ class Lit_Model_CNN01(
                 patience=self.lr_scheduler_patience,
                 threshold=self.lr_scheduler_threshold,
                 min_lr=1e-6,
-                mode='min' if self.monitor_metric.endswith('loss') else 'max',
+                mode='min' if 'loss' in self.monitor_metric else 'max',
             ),
             'monitor': self.monitor_metric,
         }

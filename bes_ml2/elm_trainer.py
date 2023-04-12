@@ -1,4 +1,3 @@
-from __future__ import annotations
 import dataclasses
 import os
 
@@ -24,13 +23,13 @@ class BES_Trainer:
     enable_progress_bar: bool = True
     num_nodes: int = 1
     datamodule: pl.LightningDataModule = None
-    model: pl.LightningModule = None
+    lit_model: pl.LightningModule = None
     monitor: str = 'val_score'
     wandb_log_freq: int = 100
     pl_log_freq: int = 50
 
     def __post_init__(self):
-        assert self.datamodule and self.model
+        assert self.datamodule and self.lit_model
         if self.wandb_log:
             wandb.login()
         self.trainer = None
@@ -48,7 +47,7 @@ class BES_Trainer:
             print(field_str)
 
         print("Model Summary:")
-        print(ModelSummary(self.model, max_depth=-1))
+        print(ModelSummary(self.lit_model, max_depth=-1))
 
     def run_fast_dev(self):
         tmp_trainer = pl.Trainer(
@@ -57,7 +56,7 @@ class BES_Trainer:
             enable_model_summary=False,
         )
         tmp_trainer.fit(
-            model=self.model, 
+            model=self.lit_model, 
             datamodule=self.datamodule,
         )
 
@@ -74,8 +73,8 @@ class BES_Trainer:
         )
         self.loggers.append(tb_logger)
         version_str = tb_logger.version if tb_logger.version is str else f"version_{tb_logger.version}"
-        if hasattr(self.model, 'log_dir'):
-            self.model.log_dir = tb_logger.log_dir
+        if hasattr(self.lit_model, 'log_dir'):
+            self.lit_model.log_dir = tb_logger.log_dir
         
         if self.wandb_log:
             wandb_logger = loggers.WandbLogger(
@@ -84,7 +83,7 @@ class BES_Trainer:
                 name=version_str,
             )
             wandb_logger.watch(
-                self.model, 
+                self.lit_model, 
                 log='all', 
                 log_freq=self.wandb_log_freq,
             )
@@ -117,28 +116,32 @@ class BES_Trainer:
             devices="auto",
         )
 
-        self.trainer.fit(self.model, datamodule=self.datamodule)
+        self.trainer.fit(self.lit_model, datamodule=self.datamodule)
         self.trainer.test(datamodule=self.datamodule, ckpt_path='best')
         self.trainer.predict(datamodule=self.datamodule, ckpt_path='best')
 
 
 if __name__=='__main__':
-    signal_window_size = 128
+    signal_window_size = 512
     datamodule = elm_data.ELM_Datamodule(
         # data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
         signal_window_size=signal_window_size,
         max_elms=100,
-        batch_size=128,
+        batch_size=16,
         fraction_validation=0.1,
         fraction_test=0.1,
     )
-    model = elm_model.Lit_Model_CNN01(
-        signal_window_size=signal_window_size,
+    lit_model = elm_model.Lit_Model(
         lr=1e-3,
         weight_decay=1e-5,
     )
+    torch_model = elm_model.Torch_Model_CNN02(
+        signal_window_size=signal_window_size,
+        mlp_layers_size=(64,32,32),
+    )
+    lit_model.set_torch_model(torch_model=torch_model)
     trainer = BES_Trainer(
-        model=model,
+        lit_model=lit_model,
         datamodule=datamodule,
         max_epochs=2,
         wandb_log=False,
