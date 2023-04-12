@@ -14,7 +14,7 @@ import elm_torch_model
 
 @dataclasses.dataclass(eq=False)
 class BES_Trainer:
-    experiment_group_dir: str = './Experiment_test'
+    experiment_group_dir: str = './experiment_default'
     experiment_name: str = None  # if None, use default Tensorboard scheme
     max_epochs: int = 2
     gradient_clip_value: int = None
@@ -38,7 +38,7 @@ class BES_Trainer:
         print(f'Initiating {self.__class__.__name__}')
         class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
         for field_name in dataclasses.asdict(self):
-            if field_name in ['datamodule', 'lit_model']:
+            if field_name in ['datamodule', 'lightning_model']:
                 continue
             value = getattr(self, field_name)
             field_str = f"  {field_name}: {value}"
@@ -124,7 +124,7 @@ class BES_Trainer:
 
 
 if __name__=='__main__':
-    signal_window_size = 512
+    signal_window_size = 128
 
     """
     Step 1a: Initiate pytorch_lightning.LightningDataModule
@@ -147,9 +147,9 @@ if __name__=='__main__':
         lr=1e-3,
         weight_decay=1e-5,
     )
-    torch_model = elm_torch_model.Torch_Model_CNN02(
+    torch_model = elm_torch_model.Torch_Model_CNN01(
         signal_window_size=signal_window_size,
-        mlp_layers=(64,32,32),
+        # mlp_layers=(64,32,32),
     )
     lightning_model.set_torch_model(torch_model=torch_model)
 

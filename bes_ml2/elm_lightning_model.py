@@ -29,6 +29,7 @@ class Lightning_Model(pl.LightningModule):
     def set_torch_model(self, torch_model: torch.nn.Module = None):
         assert torch_model and hasattr(torch_model, 'signal_window_size')
         instance_fields = dataclasses.asdict(self) | dataclasses.asdict(torch_model)
+        instance_fields['torch_model_name'] = torch_model.__class__.__name__
         self.save_hyperparameters(
             instance_fields,
             ignore=[
