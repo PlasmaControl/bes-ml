@@ -10,7 +10,10 @@ import pytorch_lightning as pl
 from pytorch_lightning import loggers
 import torchmetrics
 
-import elm_datamodule
+try:
+    from . import elm_datamodule
+except:
+    from bes_ml2 import elm_datamodule
 
 
 @dataclasses.dataclass(eq=False)
@@ -99,11 +102,23 @@ class Lightning_Model(pl.LightningModule):
         axes_twinx = [axis.twinx() for axis in axes.flat]
         for i_elm, result in enumerate(results):
             labels = torch.concat([batch['labels'] for batch in result]).squeeze()
+            gather_labels = self.all_gather(labels)
+            # labels = torch.concat()
+            dataloader = self.trainer.predict_dataloaders[i_elm]
+            dataset: elm_datamodule.ELM_Predict_Dataset = dataloader.dataset
+            print(f"{i_elm} {labels.shape} {gather_labels.shape} {dataset.signals.shape}")
+        for i_elm, result in enumerate(results):
+            labels = torch.concat([batch['labels'] for batch in result]).squeeze()
             predictions = torch.concat([batch['predictions'] for batch in result]).squeeze()
             assert labels.shape[0] == predictions.shape[0]
             dataloader = self.trainer.predict_dataloaders[i_elm]
             dataset: elm_datamodule.ELM_Predict_Dataset = dataloader.dataset
             signal = dataset.signals[..., 2, 3].squeeze()
+            if signal.shape[0] != labels.shape[0]-1+self.signal_window_size:
+                print(i_elm)
+                print(dataset.signals.shape)
+                print(labels.shape[0]-1+self.signal_window_size)
+                print(labels.shape)
             assert signal.shape[0] == labels.shape[0]-1+self.signal_window_size
             time = (np.arange(signal.numel()) - dataset.active_elm_start_index)/1e3
             if i_elm % 6 == 0:

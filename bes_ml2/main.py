@@ -1,15 +1,21 @@
 import dataclasses
 import os
 
+import torch.distributed
 import pytorch_lightning as pl
 from pytorch_lightning import loggers
 from pytorch_lightning import callbacks as cb
 from pytorch_lightning.utilities.model_summary import ModelSummary
 import wandb
 
-import elm_datamodule
-import elm_lightning_model
-import elm_torch_model
+try:
+    from . import elm_datamodule
+    from . import elm_lightning_model
+    from . import elm_torch_model
+except:
+    from bes_ml2 import elm_datamodule
+    from bes_ml2 import elm_lightning_model
+    from bes_ml2 import elm_torch_model
 
 
 @dataclasses.dataclass(eq=False)
@@ -117,10 +123,18 @@ class BES_Trainer:
             accelerator="auto",
             devices="auto",
         )
+        self.trainer.strategy
 
         self.trainer.fit(self.lightning_model, datamodule=self.datamodule)
-        self.trainer.test(datamodule=self.datamodule, ckpt_path='best')
-        self.trainer.predict(datamodule=self.datamodule, ckpt_path='best')
+
+        torch.distributed.destroy_process_group()
+
+        if self.trainer.is_global_zero:
+            self.trainer.training_type_plugin.num_nodes = 1
+            self.trainer.training_type_plugin.num_processes = 1
+            self.trainer.accelerator_connector.replace_sampler_ddp = False
+            self.trainer.test(datamodule=self.datamodule, ckpt_path='best')
+            self.trainer.predict(datamodule=self.datamodule, ckpt_path='best')
 
 
 if __name__=='__main__':
@@ -134,8 +148,8 @@ if __name__=='__main__':
         signal_window_size=signal_window_size,
         max_elms=100,
         batch_size=16,
-        fraction_validation=0.1,
-        fraction_test=0.1,
+        fraction_validation=0.2,
+        fraction_test=0.4,
     )
 
     """
