@@ -1,7 +1,7 @@
 # default run directory
 run_dir*/
 study_test/
-Experiment*/
+experiment*/
 MNIST/
 
 # data files
