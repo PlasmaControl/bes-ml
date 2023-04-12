@@ -37,3 +37,7 @@ pytest.ini
 .coverage*
 profile/*.txt
 profile/*.out
+
+# confinement classification task
+bes_ml/confinement_classification/old/
+bes_ml/confinement_classification/ddp_*
