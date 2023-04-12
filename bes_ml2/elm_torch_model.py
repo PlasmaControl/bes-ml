@@ -26,7 +26,7 @@ class Torch_Model_Base_Dataclass:
                 torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope),
             ])
 
-        # output node
+        # output layer
         mlp_layers.append(
             torch.nn.Linear(
                 in_features=self.mlp_layers[-1], 
@@ -34,8 +34,6 @@ class Torch_Model_Base_Dataclass:
             )
         )
         return mlp_layers
-
-
 
 
 @dataclasses.dataclass(eq=False)

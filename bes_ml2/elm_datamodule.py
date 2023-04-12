@@ -97,7 +97,7 @@ class ELM_Predict_Dataset(torch.utils.data.Dataset):
 
 
 @dataclasses.dataclass(eq=False)
-class ELM_Datamodule_Dataclass():
+class ELM_Datamodule(pl.LightningDataModule):
     data_file: str = sample_elm_data_file.as_posix()  # path to data; dir or file depending on task
     batch_size: int = 128  # power of 2, like 32-256
     signal_window_size: int = 128  # power of 2, like 64-512
@@ -116,15 +116,8 @@ class ELM_Datamodule_Dataclass():
     max_predict_elms: int = 12
     prepare_data_per_node: bool = None  # hack to avoid error between dataclass and LightningDataModule
 
-
-@dataclasses.dataclass(eq=False)
-class ELM_Datamodule(
-        ELM_Datamodule_Dataclass,
-        pl.LightningDataModule,
-    ):
-
     def __post_init__(self):
-        super(ELM_Datamodule_Dataclass).__init__()
+        super().__init__()
         self.save_hyperparameters(ignore=[
             'max_predict_elms',
             'prepare_data_per_node',
