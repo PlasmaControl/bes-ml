@@ -151,13 +151,6 @@ if __name__=='__main__':
         signal_window_size=signal_window_size,
         mlp_layers=(64,32,32),
     )
-    # lightning_model = elm_lightning_model.Lightning_Unsupervised_Model(
-    #     lr=1e-3,
-    #     weight_decay=1e-5,
-    # )
-    # torch_model = elm_torch_model.Torch_Model_AE01(
-    #     signal_window_size=signal_window_size,
-    # )
     lightning_model.set_torch_model(torch_model=torch_model)
 
     """
