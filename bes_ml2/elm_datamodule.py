@@ -109,12 +109,9 @@ class ELM_Datamodule_Dataclass():
     signal_mean: float = None
     signal_stdev: float = None
     label_median: float = None
-    # standardize_signals: bool = True  # if True, standardize signals based on training data mean~0, stdev~1
     clip_sigma_outliers: float = 6.0  # remove signal windows with abs(standardized_signals) > n_sigma
-    # standardize_fft: bool = True  # if True, standardize FFTs based on training data log10(FFT^2) mean~0, stdev~1
     bad_elm_indices: list = None  # iterable of ELM indices to skip when reading data
     bad_elm_indices_csv: str | bool = True  # CSV file to read bad ELM indices
-    # pre_elm_size: int = None  # maximum pre-ELM window in time frames
     log_time: bool = False  # if True, use label = log(time_to_elm_onset)
     max_predict_elms: int = 12
     prepare_data_per_node: bool = None  # hack to avoid error between dataclass and LightningDataModule
@@ -148,7 +145,6 @@ class ELM_Datamodule(
             if value != default_value:
                 field_str += f" (default {default_value})"
             print(field_str)
-
 
     def prepare_data(self):
         # only called in main process
