@@ -96,17 +96,7 @@ class Lightning_Model(pl.LightningModule):
         }
     
     def on_predict_epoch_end(self, results) -> None:
-        fig, axes = plt.subplots(ncols=3, nrows=2, figsize=(12, 6))
         i_page = 1
-        plt.suptitle(f"Inference on ELMs in test dataset (page {i_page})")
-        axes_twinx = [axis.twinx() for axis in axes.flat]
-        for i_elm, result in enumerate(results):
-            labels = torch.concat([batch['labels'] for batch in result]).squeeze()
-            gather_labels = self.all_gather(labels)
-            # labels = torch.concat()
-            dataloader = self.trainer.predict_dataloaders[i_elm]
-            dataset: elm_datamodule.ELM_Predict_Dataset = dataloader.dataset
-            print(f"{i_elm} {labels.shape} {gather_labels.shape} {dataset.signals.shape}")
         for i_elm, result in enumerate(results):
             labels = torch.concat([batch['labels'] for batch in result]).squeeze()
             predictions = torch.concat([batch['predictions'] for batch in result]).squeeze()
@@ -114,24 +104,19 @@ class Lightning_Model(pl.LightningModule):
             dataloader = self.trainer.predict_dataloaders[i_elm]
             dataset: elm_datamodule.ELM_Predict_Dataset = dataloader.dataset
             signal = dataset.signals[..., 2, 3].squeeze()
-            if signal.shape[0] != labels.shape[0]-1+self.signal_window_size:
-                print(i_elm)
-                print(dataset.signals.shape)
-                print(labels.shape[0]-1+self.signal_window_size)
-                print(labels.shape)
             assert signal.shape[0] == labels.shape[0]-1+self.signal_window_size
             time = (np.arange(signal.numel()) - dataset.active_elm_start_index)/1e3
             if i_elm % 6 == 0:
-                for i_axis in range(axes.size):
-                    axes.flat[i_axis].clear()
-                    axes_twinx[i_axis].clear()
+                plt.close('all')
+                fig, axes = plt.subplots(ncols=3, nrows=2, figsize=(12, 6))
+                plt.suptitle(f"Inference on ELMs in test dataset (page {i_page})")
             plt.sca(axes.flat[i_elm%6])
             plt.plot(time[self.signal_window_size-1:], labels, label='Label')
             plt.plot(time[self.signal_window_size-1:], predictions, label='Prediction')
             plt.ylabel("Label | Prediction")
             plt.xlabel('Time to ELM (ms)')
             plt.legend(fontsize='small', loc='upper right')
-            twinx = axes_twinx[i_elm%6]
+            twinx = axes.flat[i_elm%6].twinx()
             twinx.plot(time, signal, label='Signal', color='C2')
             twinx.set_ylabel('Scaled signal')
             twinx.legend(fontsize='small', loc='lower right')
@@ -139,6 +124,7 @@ class Lightning_Model(pl.LightningModule):
                 plt.tight_layout()
                 filename = f'inference_{i_page:02d}'
                 filepath = os.path.join(self.log_dir, filename)
+                print(f"Saving figures {filepath}{{.pdf,.png}}")
                 plt.savefig(filepath+'.pdf', format='pdf', transparent=True)
                 plt.savefig(filepath+'.png', format='png', transparent=True)
                 for logger in self.loggers:
@@ -147,7 +133,7 @@ class Lightning_Model(pl.LightningModule):
                     if isinstance(logger, loggers.WandbLogger):
                         logger.log_image(key='inference', images=[filepath+'.png'])
                 i_page += 1
-        plt.close(fig)
+                plt.close(fig)
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(

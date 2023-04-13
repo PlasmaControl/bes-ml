@@ -3,6 +3,7 @@ run_dir*/
 study_test/
 experiment*/
 MNIST/
+lightning_logs/
 
 # data files
 *.pkl

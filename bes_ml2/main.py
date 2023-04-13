@@ -39,6 +39,7 @@ class BES_Trainer:
         assert self.datamodule.signal_window_size == self.lightning_model.signal_window_size
 
         self.monitor_metric = self.lightning_model.monitor_metric
+        self.trainer = None
 
         print(f'Initiating {self.__class__.__name__}')
         class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
@@ -110,7 +111,7 @@ class BES_Trainer:
     def run_all(self):
         self.make_loggers_and_callbacks()
 
-        trainer = pl.Trainer(
+        self.trainer = pl.Trainer(
             max_epochs=self.max_epochs,
             gradient_clip_val=self.gradient_clip_value,
             logger=self.loggers,
@@ -122,34 +123,34 @@ class BES_Trainer:
             devices="auto",
             accelerator="auto",
         )
-        trainer.strategy
-
-        trainer.fit(
+        print(f"Log directory: {self.trainer.log_dir}")
+        self.trainer.fit(
             model=self.lightning_model, 
             datamodule=self.datamodule,
         )
-        trainer.test(
+        self.trainer.test(
             model=self.lightning_model,
             datamodule=self.datamodule, 
             ckpt_path='best',
         )
 
-        # torch.distributed.destroy_process_group()
-        # if trainer.is_global_zero:
-        #     tmp_trainer = pl.Trainer(
-        #         enable_model_summary=False,
-        #         enable_progress_bar=self.enable_progress_bar,
-        #         num_nodes=1,
-        #         num_processes=1,
-        #         devices=1,
-        #         accelerator="auto",
-        #         resume_from_checkpoint=None,
-        #     )
-        #     tmp_trainer.predict(
-        #         model=self.lightning_model, 
-        #         datamodule=self.datamodule, 
-        #         ckpt_path='best',
-        #     )
+        # ugly hack to properly predict a single ELM
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+        if self.trainer.is_global_zero:
+            tmp_trainer = pl.Trainer(
+                enable_model_summary=False,
+                enable_progress_bar=self.enable_progress_bar,
+                num_nodes=1,
+                num_processes=1,
+                devices=1,
+                accelerator="auto",
+            )
+            tmp_trainer.predict(
+                model=self.lightning_model, 
+                datamodule=self.datamodule, 
+                ckpt_path=self.trainer.checkpoint_callback.best_model_path,
+            )
 
 
 if __name__=='__main__':
@@ -159,12 +160,12 @@ if __name__=='__main__':
     Step 1a: Initiate pytorch_lightning.LightningDataModule
     """
     datamodule = elm_datamodule.ELM_Datamodule(
-        # data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
+        data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
         signal_window_size=signal_window_size,
         max_elms=50,
-        batch_size=16,
-        fraction_validation=0.2,
-        fraction_test=0.4,
+        batch_size=256,
+        fraction_validation=0.1,
+        fraction_test=0.1,
     )
 
     """
