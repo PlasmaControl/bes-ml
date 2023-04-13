@@ -33,6 +33,7 @@ class BES_Trainer:
     lightning_model: elm_lightning_model.Lightning_Model = None
     wandb_log_freq: int = 100
     pl_log_freq: int = 50
+    skip_test_predict: bool = False
 
     def __post_init__(self):
         assert self.datamodule and self.lightning_model
@@ -80,8 +81,7 @@ class BES_Trainer:
         )
         self.loggers.append(tb_logger)
         version_str = tb_logger.version if tb_logger.version is str else f"version_{tb_logger.version}"
-        if hasattr(self.lightning_model, 'log_dir'):
-            self.lightning_model.log_dir = tb_logger.log_dir
+        self.lightning_model.log_dir = tb_logger.log_dir
         
         if self.wandb_log:
             wandb.login()
@@ -128,6 +128,10 @@ class BES_Trainer:
             model=self.lightning_model, 
             datamodule=self.datamodule,
         )
+
+        if self.skip_test_predict:
+            return
+
         self.trainer.test(
             model=self.lightning_model,
             datamodule=self.datamodule, 
@@ -145,6 +149,7 @@ class BES_Trainer:
                 num_processes=1,
                 devices=1,
                 accelerator="auto",
+                logger=False,
             )
             tmp_trainer.predict(
                 model=self.lightning_model, 
@@ -162,10 +167,10 @@ if __name__=='__main__':
     datamodule = elm_datamodule.ELM_Datamodule(
         data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
         signal_window_size=signal_window_size,
-        max_elms=50,
-        batch_size=256,
-        fraction_validation=0.1,
-        fraction_test=0.1,
+        max_elms=10,
+        batch_size=512,
+        fraction_validation=0.15,
+        fraction_test=0.15,
     )
 
     """
@@ -179,7 +184,10 @@ if __name__=='__main__':
     )
     torch_model = elm_torch_model.Torch_Model_CNN01(
         signal_window_size=signal_window_size,
-        # mlp_layers=(64,32,32),
+        cnn_layer1_num_kernels=32,
+        cnn_layer2_num_kernels=16,
+        mlp_layer1_size=64,
+        mlp_layer2_size=32,
     )
     lightning_model.set_torch_model(torch_model=torch_model)
 
@@ -189,7 +197,8 @@ if __name__=='__main__':
     trainer = BES_Trainer(
         lightning_model=lightning_model,
         datamodule=datamodule,
-        max_epochs=2,
+        max_epochs=1,
         wandb_log=False,
+        skip_test_predict=True,
     )
     trainer.run_all()

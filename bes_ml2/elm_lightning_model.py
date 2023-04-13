@@ -22,8 +22,8 @@ class Lightning_Model(pl.LightningModule):
     lr_scheduler_patience: int = 2
     lr_scheduler_threshold: float = 1e-3
     weight_decay: float = 1e-3
-    log_dir: str = '.'
     monitor_metric: str = 'val_score'
+    log_dir: str = dataclasses.field(default=None, init=False)
     
     def __post_init__(self):
         super().__init__()
@@ -31,15 +31,11 @@ class Lightning_Model(pl.LightningModule):
 
     def set_torch_model(self, torch_model: torch.nn.Module = None):
         assert torch_model and hasattr(torch_model, 'signal_window_size')
-        instance_fields = dataclasses.asdict(self) | dataclasses.asdict(torch_model)
-        instance_fields['torch_model_name'] = torch_model.__class__.__name__
-        self.save_hyperparameters(
-            instance_fields,
-            ignore=[
-                'lr_scheduler_patience', 
-                'lr_scheduler_threshold', 
-            ],
-        )
+        hp_fields = dataclasses.asdict(self) | dataclasses.asdict(torch_model)
+        hp_fields['torch_model_name'] = torch_model.__class__.__name__
+        for field in ['lr_scheduler_patience','lr_scheduler_threshold']:
+            hp_fields.pop(field)
+        self.save_hyperparameters(hp_fields)
 
         print(f'Initiating {self.__class__.__name__}')
         class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
@@ -53,6 +49,34 @@ class Lightning_Model(pl.LightningModule):
 
         self.torch_model = torch_model
         self.signal_window_size = self.torch_model.signal_window_size
+
+        # initialize trainable parameters
+        print("Initializing model layers")
+        for name, param in self.torch_model.named_parameters():
+            if name.endswith(".bias"):
+                # print(name, param.shape)
+                print(f"  {name}: initialized to zeros")
+                param.data.fill_(0)
+            else:
+                dx = np.prod(param.shape[1:])
+                sqrt_k = np.sqrt(3. / dx)
+                print(f"  {name}: initialized to uniform +/- {sqrt_k:.1e}")
+                param.data.uniform_(-sqrt_k, sqrt_k)
+                print(f"    dx*var: {dx*torch.var(param.data)}")
+       
+        # TODO eval var(outputs) with inputs ~ N(0,1)
+        sample_batch = torch.empty(
+            (512, 1, self.signal_window_size, 8, 8), 
+            dtype=torch.float32,
+        )
+        sample_batch.normal_()
+        self.eval()
+        with torch.no_grad():
+            sample_batch_outputs = self(sample_batch)
+        print(sample_batch_outputs.size())
+        print(torch.mean(sample_batch_outputs))
+        print(torch.var(sample_batch_outputs))
+
         self.example_input_array = torch.zeros(
             (2, 1, self.signal_window_size, 8, 8), 
             dtype=torch.float32,

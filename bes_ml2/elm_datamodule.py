@@ -106,21 +106,28 @@ class ELM_Datamodule(pl.LightningDataModule):
     fraction_test: float = 0.2  # fraction of dataset for testing
     seed: int = 0  # RNG seed for deterministic, reproducible shuffling of ELM events
     max_elms: int = None
+    max_predict_elms: int = 24
     signal_mean: float = None
     signal_stdev: float = None
+    clip_lb: float = None
+    clip_ub: float = None
     label_median: float = None
-    clip_sigma_outliers: float = 6.0  # remove signal windows with abs(standardized_signals) > n_sigma
+    clip_sigma_outliers: float = 8.0  # remove signal windows with abs(standardized_signals) > n_sigma
     bad_elm_indices: list = None  # iterable of ELM indices to skip when reading data
     bad_elm_indices_csv: str | bool = True  # CSV file to read bad ELM indices
     log_time: bool = False  # if True, use label = log(time_to_elm_onset)
-    max_predict_elms: int = 12
     prepare_data_per_node: bool = None  # hack to avoid error between dataclass and LightningDataModule
 
     def __post_init__(self):
         super().__init__()
         self.save_hyperparameters(ignore=[
-            'max_predict_elms',
             'prepare_data_per_node',
+            'clip_ub',
+            'clip_lb',
+            'signal_mean',
+            'signal_stdev',
+            'label_median',
+            'max_predict_elms',
         ])
         self.datasets = {}
         self.all_elm_indices = None
@@ -253,44 +260,64 @@ class ELM_Datamodule(pl.LightningDataModule):
             packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
             assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices]))
             assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices + self.signal_window_size]))
-            # standardize signals based on training data
-            if None in [self.signal_mean, self.signal_stdev]:
-                assert dataset_stage == 'train'
-                print("  Calculating signal mean and std from training data")
-                stats = self._get_statistics(
-                    sample_indices=packaged_valid_t0_indices,
-                    signals=packaged_signals,
-                )
-                self.signal_mean = stats['mean']
-                self.signal_stdev = stats['stdev']
-            print(f"  Standarizing signals with mean {self.signal_mean:.3f} and std {self.signal_stdev:.3f} form training data")
-            packaged_signals = (packaged_signals - self.signal_mean) / self.signal_stdev
-            self._get_statistics(
+            print("  Raw data stats")
+            stats = self._get_statistics(
                 sample_indices=packaged_valid_t0_indices,
                 signals=packaged_signals,
             )
             # clip outlier signals
             if self.clip_sigma_outliers:
-                print(f"  Removing {self.clip_sigma_outliers:.1f} sigma outliers from signals")
+                if None in [self.clip_lb, self.clip_ub]:
+                    assert dataset_stage == 'train'
+                    print("  Calculating clipping upper/lower bounds from training data")
+                    self.clip_lb = stats['mean'] - self.clip_sigma_outliers * stats['stdev']
+                    self.clip_ub = stats['mean'] + self.clip_sigma_outliers * stats['stdev']
+                print(f"  Clipping {self.clip_sigma_outliers:.2f} sigma outliers from signals")
+                print(f"  Clipping lower bound {self.clip_lb:.3f} upper bound {self.clip_ub:.3f} based on training data")
                 mask = np.zeros(packaged_valid_t0_indices.size, dtype=bool)
                 for i_t0_index, t0_index in enumerate(packaged_valid_t0_indices):
                     signal_window = packaged_signals[t0_index: t0_index + self.signal_window_size, :, :]
-                    mask[i_t0_index] = np.max(np.abs(signal_window)) <= self.clip_sigma_outliers
+                    mask[i_t0_index] = (
+                        np.max(signal_window) <= self.clip_ub and
+                        np.min(signal_window) >= self.clip_lb
+                    )
                 packaged_valid_t0_indices = packaged_valid_t0_indices[mask]
-                self._get_statistics(
+                print("  Clipped data stats")
+                stats = self._get_statistics(
                     sample_indices=packaged_valid_t0_indices,
                     signals=packaged_signals,
                 )
+            # standardize signals based on training data
+            if None in [self.signal_mean, self.signal_stdev]:
+                assert dataset_stage == 'train'
+                print("  Calculating signal mean and std from training data")
+                self.signal_mean = stats['mean']
+                self.signal_stdev = stats['stdev']
+                self.save_hyperparameters({
+                    'clip_lb': self.clip_lb.item(),
+                    'clip_ub': self.clip_ub.item(),
+                    'signal_mean': self.signal_mean.item(),
+                    'signal_stdev': self.signal_stdev.item(),
+                })
+            print(f"  Standarizing signals with mean {self.signal_mean:.3f} and std {self.signal_stdev:.3f} form training data")
+            packaged_signals = (packaged_signals - self.signal_mean) / self.signal_stdev
+            print("  Standardized signal stats")
+            self._get_statistics(
+                sample_indices=packaged_valid_t0_indices,
+                signals=packaged_signals,
+            )
+
             # normalize labels with min=-1 and median=0
             if self.label_median is None:
                 assert dataset_stage == 'train'
                 print("  Calculating median label from training labels")
                 self.label_median = np.median(packaged_labels[packaged_valid_t0_indices+self.signal_window_size])
-            print(f"  Normalizing labels (min=-1 and median~0) with median {self.label_median:.1f} form training labels")
+                self.save_hyperparameters({'label_median': self.label_median.item()})
+            print(f"  Normalizing labels (min=-1 and median~0) with median {self.label_median:.3f} form training labels")
             packaged_labels = (packaged_labels - self.label_median) / (self.label_median-1)
             label_min = np.nanmin(packaged_labels)
             label_median = np.median(packaged_labels[packaged_valid_t0_indices+self.signal_window_size])
-            print(f"    Label min {label_min:.1f} median {label_median:.1f}")
+            print(f"    Label min {label_min:.3f} median {label_median:.3f}")
             assert label_min == -1
             if dataset_stage in ['train', 'validation', 'test']:
                 self.datasets[dataset_stage] = ELM_TrainValTest_Dataset(
@@ -303,6 +330,8 @@ class ELM_Datamodule(pl.LightningDataModule):
             if dataset_stage in ['test', 'predict']:
                 predict_datasets = []
                 for i_elm, idx_start in enumerate(packaged_window_start):
+                    if self.max_predict_elms and i_elm == self.max_predict_elms:
+                        break
                     if i_elm == packaged_window_start.size - 1:
                         idx_stop = packaged_labels.size - 1
                     else:
@@ -375,7 +404,7 @@ class ELM_Datamodule(pl.LightningDataModule):
         bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
         mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
         stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
-        print(f"    Stats: count {sample_indices.size:,} min {signal_min:.1f} max {signal_max:.1f} mean {mean:.1f} stdev {stdev:.1f}")
+        print(f"    Stats: count {sample_indices.size:,} min {signal_min:.3f} max {signal_max:.3f} mean {mean:.3f} stdev {stdev:.3f}")
         return {
             'count': sample_indices.size,
             'min': signal_min,
