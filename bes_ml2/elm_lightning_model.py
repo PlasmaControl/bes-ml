@@ -54,17 +54,15 @@ class Lightning_Model(pl.LightningModule):
         print("Initializing model layers")
         for name, param in self.torch_model.named_parameters():
             if name.endswith(".bias"):
-                # print(name, param.shape)
                 print(f"  {name}: initialized to zeros")
                 param.data.fill_(0)
             else:
                 dx = np.prod(param.shape[1:])
                 sqrt_k = np.sqrt(3. / dx)
-                print(f"  {name}: initialized to uniform +/- {sqrt_k:.1e}")
+                print(f"  {name}: initialized to uniform +- {sqrt_k:.1e}")
                 param.data.uniform_(-sqrt_k, sqrt_k)
                 print(f"    dx*var: {dx*torch.var(param.data)}")
        
-        # TODO eval var(outputs) with inputs ~ N(0,1)
         sample_batch = torch.empty(
             (512, 1, self.signal_window_size, 8, 8), 
             dtype=torch.float32,
@@ -93,6 +91,26 @@ class Lightning_Model(pl.LightningModule):
         loss = self.mse_loss(predictions, labels)
         self.log("train_loss", self.mse_loss)
         return loss
+
+    def on_train_epoch_start(self):
+        print(f"Epoch {self.current_epoch}: start")
+        if self.trainer.is_global_zero:
+            for name, param in self.torch_model.named_parameters():
+                if 'weight' in name:
+                    values = param.data.detach()
+                    mean = torch.mean(values).item()
+                    std = torch.std(values).item()
+                    z_scores = (values-mean)/std
+                    skew = torch.mean(z_scores**3).item()
+                    exkurt = torch.mean(z_scores**4).item() - 3
+                    self.log(f"{name}.mean", mean, rank_zero_only=True)
+                    self.log(f"{name}.std", std, rank_zero_only=True)
+                    self.log(f"{name}.skew", skew, rank_zero_only=True)
+                    self.log(f"{name}.exkurt", exkurt, rank_zero_only=True)
+
+    def on_train_epoch_end(self):
+        print(f"Epoch {self.current_epoch}: end")
+
 
     def validation_step(self, batch, batch_idx):
         signals, labels = batch

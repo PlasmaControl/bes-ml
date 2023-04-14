@@ -107,11 +107,11 @@ class ELM_Datamodule(pl.LightningDataModule):
     seed: int = 0  # RNG seed for deterministic, reproducible shuffling of ELM events
     max_elms: int = None
     max_predict_elms: int = 24
-    signal_mean: float = None
-    signal_stdev: float = None
-    clip_lb: float = None
-    clip_ub: float = None
-    label_median: float = None
+    # signal_mean: float = None
+    # signal_stdev: float = None
+    # clip_lb: float = None
+    # clip_ub: float = None
+    # label_median: float = None
     clip_sigma_outliers: float = 8.0  # remove signal windows with abs(standardized_signals) > n_sigma
     bad_elm_indices: list = None  # iterable of ELM indices to skip when reading data
     bad_elm_indices_csv: str | bool = True  # CSV file to read bad ELM indices
@@ -122,13 +122,26 @@ class ELM_Datamodule(pl.LightningDataModule):
         super().__init__()
         self.save_hyperparameters(ignore=[
             'prepare_data_per_node',
+            'max_predict_elms',
+        ])
+
+        # datamodule state
+        self.state_items = [
             'clip_ub',
             'clip_lb',
             'signal_mean',
             'signal_stdev',
             'label_median',
-            'max_predict_elms',
-        ])
+        ]
+        for item in self.state_items:
+            if not hasattr(self, item):
+                setattr(self, item, None)
+        # self.clip_ub = None
+        # self.clip_lb = None
+        # self.signal_mean = None
+        # self.signal_stdev = None
+        # self.label_median = None
+
         self.datasets = {}
         self.all_elm_indices = None
         self.test_elm_indices = None
@@ -199,12 +212,22 @@ class ELM_Datamodule(pl.LightningDataModule):
         self.validation_elm_indices = train_val_elm_indices[:n_validation_elms]
         self.train_elm_indices = train_val_elm_indices[n_validation_elms:]
 
+    def state_dict(self) -> dict:
+        state = {}
+        for item in self.state_items:
+            state[item] = getattr(self, item)
+        return state
+
+    def load_state_dict(self, state: dict) -> None:
+        print("**** Loading state_dict ****")
+        for item in self.state_items:
+            setattr(self, item, state[item])
+
     def setup(self, stage=None):
         # called on every process
         # open ELM data file, read ELM indices, removed ignored ELM events
         print(f"Running ELM_Datamodule.setup(stage={stage})")
         self._get_elm_indices_and_split()
-        assert self.all_elm_indices is not None
 
         if stage == 'fit':
             dataset_elm_indices = {
@@ -215,8 +238,10 @@ class ELM_Datamodule(pl.LightningDataModule):
             dataset_elm_indices = {
                 stage: self.test_elm_indices,
             }
-        else:
-            raise ValueError
+
+        if stage != 'fit':
+            for state_item in self.state_items:
+                assert getattr(self, state_item), f"self.{state_item} is False"
 
         for dataset_stage, indices in dataset_elm_indices.items():
 
@@ -268,10 +293,14 @@ class ELM_Datamodule(pl.LightningDataModule):
             # clip outlier signals
             if self.clip_sigma_outliers:
                 if None in [self.clip_lb, self.clip_ub]:
-                    assert dataset_stage == 'train'
+                    assert dataset_stage == 'train', f"Dataset_stage: {dataset_stage}"
                     print("  Calculating clipping upper/lower bounds from training data")
                     self.clip_lb = stats['mean'] - self.clip_sigma_outliers * stats['stdev']
                     self.clip_ub = stats['mean'] + self.clip_sigma_outliers * stats['stdev']
+                    self.save_hyperparameters({
+                        'clip_lb': self.clip_lb.item(),
+                        'clip_ub': self.clip_ub.item(),
+                    })
                 print(f"  Clipping {self.clip_sigma_outliers:.2f} sigma outliers from signals")
                 print(f"  Clipping lower bound {self.clip_lb:.3f} upper bound {self.clip_ub:.3f} based on training data")
                 mask = np.zeros(packaged_valid_t0_indices.size, dtype=bool)
@@ -289,13 +318,11 @@ class ELM_Datamodule(pl.LightningDataModule):
                 )
             # standardize signals based on training data
             if None in [self.signal_mean, self.signal_stdev]:
-                assert dataset_stage == 'train'
+                assert dataset_stage == 'train', f"Dataset_stage: {dataset_stage}"
                 print("  Calculating signal mean and std from training data")
                 self.signal_mean = stats['mean']
                 self.signal_stdev = stats['stdev']
                 self.save_hyperparameters({
-                    'clip_lb': self.clip_lb.item(),
-                    'clip_ub': self.clip_ub.item(),
                     'signal_mean': self.signal_mean.item(),
                     'signal_stdev': self.signal_stdev.item(),
                 })
@@ -309,7 +336,7 @@ class ELM_Datamodule(pl.LightningDataModule):
 
             # normalize labels with min=-1 and median=0
             if self.label_median is None:
-                assert dataset_stage == 'train'
+                assert dataset_stage == 'train', f"Dataset_stage: {dataset_stage}"
                 print("  Calculating median label from training labels")
                 self.label_median = np.median(packaged_labels[packaged_valid_t0_indices+self.signal_window_size])
                 self.save_hyperparameters({'label_median': self.label_median.item()})
@@ -418,6 +445,7 @@ class ELM_Datamodule(pl.LightningDataModule):
             dataset=self.datasets["train"],
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            persistent_workers=True,
         )
 
     def val_dataloader(self):
@@ -425,6 +453,7 @@ class ELM_Datamodule(pl.LightningDataModule):
             dataset=self.datasets["validation"],
             batch_size=1024,
             num_workers=self.num_workers,
+            persistent_workers=True,
         )
 
     def test_dataloader(self):
@@ -432,6 +461,7 @@ class ELM_Datamodule(pl.LightningDataModule):
             dataset=self.datasets["test"],
             batch_size=1024,
             num_workers=self.num_workers,
+            persistent_workers=True,
         )
 
     def predict_dataloader(self):
@@ -440,5 +470,6 @@ class ELM_Datamodule(pl.LightningDataModule):
                 dataset=dataset,
                 batch_size=1024,
                 num_workers=self.num_workers,
+                persistent_workers=True,
             ) for dataset in self.datasets['predict']
         ]

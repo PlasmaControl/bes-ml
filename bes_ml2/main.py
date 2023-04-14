@@ -123,7 +123,7 @@ class BES_Trainer:
             devices="auto",
             accelerator="auto",
         )
-        print(f"Log directory: {self.trainer.log_dir}")
+        # print(f"Log directory: {self.trainer.log_dir}")
         self.trainer.fit(
             model=self.lightning_model, 
             datamodule=self.datamodule,
@@ -132,11 +132,15 @@ class BES_Trainer:
         if self.skip_test_predict:
             return
 
-        self.trainer.test(
-            model=self.lightning_model,
-            datamodule=self.datamodule, 
-            ckpt_path='best',
-        )
+        try:
+            self.trainer.test(
+                model=self.lightning_model,
+                datamodule=self.datamodule, 
+                ckpt_path='best',
+            )
+        except Exception as e:
+            print(self.trainer.global_rank, e)
+            raise e
 
         # ugly hack to properly predict a single ELM
         if torch.distributed.is_initialized():
@@ -167,10 +171,10 @@ if __name__=='__main__':
     datamodule = elm_datamodule.ELM_Datamodule(
         data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
         signal_window_size=signal_window_size,
-        max_elms=10,
+        max_elms=50,
         batch_size=512,
-        fraction_validation=0.15,
-        fraction_test=0.15,
+        fraction_validation=0.1,
+        fraction_test=0.1,
     )
 
     """
@@ -197,8 +201,8 @@ if __name__=='__main__':
     trainer = BES_Trainer(
         lightning_model=lightning_model,
         datamodule=datamodule,
-        max_epochs=1,
+        max_epochs=2,
         wandb_log=False,
-        skip_test_predict=True,
+        # skip_test_predict=True,
     )
     trainer.run_all()
