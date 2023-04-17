@@ -117,8 +117,11 @@ class Lightning_Model(pl.LightningModule):
         predictions = self(signals)
         self.mse_loss(predictions, labels)
         self.log("val_loss", self.mse_loss)
-        self.r2_score(predictions, labels)
-        self.log("val_score", self.r2_score)
+        if self.current_epoch >= 25:
+            self.r2_score(predictions, labels)
+            self.log("val_score", self.r2_score)
+        else:
+            self.log("val_score", 0)
 
     def test_step(self, batch, batch_idx):
         signals, labels = batch
@@ -190,7 +193,7 @@ class Lightning_Model(pl.LightningModule):
                 factor=0.5,
                 patience=self.lr_scheduler_patience,
                 threshold=self.lr_scheduler_threshold,
-                min_lr=1e-6,
+                min_lr=1e-5,
                 mode='min' if 'loss' in self.monitor_metric else 'max',
             ),
             'monitor': self.monitor_metric,

@@ -1,5 +1,6 @@
 import dataclasses
 import os
+from datetime import datetime
 
 import torch.distributed
 import pytorch_lightning as pl
@@ -28,7 +29,6 @@ class BES_Trainer:
     early_stopping_min_delta: float = 1e-3
     early_stopping_patience: int = 10
     enable_progress_bar: bool = True
-    num_nodes: int = 1
     datamodule: elm_datamodule.ELM_Datamodule = None
     lightning_model: elm_lightning_model.Lightning_Model = None
     wandb_log_freq: int = 100
@@ -41,6 +41,10 @@ class BES_Trainer:
 
         self.monitor_metric = self.lightning_model.monitor_metric
         self.trainer = None
+
+        if self.experiment_name is None:
+            datetime_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            self.experiment_name = f"run_{datetime_str}"
 
         print(f'Initiating {self.__class__.__name__}')
         class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
@@ -80,7 +84,7 @@ class BES_Trainer:
             version=self.experiment_name,
         )
         self.loggers.append(tb_logger)
-        version_str = tb_logger.version if tb_logger.version is str else f"version_{tb_logger.version}"
+        # version_str = tb_logger.version if tb_logger.version is str else f"version_{tb_logger.version}"
         self.lightning_model.log_dir = tb_logger.log_dir
         
         if self.wandb_log:
@@ -88,7 +92,7 @@ class BES_Trainer:
             wandb_logger = loggers.WandbLogger(
                 save_dir=self.experiment_group_dir,
                 project=os.path.basename(self.experiment_group_dir),
-                name=version_str,
+                name=tb_logger.version,
             )
             wandb_logger.watch(
                 self.lightning_model, 
@@ -119,7 +123,7 @@ class BES_Trainer:
             enable_model_summary=False,
             enable_progress_bar=self.enable_progress_bar,
             log_every_n_steps=self.pl_log_freq,
-            num_nodes=self.num_nodes,
+            num_nodes=int(os.getenv('SLURM_NNODES', default=1)),
             devices="auto",
             accelerator="auto",
         )
@@ -132,34 +136,35 @@ class BES_Trainer:
         if self.skip_test_predict:
             return
 
-        try:
-            self.trainer.test(
-                model=self.lightning_model,
-                datamodule=self.datamodule, 
-                ckpt_path='best',
-            )
-        except Exception as e:
-            print(self.trainer.global_rank, e)
-            raise e
+        self.trainer.test(
+            model=self.lightning_model,
+            datamodule=self.datamodule, 
+            ckpt_path='best',
+        )
+        self.trainer.predict(
+            model=self.lightning_model,
+            datamodule=self.datamodule, 
+            ckpt_path='best',
+        )
 
-        # ugly hack to properly predict a single ELM
-        if torch.distributed.is_initialized():
-            torch.distributed.destroy_process_group()
-        if self.trainer.is_global_zero:
-            tmp_trainer = pl.Trainer(
-                enable_model_summary=False,
-                enable_progress_bar=self.enable_progress_bar,
-                num_nodes=1,
-                num_processes=1,
-                devices=1,
-                accelerator="auto",
-                logger=False,
-            )
-            tmp_trainer.predict(
-                model=self.lightning_model, 
-                datamodule=self.datamodule, 
-                ckpt_path=self.trainer.checkpoint_callback.best_model_path,
-            )
+        # # ugly hack to properly predict a single ELM
+        # if torch.distributed.is_initialized():
+        #     torch.distributed.destroy_process_group()
+        # if self.trainer.is_global_zero:
+        #     tmp_trainer = pl.Trainer(
+        #         enable_model_summary=False,
+        #         enable_progress_bar=self.enable_progress_bar,
+        #         num_nodes=1,
+        #         num_processes=1,
+        #         devices=1,
+        #         accelerator="auto",
+        #         logger=False,
+        #     )
+        #     tmp_trainer.predict(
+        #         model=self.lightning_model, 
+        #         datamodule=self.datamodule, 
+        #         ckpt_path=self.trainer.checkpoint_callback.best_model_path,
+        #     )
 
 
 if __name__=='__main__':
@@ -202,7 +207,7 @@ if __name__=='__main__':
         lightning_model=lightning_model,
         datamodule=datamodule,
         max_epochs=2,
-        wandb_log=False,
+        wandb_log=True,
         # skip_test_predict=True,
     )
     trainer.run_all()
