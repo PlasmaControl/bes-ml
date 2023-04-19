@@ -2,6 +2,7 @@ import dataclasses
 import os
 
 import numpy as np
+import matplotlib.axes
 import matplotlib.pyplot as plt
 
 import torch
@@ -82,6 +83,7 @@ class Lightning_Model(LightningModule):
         )
         self.mse_loss = torchmetrics.MeanSquaredError()
         self.r2_score = torchmetrics.R2Score()
+        self.predict_outputs: list[list] = []
 
     def forward(self, signals):
         return self.torch_model(signals)
@@ -94,7 +96,6 @@ class Lightning_Model(LightningModule):
         return loss
 
     def on_train_epoch_start(self):
-        print(f"Epoch {self.current_epoch}: start")
         if self.trainer.is_global_zero:
             for name, param in self.torch_model.named_parameters():
                 if 'weight' in name:
@@ -109,10 +110,6 @@ class Lightning_Model(LightningModule):
                     self.log(f"{name}.skew", skew, rank_zero_only=True)
                     self.log(f"{name}.exkurt", exkurt, rank_zero_only=True)
 
-    def on_train_epoch_end(self):
-        print(f"Epoch {self.current_epoch}: end")
-
-
     def validation_step(self, batch, batch_idx):
         signals, labels = batch
         predictions = self(signals)
@@ -122,7 +119,7 @@ class Lightning_Model(LightningModule):
             self.r2_score(predictions, labels)
             self.log("val_score", self.r2_score)
         else:
-            self.log("val_score", 0)
+            self.log("val_score", 0.)
 
     def test_step(self, batch, batch_idx):
         signals, labels = batch
@@ -133,21 +130,24 @@ class Lightning_Model(LightningModule):
         self.log("test_score", self.r2_score)
         self.log("hp_metric", self.r2_score)
 
-    def predict_step(self, batch, batch_idx, dataloader_idx=0) -> dict:
+    def predict_step(self, batch, batch_idx, dataloader_idx=0) -> None:
         signals, labels = batch
         predictions = self(signals)
-        return {
+        if batch_idx == 0:
+            self.predict_outputs.append([])
+            assert dataloader_idx == len(self.predict_outputs)-1
+        self.predict_outputs[-1].append({
             'labels': labels,
             'predictions': predictions,
-        }
+        })
     
-    def on_predict_epoch_end(self, results) -> None:
+    def on_predict_epoch_end(self) -> None:
         i_page = 1
-        for i_elm, result in enumerate(results):
+        for i_elm, result in enumerate(self.predict_outputs):
             labels = torch.concat([batch['labels'] for batch in result]).squeeze()
             predictions = torch.concat([batch['predictions'] for batch in result]).squeeze()
             assert labels.shape[0] == predictions.shape[0]
-            dataloader = self.trainer.predict_dataloaders[i_elm]
+            dataloader: torch.utils.data.DataLoader = self.trainer.predict_dataloaders[i_elm]
             dataset: elm_datamodule.ELM_Predict_Dataset = dataloader.dataset
             signal = dataset.signals[..., 2, 3].squeeze()
             assert signal.shape[0] == labels.shape[0]-1+self.signal_window_size
@@ -162,11 +162,11 @@ class Lightning_Model(LightningModule):
             plt.ylabel("Label | Prediction")
             plt.xlabel('Time to ELM (ms)')
             plt.legend(fontsize='small', loc='upper right')
-            twinx = axes.flat[i_elm%6].twinx()
+            twinx: matplotlib.axes.Axes = axes.flat[i_elm%6].twinx()
             twinx.plot(time, signal, label='Signal', color='C2')
             twinx.set_ylabel('Scaled signal')
             twinx.legend(fontsize='small', loc='lower right')
-            if i_elm % 6 == 5 or i_elm == len(results)-1:
+            if i_elm % 6 == 5 or i_elm == len(self.predict_outputs)-1:
                 plt.tight_layout()
                 filename = f'inference_{i_page:02d}'
                 filepath = os.path.join(self.log_dir, filename)
@@ -180,6 +180,7 @@ class Lightning_Model(LightningModule):
                         logger.log_image(key='inference', images=[filepath+'.png'])
                 i_page += 1
                 plt.close(fig)
+        self.predict_outputs.clear()
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(

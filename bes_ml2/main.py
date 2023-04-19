@@ -174,8 +174,8 @@ if __name__=='__main__':
         signal_window_size=signal_window_size,
         max_elms=100,
         batch_size=512,
-        fraction_validation=0.1,
-        fraction_test=0.1,
+        # fraction_validation=0.1,
+        # fraction_test=0.1,
     )
 
     """
