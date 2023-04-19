@@ -4,10 +4,12 @@ from pathlib import Path
 
 import numpy as np
 import h5py
+
 import torch
 import torch.nn
 import torch.utils.data
-import pytorch_lightning as pl
+
+from lightning.pytorch import LightningDataModule
 
 from bes_data.sample_data import sample_elm_data_file
 from bes_data.elm_data_tools import bad_elm_indices_csv
@@ -97,7 +99,7 @@ class ELM_Predict_Dataset(torch.utils.data.Dataset):
 
 
 @dataclasses.dataclass(eq=False)
-class ELM_Datamodule(pl.LightningDataModule):
+class ELM_Datamodule(LightningDataModule):
     data_file: str = sample_elm_data_file.as_posix()  # path to data; dir or file depending on task
     batch_size: int = 128  # power of 2, like 32-256
     signal_window_size: int = 128  # power of 2, like 64-512

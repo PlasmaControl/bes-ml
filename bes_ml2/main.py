@@ -2,11 +2,8 @@ import dataclasses
 import os
 from datetime import datetime
 
-import torch.distributed
-import pytorch_lightning as pl
-from pytorch_lightning import loggers
-from pytorch_lightning import callbacks as cb
-from pytorch_lightning.utilities.model_summary import ModelSummary
+from lightning.pytorch import loggers, callbacks, Trainer
+from lightning.pytorch.utilities.model_summary import ModelSummary
 import wandb
 
 try:
@@ -32,7 +29,7 @@ class BES_Trainer:
     datamodule: elm_datamodule.ELM_Datamodule = None
     lightning_model: elm_lightning_model.Lightning_Model = None
     wandb_log_freq: int = 100
-    pl_log_freq: int = 50
+    lit_log_freq: int = 50
     skip_test_predict: bool = False
 
     def __post_init__(self):
@@ -62,7 +59,7 @@ class BES_Trainer:
         print(ModelSummary(self.lightning_model, max_depth=-1))
 
     def run_fast_dev(self):
-        tmp_trainer = pl.Trainer(
+        tmp_trainer = Trainer(
             fast_dev_run=True,
             enable_progress_bar=self.enable_progress_bar,
             enable_model_summary=False,
@@ -103,8 +100,8 @@ class BES_Trainer:
 
         # set callbacks
         self.callbacks = [
-            cb.LearningRateMonitor(),
-            cb.EarlyStopping(
+            callbacks.LearningRateMonitor(),
+            callbacks.EarlyStopping(
                 monitor=self.monitor_metric,
                 mode='min' if 'loss' in self.monitor_metric else 'max',
                 min_delta=self.early_stopping_min_delta,
@@ -115,19 +112,18 @@ class BES_Trainer:
     def run_all(self):
         self.make_loggers_and_callbacks()
 
-        self.trainer = pl.Trainer(
+        self.trainer = Trainer(
             max_epochs=self.max_epochs,
             gradient_clip_val=self.gradient_clip_value,
             logger=self.loggers,
             callbacks=self.callbacks,
             enable_model_summary=False,
             enable_progress_bar=self.enable_progress_bar,
-            log_every_n_steps=self.pl_log_freq,
+            log_every_n_steps=self.lit_log_freq,
             num_nodes=int(os.getenv('SLURM_NNODES', default=1)),
             devices="auto",
             accelerator="auto",
         )
-        # print(f"Log directory: {self.trainer.log_dir}")
         self.trainer.fit(
             model=self.lightning_model, 
             datamodule=self.datamodule,
@@ -174,9 +170,9 @@ if __name__=='__main__':
     Step 1a: Initiate pytorch_lightning.LightningDataModule
     """
     datamodule = elm_datamodule.ELM_Datamodule(
-        data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
+        # data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
         signal_window_size=signal_window_size,
-        max_elms=50,
+        max_elms=100,
         batch_size=512,
         fraction_validation=0.1,
         fraction_test=0.1,
@@ -191,12 +187,12 @@ if __name__=='__main__':
         lr=1e-3,
         weight_decay=1e-5,
     )
-    torch_model = elm_torch_model.Torch_Model_CNN01(
+    torch_model = elm_torch_model.Torch_Model_CNN02(
         signal_window_size=signal_window_size,
-        cnn_layer1_num_kernels=32,
-        cnn_layer2_num_kernels=16,
-        mlp_layer1_size=64,
-        mlp_layer2_size=32,
+        cnn_num_kernels=(48, 24, 24),
+        mlp_layers=(128, 64, 32),
+        leaky_relu_slope=0.05,
+        dropout=0.1,
     )
     lightning_model.set_torch_model(torch_model=torch_model)
 
@@ -208,6 +204,5 @@ if __name__=='__main__':
         datamodule=datamodule,
         max_epochs=2,
         wandb_log=True,
-        # skip_test_predict=True,
     )
     trainer.run_all()

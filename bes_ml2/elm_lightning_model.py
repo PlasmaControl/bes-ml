@@ -3,11 +3,12 @@ import os
 
 import numpy as np
 import matplotlib.pyplot as plt
+
 import torch
 import torch.nn
 import torch.utils.data
-import pytorch_lightning as pl
-from pytorch_lightning import loggers
+
+from lightning.pytorch import LightningModule, loggers
 import torchmetrics
 
 try:
@@ -17,7 +18,7 @@ except:
 
 
 @dataclasses.dataclass(eq=False)
-class Lightning_Model(pl.LightningModule):
+class Lightning_Model(LightningModule):
     lr: float = 1e-3
     lr_scheduler_patience: int = 2
     lr_scheduler_threshold: float = 1e-3
