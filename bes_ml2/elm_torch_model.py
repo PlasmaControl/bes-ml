@@ -236,10 +236,10 @@ class Torch_Model_CNN02(
                 self.cnn_kernel_spatial_size[i],
             )
             stride = (self.cnn_kernel_time_size[i], 1, 1)
-            print(f"CNN Layer {i}")
-            print(f"  Kernel {kernel}")
-            print(f"  Stride {stride}")
-            print(f"  Padding {self.cnn_padding[i]} with mode `{self.cnn_padding_mode}`")
+            print(f"  CNN Layer {i}")
+            print(f"    Kernel {kernel}")
+            print(f"    Stride {stride}")
+            print(f"    Padding {self.cnn_padding[i]} with mode `{self.cnn_padding_mode}`")
             conv3d = torch.nn.Conv3d(
                 in_channels=in_channels if i==0 else self.cnn_num_kernels[i-1],
                 out_channels=self.cnn_num_kernels[i],
@@ -249,7 +249,7 @@ class Torch_Model_CNN02(
                 padding_mode=self.cnn_padding_mode,
             )
             data_shape = conv3d(torch.zeros(size=data_shape)).size()
-            print(f"  Data shape after CNN layer {i}: {tuple(data_shape)}  (size {np.prod(data_shape)})")
+            print(f"    Data shape after CNN layer {i}: {tuple(data_shape)}  (size {np.prod(data_shape)})")
             assert np.all(np.array(data_shape) >= 1), f"Bad data shape {data_shape} after CNN layer {i}"
             self.cnn.extend([
                 conv3d,

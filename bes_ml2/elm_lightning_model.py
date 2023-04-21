@@ -56,26 +56,26 @@ class Lightning_Model(LightningModule):
         print("Initializing model layers")
         for name, param in self.torch_model.named_parameters():
             if name.endswith(".bias"):
-                print(f"  {name}: initialized to zeros")
+                print(f"  {name}: initialized to zeros (numel {param.data.numel()})")
                 param.data.fill_(0)
-            else:
-                dx = np.prod(param.shape[1:])
-                sqrt_k = np.sqrt(3. / dx)
-                print(f"  {name}: initialized to uniform +- {sqrt_k:.1e}")
+            elif name.endswith(".weight"):
+                n_in = np.prod(param.shape[1:])
+                sqrt_k = np.sqrt(3. / n_in)
+                print(f"  {name}: initialized to uniform +- {sqrt_k:.1e} (numel {param.data.numel()})")
                 param.data.uniform_(-sqrt_k, sqrt_k)
-                print(f"    dx*var: {dx*torch.var(param.data)}")
+                print(f"    n_in*var: {n_in*torch.var(param.data):.3f}")
        
-        sample_batch = torch.empty(
-            (512, 1, self.signal_window_size, 8, 8), 
-            dtype=torch.float32,
-        )
-        sample_batch.normal_()
-        self.eval()
-        with torch.no_grad():
-            sample_batch_outputs = self(sample_batch)
-        print(sample_batch_outputs.size())
-        print(torch.mean(sample_batch_outputs))
-        print(torch.var(sample_batch_outputs))
+        # sample_batch = torch.empty(
+        #     (512, 1, self.signal_window_size, 8, 8), 
+        #     dtype=torch.float32,
+        # )
+        # sample_batch.normal_()
+        # self.eval()
+        # with torch.no_grad():
+        #     sample_batch_outputs = self(sample_batch)
+        # print(sample_batch_outputs.size())
+        # print(torch.mean(sample_batch_outputs))
+        # print(torch.var(sample_batch_outputs))
 
         self.example_input_array = torch.zeros(
             (2, 1, self.signal_window_size, 8, 8), 

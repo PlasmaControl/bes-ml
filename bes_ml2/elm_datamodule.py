@@ -109,11 +109,6 @@ class ELM_Datamodule(LightningDataModule):
     seed: int = 0  # RNG seed for deterministic, reproducible shuffling of ELM events
     max_elms: int = None
     max_predict_elms: int = 24
-    # signal_mean: float = None
-    # signal_stdev: float = None
-    # clip_lb: float = None
-    # clip_ub: float = None
-    # label_median: float = None
     clip_sigma_outliers: float = 8.0  # remove signal windows with abs(standardized_signals) > n_sigma
     bad_elm_indices: list = None  # iterable of ELM indices to skip when reading data
     bad_elm_indices_csv: str | bool = True  # CSV file to read bad ELM indices
@@ -127,7 +122,7 @@ class ELM_Datamodule(LightningDataModule):
             'max_predict_elms',
         ])
 
-        # datamodule state
+        # datamodule state, to reproduce pre-processing
         self.state_items = [
             'clip_ub',
             'clip_lb',
@@ -138,11 +133,6 @@ class ELM_Datamodule(LightningDataModule):
         for item in self.state_items:
             if not hasattr(self, item):
                 setattr(self, item, None)
-        # self.clip_ub = None
-        # self.clip_lb = None
-        # self.signal_mean = None
-        # self.signal_stdev = None
-        # self.label_median = None
 
         self.datasets = {}
         self.all_elm_indices = None
@@ -163,56 +153,6 @@ class ELM_Datamodule(LightningDataModule):
     def prepare_data(self):
         # only called in main process
         pass
-
-    def _get_elm_indices_and_split(self):
-        if self.all_elm_indices is not None:
-            print("Reusing previous ELM indices read and split")
-            return
-        print(f"Data file: {self.data_file}")
-        # gather ELM indices
-        with h5py.File(self.data_file, "r") as elm_h5:
-            print(f"  ELM events in data file: {len(elm_h5)}")
-            self.all_elm_indices = [int(elm_key) for elm_key in elm_h5]
-        # bad ELM events to ignore?
-        if self.bad_elm_indices or self.bad_elm_indices_csv:
-            if self.bad_elm_indices is None:
-                self.bad_elm_indices = []
-            if self.bad_elm_indices_csv is True:
-                self.bad_elm_indices_csv = bad_elm_indices_csv
-            if self.bad_elm_indices_csv:
-                print(f"  Ignoring ELM events from {self.bad_elm_indices_csv}")
-                with Path(self.bad_elm_indices_csv).open() as file:
-                    self.bad_elm_indices = [int(line) for line in file]
-            ignored_elm_count = 0
-            for bad_elm_index in self.bad_elm_indices:
-                if bad_elm_index in self.all_elm_indices:
-                    self.all_elm_indices.remove(bad_elm_index)
-                    ignored_elm_count += 1
-            print(f"  Ignored ELM events: {ignored_elm_count}")
-            print(f"  Usable ELM events: {len(self.all_elm_indices)}")
-        self.all_elm_indices = np.array(self.all_elm_indices, dtype=int)
-        # shuffle ELM indices
-        print(f"  Shuffling ELM events with RNG seed {self.seed}")
-        np.random.default_rng(seed=self.seed).shuffle(self.all_elm_indices)
-        if self.all_elm_indices.size >= 5:
-            print(f"  Initial ELM order after shuffling: {self.all_elm_indices[0:5]}")
-        # limit number of ELM events
-        if self.max_elms:
-            self.all_elm_indices = self.all_elm_indices[:self.max_elms]
-            print(f"  Limiting data to {self.max_elms} ELM events")
-        # split ELM indicies
-        n_test_elms = int(self.fraction_test * self.all_elm_indices.size)
-        n_validation_elms = int(self.fraction_validation * self.all_elm_indices.size)
-        n_train_elms = self.all_elm_indices.size - n_test_elms - n_validation_elms
-        print(f"Total ELM events  {self.all_elm_indices.size}")
-        print(f"  Train  {n_train_elms}  ({n_train_elms/self.all_elm_indices.size*100:.1f}%)")
-        print(f"  Validation  {n_validation_elms}  ({n_validation_elms/self.all_elm_indices.size*100:.1f}%)")
-        print(f"  Test  {n_test_elms}  ({n_test_elms/self.all_elm_indices.size*100:.1f}%)")
-        # split into test and train/val
-        self.test_elm_indices = self.all_elm_indices[:n_test_elms]
-        train_val_elm_indices = self.all_elm_indices[n_test_elms:]
-        self.validation_elm_indices = train_val_elm_indices[:n_validation_elms]
-        self.train_elm_indices = train_val_elm_indices[n_validation_elms:]
 
     def state_dict(self) -> dict:
         state = {}
@@ -374,6 +314,56 @@ class ELM_Datamodule(LightningDataModule):
                     )
                     predict_datasets.append(dataset)
                 self.datasets['predict'] = predict_datasets
+
+    def _get_elm_indices_and_split(self):
+        if self.all_elm_indices is not None:
+            print("Reusing previous ELM indices read and split")
+            return
+        print(f"Data file: {self.data_file}")
+        # gather ELM indices
+        with h5py.File(self.data_file, "r") as elm_h5:
+            print(f"  ELM events in data file: {len(elm_h5)}")
+            self.all_elm_indices = [int(elm_key) for elm_key in elm_h5]
+        # bad ELM events to ignore?
+        if self.bad_elm_indices or self.bad_elm_indices_csv:
+            if self.bad_elm_indices is None:
+                self.bad_elm_indices = []
+            if self.bad_elm_indices_csv is True:
+                self.bad_elm_indices_csv = bad_elm_indices_csv
+            if self.bad_elm_indices_csv:
+                print(f"  Ignoring ELM events from {self.bad_elm_indices_csv}")
+                with Path(self.bad_elm_indices_csv).open() as file:
+                    self.bad_elm_indices = [int(line) for line in file]
+            ignored_elm_count = 0
+            for bad_elm_index in self.bad_elm_indices:
+                if bad_elm_index in self.all_elm_indices:
+                    self.all_elm_indices.remove(bad_elm_index)
+                    ignored_elm_count += 1
+            print(f"  Ignored ELM events: {ignored_elm_count}")
+            print(f"  Usable ELM events: {len(self.all_elm_indices)}")
+        self.all_elm_indices = np.array(self.all_elm_indices, dtype=int)
+        # shuffle ELM indices
+        print(f"  Shuffling ELM events with RNG seed {self.seed}")
+        np.random.default_rng(seed=self.seed).shuffle(self.all_elm_indices)
+        if self.all_elm_indices.size >= 5:
+            print(f"  Initial ELM order after shuffling: {self.all_elm_indices[0:5]}")
+        # limit number of ELM events
+        if self.max_elms:
+            self.all_elm_indices = self.all_elm_indices[:self.max_elms]
+            print(f"  Limiting data to {self.max_elms} ELM events")
+        # split ELM indicies
+        n_test_elms = int(self.fraction_test * self.all_elm_indices.size)
+        n_validation_elms = int(self.fraction_validation * self.all_elm_indices.size)
+        n_train_elms = self.all_elm_indices.size - n_test_elms - n_validation_elms
+        print(f"Total ELM events  {self.all_elm_indices.size}")
+        print(f"  Train  {n_train_elms}  ({n_train_elms/self.all_elm_indices.size*100:.1f}%)")
+        print(f"  Validation  {n_validation_elms}  ({n_validation_elms/self.all_elm_indices.size*100:.1f}%)")
+        print(f"  Test  {n_test_elms}  ({n_test_elms/self.all_elm_indices.size*100:.1f}%)")
+        # split into test and train/val
+        self.test_elm_indices = self.all_elm_indices[:n_test_elms]
+        train_val_elm_indices = self.all_elm_indices[n_test_elms:]
+        self.validation_elm_indices = train_val_elm_indices[:n_validation_elms]
+        self.train_elm_indices = train_val_elm_indices[n_validation_elms:]
 
     def _get_valid_indices(
         self,
