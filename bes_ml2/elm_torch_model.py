@@ -1,4 +1,5 @@
 import dataclasses
+from typing import Iterable
 
 import numpy as np
 import torch
@@ -15,11 +16,14 @@ class Torch_Model_Base_Dataclass:
 
     def make_mlp(self, mlp_in_features: int, mlp_out_features: int = 1) -> torch.nn.Module:
         # MLP layers
+        print("Constructing MLP layers")
         mlp_layers = torch.nn.Sequential(torch.nn.Flatten())
         for i, layer_size in enumerate(self.mlp_layers):
+            in_features = mlp_in_features if i==0 else self.mlp_layers[i-1]
+            print(f"  MLP layer {i} with in/out features: {in_features}/{layer_size} (LeakyReLU activ.)")
             mlp_layers.extend([
                 torch.nn.Linear(
-                    in_features=mlp_in_features if i==0 else self.mlp_layers[i-1],
+                    in_features=in_features,
                     out_features=layer_size,
                 ),
                 torch.nn.Dropout(p=self.dropout),
@@ -27,6 +31,7 @@ class Torch_Model_Base_Dataclass:
             ])
 
         # output layer
+        print(f"  MLP output layer with in/out features {self.mlp_layers[-1]}/{mlp_out_features} (no activ.)")
         mlp_layers.append(
             torch.nn.Linear(
                 in_features=self.mlp_layers[-1], 
@@ -183,9 +188,12 @@ class Torch_Model_CNN02(
     torch.nn.Module,
     Torch_Model_Base_Dataclass,
 ):
-    cnn_num_kernels: tuple = (16,16,16)
-    cnn_kernel_time_size: tuple = (8,4,4)
-    cnn_kernel_spatial_size: tuple = (3, 3, 3)
+    cnn_nlayers: int = 3
+    cnn_num_kernels: Iterable|int = 16
+    cnn_kernel_time_size: Iterable|int = 4
+    cnn_kernel_spatial_size: Iterable|int = 3
+    cnn_padding: str|int|Iterable = 0
+    cnn_padding_mode: str = 'zeros'
     
     def __post_init__(self):
         super().__init__()
@@ -201,9 +209,15 @@ class Torch_Model_CNN02(
             print(field_str)
 
         assert np.log2(self.signal_window_size).is_integer(), 'Signal window must be power of 2'
-        nlayers = len(self.cnn_num_kernels)
-        assert nlayers == len(self.cnn_kernel_spatial_size)
-        assert nlayers == len(self.cnn_kernel_time_size)
+
+        for attr_name in ['cnn_num_kernels','cnn_kernel_time_size','cnn_kernel_spatial_size','cnn_padding']:
+            attr_value = getattr(self, attr_name)
+            if isinstance(attr_value, Iterable) and not isinstance(attr_value, str):
+                assert len(attr_value) == self.cnn_nlayers, f"{attr_name} {attr_value}"
+            else:
+                new_attr_value = tuple([attr_value]*self.cnn_nlayers)
+                setattr(self, attr_name, new_attr_value)
+
         for time_dim in self.cnn_kernel_time_size:
             assert np.log2(time_dim).is_integer(), 'Kernel time dims must be power of 2'
 
@@ -215,21 +229,27 @@ class Torch_Model_CNN02(
 
         # CNN layers
         self.cnn = torch.nn.Sequential()
-        for i in range(nlayers):
+        for i in range(self.cnn_nlayers):
             kernel = (
                 self.cnn_kernel_time_size[i],
                 self.cnn_kernel_spatial_size[i],
                 self.cnn_kernel_spatial_size[i],
             )
             stride = (self.cnn_kernel_time_size[i], 1, 1)
+            print(f"CNN Layer {i}")
+            print(f"  Kernel {kernel}")
+            print(f"  Stride {stride}")
+            print(f"  Padding {self.cnn_padding[i]} with mode `{self.cnn_padding_mode}`")
             conv3d = torch.nn.Conv3d(
                 in_channels=in_channels if i==0 else self.cnn_num_kernels[i-1],
                 out_channels=self.cnn_num_kernels[i],
                 kernel_size=kernel,
                 stride=stride,
+                padding=self.cnn_padding[i],
+                padding_mode=self.cnn_padding_mode,
             )
             data_shape = conv3d(torch.zeros(size=data_shape)).size()
-            print(f"  Data shape after CNN layer {i}: {data_shape}")
+            print(f"  Data shape after CNN layer {i}: {tuple(data_shape)}  (size {np.prod(data_shape)})")
             assert np.all(np.array(data_shape) >= 1), f"Bad data shape {data_shape} after CNN layer {i}"
             self.cnn.extend([
                 conv3d,

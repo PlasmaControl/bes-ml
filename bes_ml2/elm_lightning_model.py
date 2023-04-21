@@ -21,10 +21,10 @@ except:
 @dataclasses.dataclass(eq=False)
 class Lightning_Model(LightningModule):
     lr: float = 1e-3
-    lr_scheduler_patience: int = 2
+    lr_scheduler_patience: int = 20
     lr_scheduler_threshold: float = 1e-3
     weight_decay: float = 1e-3
-    monitor_metric: str = 'val_score'
+    monitor_metric: str = 'score/val'
     log_dir: str = dataclasses.field(default=None, init=False)
     
     def __post_init__(self):
@@ -92,7 +92,7 @@ class Lightning_Model(LightningModule):
         signals, labels = batch
         predictions = self(signals)
         loss = self.mse_loss(predictions, labels)
-        self.log("train_loss", self.mse_loss)
+        self.log("loss/train", self.mse_loss)
         return loss
 
     def on_train_epoch_start(self):
@@ -105,30 +105,30 @@ class Lightning_Model(LightningModule):
                     z_scores = (values-mean)/std
                     skew = torch.mean(z_scores**3).item()
                     exkurt = torch.mean(z_scores**4).item() - 3
-                    self.log(f"{name}.mean", mean, rank_zero_only=True)
-                    self.log(f"{name}.std", std, rank_zero_only=True)
-                    self.log(f"{name}.skew", skew, rank_zero_only=True)
-                    self.log(f"{name}.exkurt", exkurt, rank_zero_only=True)
+                    self.log(f"param_mean/{name}", mean, rank_zero_only=True)
+                    self.log(f"param_std/{name}", std, rank_zero_only=True)
+                    self.log(f"param_skew/{name}", skew, rank_zero_only=True)
+                    self.log(f"param_exkurt/{name}", exkurt, rank_zero_only=True)
 
     def validation_step(self, batch, batch_idx):
         signals, labels = batch
         predictions = self(signals)
         self.mse_loss(predictions, labels)
-        self.log("val_loss", self.mse_loss)
-        if self.current_epoch >= 25:
-            self.r2_score(predictions, labels)
-            self.log("val_score", self.r2_score)
-        else:
-            self.log("val_score", 0.)
+        self.log("loss/val", self.mse_loss)
+        # if self.current_epoch >= 25:
+        self.r2_score(predictions, labels)
+        self.log("score/val", self.r2_score)
+        # else:
+        #     self.log("score/val", 0.)
 
     def test_step(self, batch, batch_idx):
         signals, labels = batch
         predictions = self(signals)
         self.mse_loss(predictions, labels)
-        self.log("test_loss", self.mse_loss)
+        self.log("loss/test", self.mse_loss)
         self.r2_score(predictions, labels)
-        self.log("test_score", self.r2_score)
-        self.log("hp_metric", self.r2_score)
+        self.log("score/test", self.r2_score)
+        # self.log("hp_metric", self.r2_score)
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0) -> None:
         signals, labels = batch
@@ -175,8 +175,8 @@ class Lightning_Model(LightningModule):
                 plt.savefig(filepath+'.png', format='png', transparent=True)
                 for logger in self.loggers:
                     if isinstance(logger, loggers.TensorBoardLogger):
-                        logger.experiment.add_figure(filename, fig, close=False)
-                    if isinstance(logger, loggers.WandbLogger):
+                        logger.experiment.add_figure(f"inference/{filename}", fig, close=False)
+                    elif isinstance(logger, loggers.WandbLogger):
                         logger.log_image(key='inference', images=[filepath+'.png'])
                 i_page += 1
                 plt.close(fig)

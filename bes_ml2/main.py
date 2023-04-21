@@ -79,6 +79,7 @@ class BES_Trainer:
             save_dir=os.path.dirname(self.experiment_group_dir), 
             name=os.path.basename(self.experiment_group_dir), 
             version=self.experiment_name,
+            default_hp_metric=False,
         )
         self.loggers.append(tb_logger)
         # version_str = tb_logger.version if tb_logger.version is str else f"version_{tb_logger.version}"
@@ -164,7 +165,7 @@ class BES_Trainer:
 
 
 if __name__=='__main__':
-    signal_window_size = 128
+    signal_window_size = 256
 
     """
     Step 1a: Initiate pytorch_lightning.LightningDataModule
@@ -173,9 +174,9 @@ if __name__=='__main__':
         # data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
         signal_window_size=signal_window_size,
         max_elms=100,
-        batch_size=512,
-        # fraction_validation=0.1,
-        # fraction_test=0.1,
+        batch_size=32,
+        fraction_validation=0.1,
+        fraction_test=0.1,
     )
 
     """
@@ -189,8 +190,11 @@ if __name__=='__main__':
     )
     torch_model = elm_torch_model.Torch_Model_CNN02(
         signal_window_size=signal_window_size,
-        cnn_num_kernels=(48, 24, 24),
-        mlp_layers=(128, 64, 32),
+        cnn_nlayers=6,
+        cnn_kernel_time_size=2,
+        cnn_padding=[[0,1,1]]*3 + [0]*3,
+        cnn_padding_mode='reflect',
+        mlp_layers=(128,64,32),
         leaky_relu_slope=0.05,
         dropout=0.1,
     )
@@ -202,7 +206,8 @@ if __name__=='__main__':
     trainer = BES_Trainer(
         lightning_model=lightning_model,
         datamodule=datamodule,
-        max_epochs=2,
-        wandb_log=True,
+        max_epochs=6,
+        # wandb_log=True,
+        # skip_test_predict=True,
     )
     trainer.run_all()
