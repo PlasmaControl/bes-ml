@@ -188,12 +188,11 @@ if __name__=='__main__':
         lr=1e-3,
         weight_decay=1e-5,
     )
-    torch_model = elm_torch_model.Torch_Model_CNN02(
+    torch_model = elm_torch_model.Torch_CNN_Model(
         signal_window_size=signal_window_size,
         cnn_nlayers=6,
         cnn_kernel_time_size=2,
         cnn_padding=[[0,1,1]]*3 + [0]*3,
-        cnn_padding_mode='reflect',
         mlp_layers=(128,64,32),
         leaky_relu_slope=0.05,
         dropout=0.1,
