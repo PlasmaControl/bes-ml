@@ -184,18 +184,22 @@ if __name__=='__main__':
         Ugly hack: must initiate lightning model, then initiate torch model, 
         then add torch model to lightning model
     """
-    lightning_model = elm_lightning_model.Lightning_Model(
+    # lightning_model = elm_lightning_model.Lightning_Model(
+    lightning_model = elm_lightning_model.Lightning_Unsupervised_Model(
         lr=1e-3,
-        weight_decay=1e-5,
     )
-    torch_model = elm_torch_model.Torch_CNN_Model(
+    # torch_model = elm_torch_model.Torch_CNN_Model(
+    #     signal_window_size=signal_window_size,
+    #     cnn_nlayers=6,
+    #     cnn_kernel_time_size=2,
+    #     cnn_padding=[[0,1,1]]*3 + [0]*3,
+    #     mlp_layers=(128,64,32),
+    # )
+    torch_model = elm_torch_model.Torch_AE_Model(
         signal_window_size=signal_window_size,
         cnn_nlayers=6,
         cnn_kernel_time_size=2,
         cnn_padding=[[0,1,1]]*3 + [0]*3,
-        mlp_layers=(128,64,32),
-        leaky_relu_slope=0.05,
-        dropout=0.1,
     )
     lightning_model.set_torch_model(torch_model=torch_model)
 

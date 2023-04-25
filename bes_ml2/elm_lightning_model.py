@@ -23,7 +23,7 @@ class Lightning_Model(LightningModule):
     lr: float = 1e-3
     lr_scheduler_patience: int = 20
     lr_scheduler_threshold: float = 1e-3
-    weight_decay: float = 1e-3
+    weight_decay: float = 1e-6
     monitor_metric: str = 'score/val'
     log_dir: str = dataclasses.field(default=None, init=False)
     

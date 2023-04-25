@@ -11,7 +11,6 @@ import torch.utils.data
 class Torch_Base(torch.nn.Module):
     signal_window_size: int = 128  # power of 2; ~16-512
     leaky_relu_slope: float = 1e-2
-    dropout: float = 0.1
 
     def __post_init__(self):
         super().__init__()
@@ -32,6 +31,7 @@ class Torch_Base(torch.nn.Module):
 @dataclasses.dataclass(eq=False)
 class Torch_MLP_Mixin(Torch_Base):
     mlp_layers: tuple = (64, 32)
+    mlp_dropout: float = 0.5
 
     def make_mlp(self, mlp_in_features: int, mlp_out_features: int = 1) -> torch.nn.Module:
         # MLP layers
@@ -41,11 +41,11 @@ class Torch_MLP_Mixin(Torch_Base):
             in_features = mlp_in_features if i==0 else self.mlp_layers[i-1]
             print(f"  MLP layer {i} with in/out features: {in_features}/{layer_size} (LeakyReLU activ.)")
             mlp_layers.extend([
+                torch.nn.Dropout(p=self.mlp_dropout),
                 torch.nn.Linear(
                     in_features=in_features,
                     out_features=layer_size,
                 ),
-                torch.nn.Dropout(p=self.dropout),
                 torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope),
             ])
 
@@ -66,10 +66,17 @@ class Torch_CNN_Mixin(Torch_Base):
     cnn_num_kernels: Iterable|int = 16
     cnn_kernel_time_size: Iterable|int = 4
     cnn_kernel_spatial_size: Iterable|int = 3
-    cnn_padding: str|int|Iterable = 0
+    cnn_padding: Iterable|int|str = 0
+    cnn_input_channels: int = 1
+    cnn_dropout: float = 0.1
 
-    def make_cnn(self):
-        for attr_name in ['cnn_num_kernels','cnn_kernel_time_size','cnn_kernel_spatial_size','cnn_padding']:
+    def make_cnn(self) -> tuple:
+        for attr_name in [
+            'cnn_num_kernels',
+            'cnn_kernel_time_size',
+            'cnn_kernel_spatial_size',
+            'cnn_padding',
+        ]:
             attr_value = getattr(self, attr_name)
             if isinstance(attr_value, Iterable) and not isinstance(attr_value, str):
                 assert len(attr_value) == self.cnn_nlayers, f"{attr_name} {attr_value}"
@@ -82,9 +89,9 @@ class Torch_CNN_Mixin(Torch_Base):
 
         print("Constructing CNN layers")
 
-        in_channels = 1
-        data_shape = [in_channels, self.signal_window_size, 8, 8]
-        print(f"  Input data shape {data_shape}")
+        data_shape = (self.cnn_input_channels, self.signal_window_size, 8, 8)
+        self.input_data_shape = tuple(data_shape)
+        print(f"  Input data shape {data_shape}  (size {np.prod(data_shape)})")
 
         # CNN layers
         cnn = torch.nn.Sequential()
@@ -100,26 +107,61 @@ class Torch_CNN_Mixin(Torch_Base):
             print(f"    Stride {stride}")
             print(f"    Padding {self.cnn_padding[i]}")
             conv3d = torch.nn.Conv3d(
-                in_channels=in_channels if i==0 else self.cnn_num_kernels[i-1],
+                in_channels=self.cnn_num_kernels[i-1] if i!=0 else self.cnn_input_channels,
                 out_channels=self.cnn_num_kernels[i],
                 kernel_size=kernel,
                 stride=stride,
                 padding=self.cnn_padding[i],
                 padding_mode='reflect',
             )
-            data_shape = conv3d(torch.zeros(size=data_shape)).size()
-            print(f"    Data shape after CNN layer {i}: {tuple(data_shape)}  (size {np.prod(data_shape)})")
+            data_shape = tuple(conv3d(torch.zeros(size=data_shape)).size())
+            print(f"    Output data shape: {data_shape}  (size {np.prod(data_shape)})")
             assert np.all(np.array(data_shape) >= 1), f"Bad data shape {data_shape} after CNN layer {i}"
             cnn.extend([
+                torch.nn.Dropout(p=self.cnn_dropout),
                 conv3d,
-                torch.nn.Dropout(p=self.dropout),
                 torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope),
             ])
 
         num_features = np.prod(data_shape)
         print(f"  CNN output features: {num_features}")
 
-        return cnn, num_features
+        return cnn, data_shape
+
+    def make_cnn_decoder(self, input_data_shape: Iterable) -> torch.nn.Module:
+        decoder = torch.nn.Sequential()
+        data_shape = input_data_shape
+        for i in range(self.cnn_nlayers-1, -1, -1):
+            kernel = (
+                self.cnn_kernel_time_size[i],
+                self.cnn_kernel_spatial_size[i],
+                self.cnn_kernel_spatial_size[i],
+            )
+            stride = (self.cnn_kernel_time_size[i], 1, 1)
+            print(f"  Decoder Layer {i}")
+            print(f"    Kernel {kernel}")
+            print(f"    Stride {stride}")
+            print(f"    Padding {self.cnn_padding[i]}")
+            conv3d = torch.nn.ConvTranspose3d(
+                in_channels=self.cnn_num_kernels[i],
+                out_channels=self.cnn_num_kernels[i-1] if i!=0 else self.cnn_input_channels,
+                kernel_size=kernel,
+                stride=stride,
+                padding=self.cnn_padding[i],
+            )
+            data_shape = tuple(conv3d(torch.zeros(size=data_shape)).size())
+            print(f"    Output data shape: {data_shape}  (size {np.prod(data_shape)})")
+            assert np.all(np.array(data_shape) >= 1), f"Bad data shape {data_shape} after Decoder layer {i}"
+            decoder.extend([
+                torch.nn.Dropout(p=self.cnn_dropout),
+                conv3d,
+                torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope),
+            ])
+        assert np.array_equal(
+            self.input_data_shape,
+            data_shape,
+        )
+        return decoder
 
 
 @dataclasses.dataclass(eq=False)
@@ -131,7 +173,7 @@ class Torch_CNN_Model(
     def __post_init__(self):
         super().__post_init__()
 
-        self.cnn, cnn_features = self.make_cnn()
+        self.cnn, cnn_features, cnn_output_data_shape = self.make_cnn()
         self.mlp = self.make_mlp(mlp_in_features=cnn_features)
             
         total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -145,6 +187,32 @@ class Torch_CNN_Model(
         features = self.cnn(signals)
         prediction = self.mlp(features)
         return prediction
+
+
+@dataclasses.dataclass(eq=False)
+class Torch_AE_Model(
+    Torch_CNN_Mixin,
+):
+    
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.cnn, cnn_output_data_shape = self.make_cnn()
+        self.decoder = self.make_cnn_decoder(
+            input_data_shape=cnn_output_data_shape,
+        )
+            
+        total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"Total parameters {total_parameters:,}")
+        cnn_parameters = sum(p.numel() for p in self.cnn.parameters() if p.requires_grad)
+        print(f"  CNN parameters {cnn_parameters:,}")
+        decoder_parameters = sum(p.numel() for p in self.decoder.parameters() if p.requires_grad)
+        print(f"  Decoder parameters {decoder_parameters:,}")
+
+    def forward(self, signals: torch.Tensor):
+        features = self.cnn(signals)
+        reconstruction = self.decoder(features)
+        return reconstruction
 
 
 @dataclasses.dataclass(eq=False)
