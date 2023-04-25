@@ -37,16 +37,17 @@ class Torch_MLP_Mixin(Torch_Base):
         # MLP layers
         print("Constructing MLP layers")
         mlp_layers = torch.nn.Sequential(torch.nn.Flatten())
+        n_layers = len(self.mlp_layers)
         for i, layer_size in enumerate(self.mlp_layers):
             in_features = mlp_in_features if i==0 else self.mlp_layers[i-1]
             print(f"  MLP layer {i} with in/out features: {in_features}/{layer_size} (LeakyReLU activ.)")
             mlp_layers.extend([
-                torch.nn.Dropout(p=self.mlp_dropout),
+                torch.nn.Dropout(p=self.mlp_dropout) if i!=n_layers-1 else torch.nn.Identity(),
                 torch.nn.Linear(
                     in_features=in_features,
                     out_features=layer_size,
                 ),
-                torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope),
+                torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope) if i!=n_layers-1 else torch.nn.Identity(),
             ])
 
         # output layer
@@ -126,7 +127,7 @@ class Torch_CNN_Mixin(Torch_Base):
         num_features = np.prod(data_shape)
         print(f"  CNN output features: {num_features}")
 
-        return cnn, data_shape
+        return cnn, num_features, data_shape
 
     def make_cnn_decoder(self, input_data_shape: Iterable) -> torch.nn.Module:
         decoder = torch.nn.Sequential()
@@ -153,9 +154,9 @@ class Torch_CNN_Mixin(Torch_Base):
             print(f"    Output data shape: {data_shape}  (size {np.prod(data_shape)})")
             assert np.all(np.array(data_shape) >= 1), f"Bad data shape {data_shape} after Decoder layer {i}"
             decoder.extend([
-                torch.nn.Dropout(p=self.cnn_dropout),
+                torch.nn.Dropout(p=self.cnn_dropout) if i!=0 else torch.nn.Identity(),
                 conv3d,
-                torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope),
+                torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope) if i!=0 else torch.nn.Identity(),
             ])
         assert np.array_equal(
             self.input_data_shape,
@@ -173,7 +174,7 @@ class Torch_CNN_Model(
     def __post_init__(self):
         super().__post_init__()
 
-        self.cnn, cnn_features, cnn_output_data_shape = self.make_cnn()
+        self.cnn, cnn_features, _ = self.make_cnn()
         self.mlp = self.make_mlp(mlp_in_features=cnn_features)
             
         total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -197,146 +198,146 @@ class Torch_AE_Model(
     def __post_init__(self):
         super().__post_init__()
 
-        self.cnn, cnn_output_data_shape = self.make_cnn()
+        self.encoder, _, encoder_output_shape = self.make_cnn()
         self.decoder = self.make_cnn_decoder(
-            input_data_shape=cnn_output_data_shape,
+            input_data_shape=encoder_output_shape,
         )
             
         total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"Total parameters {total_parameters:,}")
-        cnn_parameters = sum(p.numel() for p in self.cnn.parameters() if p.requires_grad)
-        print(f"  CNN parameters {cnn_parameters:,}")
+        encoder_parameters = sum(p.numel() for p in self.encoder.parameters() if p.requires_grad)
+        print(f"  Encoder parameters {encoder_parameters:,}")
         decoder_parameters = sum(p.numel() for p in self.decoder.parameters() if p.requires_grad)
         print(f"  Decoder parameters {decoder_parameters:,}")
 
     def forward(self, signals: torch.Tensor):
-        features = self.cnn(signals)
+        features = self.encoder(signals)
         reconstruction = self.decoder(features)
         return reconstruction
 
 
-@dataclasses.dataclass(eq=False)
-class Torch_Model_AE01(
-    Torch_Base,
-):
-    cnn_layer1_num_kernels: int = 8
-    cnn_layer1_kernel_time_size: int = 5
-    cnn_layer1_kernel_spatial_size: int = 3
-    cnn_layer1_maxpool_time: int = 4
-    cnn_layer2_num_kernels: int = 8
-    cnn_layer2_kernel_time_size: int = 5
-    cnn_layer2_kernel_spatial_size: int = 3
-    cnn_layer2_maxpool_time: int = 4
+# @dataclasses.dataclass(eq=False)
+# class Torch_Model_AE01(
+#     Torch_Base,
+# ):
+#     cnn_layer1_num_kernels: int = 8
+#     cnn_layer1_kernel_time_size: int = 5
+#     cnn_layer1_kernel_spatial_size: int = 3
+#     cnn_layer1_maxpool_time: int = 4
+#     cnn_layer2_num_kernels: int = 8
+#     cnn_layer2_kernel_time_size: int = 5
+#     cnn_layer2_kernel_spatial_size: int = 3
+#     cnn_layer2_maxpool_time: int = 4
     
-    def __post_init__(self):
-        super().__post_init__()
-        print('Constructing CNN')
-        assert np.log2(self.signal_window_size).is_integer(), 'Signal window must be power of 2'
-        assert self.cnn_layer1_kernel_time_size % 2 == 1, 'Kernel time size must be odd'
-        assert self.cnn_layer2_kernel_time_size % 2 == 1, 'Kernel time size must be odd'
-        assert self.cnn_layer1_maxpool_time%2 == 0
-        assert self.cnn_layer2_maxpool_time%2 == 0
-        in_channels = 1
-        data_shape = [in_channels, self.signal_window_size, 8, 8]
-        print(f"  Input data shape {data_shape}")
+#     def __post_init__(self):
+#         super().__post_init__()
+#         print('Constructing CNN')
+#         assert np.log2(self.signal_window_size).is_integer(), 'Signal window must be power of 2'
+#         assert self.cnn_layer1_kernel_time_size % 2 == 1, 'Kernel time size must be odd'
+#         assert self.cnn_layer2_kernel_time_size % 2 == 1, 'Kernel time size must be odd'
+#         assert self.cnn_layer1_maxpool_time%2 == 0
+#         assert self.cnn_layer2_maxpool_time%2 == 0
+#         in_channels = 1
+#         data_shape = [in_channels, self.signal_window_size, 8, 8]
+#         print(f"  Input data shape {data_shape}")
 
-        # CNN and maxpool 1
-        cnn_layer1_kernel = (
-            self.cnn_layer1_kernel_time_size,
-            self.cnn_layer1_kernel_spatial_size,
-            self.cnn_layer1_kernel_spatial_size,
-        )
-        print(f"  CNN 1 kernel shape {cnn_layer1_kernel}")
-        print(f"  CNN 1 kernel number {self.cnn_layer1_num_kernels}")
-        cnn_layer1_padding = ((self.cnn_layer1_kernel_time_size-1) // 2, 0, 0)
-        data_shape[0] = self.cnn_layer1_num_kernels
-        data_shape[-2] = data_shape[-2]-(self.cnn_layer1_kernel_spatial_size-1)
-        data_shape[-1] = data_shape[-1]-(self.cnn_layer1_kernel_spatial_size-1)
-        print(f"    Data shape after CNN 1 {data_shape}")
-        assert np.all(np.array(data_shape) >= 1), f"Bad data shape {data_shape}"
-        maxpool_layer1_kernel = (self.cnn_layer1_maxpool_time, 1, 1)
-        print(f"  Maxpool 1 shape {maxpool_layer1_kernel}")
-        data_shape[1] = data_shape[1] // self.cnn_layer1_maxpool_time
-        print(f"    Data shape after maxpool 1 {data_shape}")
-        assert np.all(np.array(data_shape) >= 1), f"Bad data shape {data_shape}"
-        self.data_shape_after_maxpool1 = data_shape.copy()
+#         # CNN and maxpool 1
+#         cnn_layer1_kernel = (
+#             self.cnn_layer1_kernel_time_size,
+#             self.cnn_layer1_kernel_spatial_size,
+#             self.cnn_layer1_kernel_spatial_size,
+#         )
+#         print(f"  CNN 1 kernel shape {cnn_layer1_kernel}")
+#         print(f"  CNN 1 kernel number {self.cnn_layer1_num_kernels}")
+#         cnn_layer1_padding = ((self.cnn_layer1_kernel_time_size-1) // 2, 0, 0)
+#         data_shape[0] = self.cnn_layer1_num_kernels
+#         data_shape[-2] = data_shape[-2]-(self.cnn_layer1_kernel_spatial_size-1)
+#         data_shape[-1] = data_shape[-1]-(self.cnn_layer1_kernel_spatial_size-1)
+#         print(f"    Data shape after CNN 1 {data_shape}")
+#         assert np.all(np.array(data_shape) >= 1), f"Bad data shape {data_shape}"
+#         maxpool_layer1_kernel = (self.cnn_layer1_maxpool_time, 1, 1)
+#         print(f"  Maxpool 1 shape {maxpool_layer1_kernel}")
+#         data_shape[1] = data_shape[1] // self.cnn_layer1_maxpool_time
+#         print(f"    Data shape after maxpool 1 {data_shape}")
+#         assert np.all(np.array(data_shape) >= 1), f"Bad data shape {data_shape}"
+#         self.data_shape_after_maxpool1 = data_shape.copy()
 
-        # CNN and maxpool 2
-        cnn_layer2_kernel = (
-            self.cnn_layer2_kernel_time_size,
-            self.cnn_layer2_kernel_spatial_size,
-            self.cnn_layer2_kernel_spatial_size,
-        )
-        print(f"  CNN 2 kernel shape {cnn_layer2_kernel}")
-        print(f"  CNN 2 kernel number {self.cnn_layer2_num_kernels}")
-        cnn_layer2_padding = ((self.cnn_layer2_kernel_time_size-1) // 2, 0, 0)
-        data_shape[0] = self.cnn_layer2_num_kernels
-        data_shape[-2] = data_shape[-2]-(self.cnn_layer2_kernel_spatial_size-1)
-        data_shape[-1] = data_shape[-1]-(self.cnn_layer2_kernel_spatial_size-1)
-        print(f"    Data shape after CNN 2 {data_shape}")
-        assert np.all(np.array(data_shape) >= 1), f"Bad data shape {data_shape}"
-        maxpool_layer2_kernel = (self.cnn_layer2_maxpool_time, 1, 1)
-        print(f"  Maxpool 2 shape {maxpool_layer2_kernel}")
-        data_shape[1] = data_shape[1] // self.cnn_layer2_maxpool_time
-        assert np.all(np.array(data_shape) >= 1), f"Bad data shape {data_shape}"
-        print(f'    Data shape after maxpool 2 {data_shape}')
-        self.data_shape_after_maxpool2 = data_shape.copy()
-        # CNN output features
-        cnn_features = np.prod(data_shape)
-        print(f"  CNN output features {cnn_features}")
+#         # CNN and maxpool 2
+#         cnn_layer2_kernel = (
+#             self.cnn_layer2_kernel_time_size,
+#             self.cnn_layer2_kernel_spatial_size,
+#             self.cnn_layer2_kernel_spatial_size,
+#         )
+#         print(f"  CNN 2 kernel shape {cnn_layer2_kernel}")
+#         print(f"  CNN 2 kernel number {self.cnn_layer2_num_kernels}")
+#         cnn_layer2_padding = ((self.cnn_layer2_kernel_time_size-1) // 2, 0, 0)
+#         data_shape[0] = self.cnn_layer2_num_kernels
+#         data_shape[-2] = data_shape[-2]-(self.cnn_layer2_kernel_spatial_size-1)
+#         data_shape[-1] = data_shape[-1]-(self.cnn_layer2_kernel_spatial_size-1)
+#         print(f"    Data shape after CNN 2 {data_shape}")
+#         assert np.all(np.array(data_shape) >= 1), f"Bad data shape {data_shape}"
+#         maxpool_layer2_kernel = (self.cnn_layer2_maxpool_time, 1, 1)
+#         print(f"  Maxpool 2 shape {maxpool_layer2_kernel}")
+#         data_shape[1] = data_shape[1] // self.cnn_layer2_maxpool_time
+#         assert np.all(np.array(data_shape) >= 1), f"Bad data shape {data_shape}"
+#         print(f'    Data shape after maxpool 2 {data_shape}')
+#         self.data_shape_after_maxpool2 = data_shape.copy()
+#         # CNN output features
+#         cnn_features = np.prod(data_shape)
+#         print(f"  CNN output features {cnn_features}")
 
-        # CNN model
-        self.conv1 = torch.nn.Sequential(
-            torch.nn.Conv3d(
-                in_channels=in_channels,
-                out_channels=self.cnn_layer1_num_kernels,
-                kernel_size=cnn_layer1_kernel,
-                padding=cnn_layer1_padding,
-            ),
-            torch.nn.Dropout(p=self.dropout),
-            torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope),
-            torch.nn.MaxPool3d(kernel_size=maxpool_layer1_kernel, return_indices=True),
-        )
-        self.conv2 = torch.nn.Sequential(
-            torch.nn.Conv3d(
-                in_channels=self.cnn_layer1_num_kernels,
-                out_channels=self.cnn_layer2_num_kernels,
-                kernel_size=cnn_layer2_kernel,
-                padding=cnn_layer2_padding,
-            ),
-            torch.nn.Dropout(p=self.dropout),
-            torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope),
-            torch.nn.MaxPool3d(kernel_size=maxpool_layer2_kernel, return_indices=True),
-        )
-        self.max_unpool2 = torch.nn.MaxUnpool3d(kernel_size=maxpool_layer2_kernel)
-        self.deconv2 = torch.nn.Sequential(
-            torch.nn.ConvTranspose3d(
-                in_channels=self.cnn_layer2_num_kernels,
-                out_channels=self.cnn_layer1_num_kernels,
-                kernel_size=cnn_layer2_kernel,
-                padding=cnn_layer2_padding,
-            ),
-        )
-        self.max_unpool1 = torch.nn.MaxUnpool3d(kernel_size=maxpool_layer1_kernel)
-        self.deconv1 = torch.nn.Sequential(
-            torch.nn.ConvTranspose3d(
-                in_channels=self.cnn_layer1_num_kernels,
-                out_channels=in_channels,
-                kernel_size=cnn_layer1_kernel,
-                padding=cnn_layer1_padding,
-            ),
-        )
+#         # CNN model
+#         self.conv1 = torch.nn.Sequential(
+#             torch.nn.Conv3d(
+#                 in_channels=in_channels,
+#                 out_channels=self.cnn_layer1_num_kernels,
+#                 kernel_size=cnn_layer1_kernel,
+#                 padding=cnn_layer1_padding,
+#             ),
+#             torch.nn.Dropout(p=self.dropout),
+#             torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope),
+#             torch.nn.MaxPool3d(kernel_size=maxpool_layer1_kernel, return_indices=True),
+#         )
+#         self.conv2 = torch.nn.Sequential(
+#             torch.nn.Conv3d(
+#                 in_channels=self.cnn_layer1_num_kernels,
+#                 out_channels=self.cnn_layer2_num_kernels,
+#                 kernel_size=cnn_layer2_kernel,
+#                 padding=cnn_layer2_padding,
+#             ),
+#             torch.nn.Dropout(p=self.dropout),
+#             torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope),
+#             torch.nn.MaxPool3d(kernel_size=maxpool_layer2_kernel, return_indices=True),
+#         )
+#         self.max_unpool2 = torch.nn.MaxUnpool3d(kernel_size=maxpool_layer2_kernel)
+#         self.deconv2 = torch.nn.Sequential(
+#             torch.nn.ConvTranspose3d(
+#                 in_channels=self.cnn_layer2_num_kernels,
+#                 out_channels=self.cnn_layer1_num_kernels,
+#                 kernel_size=cnn_layer2_kernel,
+#                 padding=cnn_layer2_padding,
+#             ),
+#         )
+#         self.max_unpool1 = torch.nn.MaxUnpool3d(kernel_size=maxpool_layer1_kernel)
+#         self.deconv1 = torch.nn.Sequential(
+#             torch.nn.ConvTranspose3d(
+#                 in_channels=self.cnn_layer1_num_kernels,
+#                 out_channels=in_channels,
+#                 kernel_size=cnn_layer1_kernel,
+#                 padding=cnn_layer1_padding,
+#             ),
+#         )
 
-        total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        print(f"Total parameters {total_parameters:,}")
+#         total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
+#         print(f"Total parameters {total_parameters:,}")
 
-    def forward(self, signals: torch.Tensor):
-        out, indices1 = self.conv1(signals)
-        out, indices2 = self.conv2(out)
-        out = self.max_unpool2(out, indices2)
-        out = self.deconv2(out)
-        out = self.max_unpool1(out, indices1)
-        reconstructed_signals = self.deconv1(out)
-        return reconstructed_signals
+#     def forward(self, signals: torch.Tensor):
+#         out, indices1 = self.conv1(signals)
+#         out, indices2 = self.conv2(out)
+#         out = self.max_unpool2(out, indices2)
+#         out = self.deconv2(out)
+#         out = self.max_unpool1(out, indices1)
+#         reconstructed_signals = self.deconv1(out)
+#         return reconstructed_signals
 
 
