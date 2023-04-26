@@ -95,13 +95,11 @@ class ELM_Predict_Dataset(torch.utils.data.Dataset):
 
     def pre_elm_stats(self) -> dict[str, torch.Tensor]:
         signals = torch.squeeze(self.signals[:,:self.active_elm_start_index,...])
-        min, _ = torch.min(signals, dim=0)
-        max, _ = torch.max(signals, dim=0)
+        maxabs, _ = torch.max(torch.abs(signals), dim=0)
         std, mean = torch.std_mean(signals, dim=0)
         # exkurt = np.sum(cummulative_hist * (bin_center - mean) ** 4) / np.sum(cummulative_hist) - 3
         return {
-            'min': min.flatten(),
-            'max': max.flatten(),
+            'maxabs': maxabs.flatten(),
             'mean': mean.flatten(),
             'std': std.flatten(),
         }
@@ -212,6 +210,9 @@ class ELM_Datamodule(LightningDataModule):
             # package ELM events into pytorch dataset
             print(f"Reading ELM events for dataset `{dataset_stage}`")
             elm_data = []
+            # total_pre_elm = 0
+            # n_bins = 200
+            # cummulative_hist = np.zeros(n_bins, dtype=int)
             with h5py.File(self.data_file, 'r') as h5_file:
                 if indices.size >= 5:
                     print(f"  Initial indices: {indices[:5]}")
@@ -222,6 +223,8 @@ class ELM_Datamodule(LightningDataModule):
                     signals = np.array(elm_event["signals"], dtype=np.float32)  # (64, <time>)
                     signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (<time>, 8, 8)
                     labels = np.array(elm_event["labels"], dtype=int)
+                    # last_pre_elm_index = np.flatnonzero(labels == 1)[0]-1  # last pre-ELM index
+                    # total_pre_elm += last_pre_elm_index
                     labels, signals, valid_t0 = self._get_valid_indices(labels, signals)
                     elm_data.append({
                         'signals': signals, 
@@ -229,7 +232,21 @@ class ELM_Datamodule(LightningDataModule):
                         'valid_t0': valid_t0,
                         'elm_index': elm_index,
                         'shot': elm_event.attrs['shot'],
+                        # 'last_pre_elm_index': last_pre_elm_index,
                     })
+                    # hist, bin_edges = np.histogram(
+                    #     signals[:last_pre_elm_index:50, :, :],
+                    #     bins=n_bins,
+                    #     range=[-10.4, 10.4],
+                    # )
+                    # cummulative_hist += hist
+
+            # bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
+            # mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
+            # stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
+            # exkurt = np.sum(cummulative_hist * ((bin_center - mean)/stdev) ** 4) / np.sum(cummulative_hist) - 3
+            # print(f"{total_pre_elm} {mean:.3f} {stdev:.3f} {exkurt:.3f}")
+
 
             packaged_labels = np.concatenate([elm['labels'] for elm in elm_data], axis=0)
             packaged_signals = np.concatenate([elm['signals'] for elm in elm_data], axis=0)
@@ -301,10 +318,11 @@ class ELM_Datamodule(LightningDataModule):
             print(f"  Standarizing signals with mean {self.signal_mean:.3f} and std {self.signal_stdev:.3f}")
             packaged_signals = (packaged_signals - self.signal_mean) / self.signal_stdev
             print("  Standardized signal stats")
-            self._get_statistics(
+            stats = self._get_statistics(
                 sample_indices=packaged_valid_t0_indices,
                 signals=packaged_signals,
             )
+            self.max_abs_valid_signal = np.max(np.abs([stats['min'],stats['max']]))
 
             # normalize labels with min=-1 and median=0
             if self.label_median is None:
@@ -389,16 +407,14 @@ class ELM_Datamodule(LightningDataModule):
         # split ELM indicies
         n_test_elms = int(self.fraction_test * self.all_elm_indices.size)
         n_validation_elms = int(self.fraction_validation * self.all_elm_indices.size)
-        n_train_elms = self.all_elm_indices.size - n_test_elms - n_validation_elms
-        print(f"Total ELM events  {self.all_elm_indices.size}")
-        print(f"  Train  {n_train_elms}  ({n_train_elms/self.all_elm_indices.size*100:.1f}%)")
-        print(f"  Validation  {n_validation_elms}  ({n_validation_elms/self.all_elm_indices.size*100:.1f}%)")
-        print(f"  Test  {n_test_elms}  ({n_test_elms/self.all_elm_indices.size*100:.1f}%)")
-        # split into test and train/val
         self.test_elm_indices = np.sort(self.all_elm_indices[:n_test_elms])
         train_val_elm_indices = self.all_elm_indices[n_test_elms:]
         self.validation_elm_indices = train_val_elm_indices[:n_validation_elms]
         self.train_elm_indices = train_val_elm_indices[n_validation_elms:]
+        print(f"Total ELM events  {self.all_elm_indices.size}")
+        print(f"  Train  {self.train_elm_indices.size}  ({self.train_elm_indices.size/self.all_elm_indices.size*100:.1f}%)")
+        print(f"  Validation  {self.validation_elm_indices.size}  ({self.validation_elm_indices.size/self.all_elm_indices.size*100:.1f}%)")
+        print(f"  Test  {self.test_elm_indices.size}  ({self.test_elm_indices.size/self.all_elm_indices.size*100:.1f}%)")
 
     def _get_valid_indices(
         self,
@@ -443,7 +459,7 @@ class ELM_Datamodule(LightningDataModule):
         signal_max = np.array(-np.inf)
         n_bins = 200
         cummulative_hist = np.zeros(n_bins, dtype=int)
-        stat_samples = int(1e4)
+        stat_samples = int(100e3)
         stat_interval = np.max([1, sample_indices.size//stat_samples])
         n_samples = sample_indices.size // stat_interval
         for i in sample_indices[::stat_interval]:

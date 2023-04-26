@@ -1,4 +1,7 @@
 import os
+from pathlib import Path
+import shutil
+import subprocess
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -12,16 +15,18 @@ except:
 def plot_stats(
     max_elms = None,
     data_file = None,
-    save = False, 
     figure_dir = '.', 
     block_show = True,
     mask_sigma_outliers = 8,
+    save = True, 
+    merge = True,
 ):
     datamodule = elm_datamodule.ELM_Datamodule(
         data_file=data_file,
         max_elms=max_elms,
         fraction_test=1.,
         mask_sigma_outliers=mask_sigma_outliers,
+        max_predict_elms=None,
     )
     
     datamodule.setup(stage='predict')
@@ -44,12 +49,13 @@ def plot_stats(
             for ax in axes:
                 ax.clear()
         plt.sca(axes[i_elm%n_axes])
-        for stat_name in ['min','max','mean','std']:
-            plt.plot(channels, stats[stat_name], label=stat_name)
+        for key in stats:
+            plt.plot(channels, stats[key], label=key)
         plt.axhline(0, linestyle='--')
+        plt.axhline(datamodule.max_abs_valid_signal, linestyle='--')
         plt.title(f"ELM index {elm_index} Shot {shot}", fontsize='medium')
         plt.xlabel('Channel')
-        plt.ylim(-8,8)
+        plt.ylim(-1,1.2*datamodule.max_abs_valid_signal)
         if i_elm%n_axes==0:
             plt.legend(loc='lower right', fontsize='small')
         if i_elm%n_axes==n_axes-1 or i_elm==n_elms-1:
@@ -62,13 +68,39 @@ def plot_stats(
             plt.show(block=block_show)
     plt.close('all')
 
+    if merge:
+        inputs = sorted(Path(figure_dir).glob('elm_stats_*.pdf'))
+        assert len(inputs) > 0 and inputs[0].exists()
+        output = Path(figure_dir) / 'elm_stats.pdf'
+        output.unlink(missing_ok=True)
+        gs_cmd = shutil.which('gs')
+        assert gs_cmd is not None, \
+            "`gs` command (ghostscript) not found; available in conda-forge"
+        cmd = [
+            gs_cmd,
+            '-q',
+            '-dBATCH',
+            '-dNOPAUSE',
+            '-sDEVICE=pdfwrite',
+            '-dPDFSETTINGS=/prepress',
+            '-dCompatibilityLevel=1.4',
+            f"-sOutputFile={output.as_posix()}",
+        ]
+        cmd.extend([f"{pdf_file.as_posix()}" for pdf_file in inputs])
+        print(f"Merging files into {output}")
+        result = subprocess.run(cmd, check=True)
+        assert result.returncode == 0 and output.exists()
+        for pdf_file in inputs:
+            pdf_file.unlink(missing_ok=True)
+
 
 if __name__=='__main__':
     plot_stats(
-        # data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
-        save=True, 
-        # block_show=False,
-        max_elms=100,
-        mask_sigma_outliers=4,
+        data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
+        block_show=False,
+        max_elms=500,
+        mask_sigma_outliers=8,
+        save=False,
+        merge=False,
     )
     
