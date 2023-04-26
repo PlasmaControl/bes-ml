@@ -93,11 +93,12 @@ class ELM_Predict_Dataset(torch.utils.data.Dataset):
         sample_indices = sample_indices[valid_t0 == 1]
         self.sample_indices = torch.from_numpy(sample_indices)
 
-    def stats(self) -> dict:
+    def pre_elm_stats(self) -> dict[str, torch.Tensor]:
         signals = torch.squeeze(self.signals[:,:self.active_elm_start_index,...])
         min, _ = torch.min(signals, dim=0)
         max, _ = torch.max(signals, dim=0)
         std, mean = torch.std_mean(signals, dim=0)
+        # exkurt = np.sum(cummulative_hist * (bin_center - mean) ** 4) / np.sum(cummulative_hist) - 3
         return {
             'min': min.flatten(),
             'max': max.flatten(),
@@ -118,7 +119,7 @@ class ELM_Predict_Dataset(torch.utils.data.Dataset):
 
 @dataclasses.dataclass(eq=False)
 class ELM_Datamodule(LightningDataModule):
-    data_file: str = sample_elm_data_file.as_posix()  # path to data; dir or file depending on task
+    data_file: str = None  # path to data; dir or file depending on task
     batch_size: int = 128  # power of 2, like 32-256
     signal_window_size: int = 128  # power of 2, like 64-512
     num_workers: int = 4  # number of subprocess workers for pytorch dataloader
@@ -127,7 +128,7 @@ class ELM_Datamodule(LightningDataModule):
     seed: int = 0  # RNG seed for deterministic, reproducible shuffling of ELM events
     max_elms: int = None
     max_predict_elms: int = 24
-    clip_sigma_outliers: float = 8.0  # remove signal windows with abs(standardized_signals) > n_sigma
+    mask_sigma_outliers: float = 8.0  # remove signal windows with abs(standardized_signals) > n_sigma
     bad_elm_indices: list = None  # iterable of ELM indices to skip when reading data
     bad_elm_indices_csv: str | bool = True  # CSV file to read bad ELM indices
     log_time: bool = False  # if True, use label = log(time_to_elm_onset)
@@ -135,6 +136,8 @@ class ELM_Datamodule(LightningDataModule):
 
     def __post_init__(self):
         super().__init__()
+        if self.data_file is None:
+            self.data_file = sample_elm_data_file.as_posix()
         self.save_hyperparameters(ignore=[
             'prepare_data_per_node',
             'max_predict_elms',
@@ -142,10 +145,11 @@ class ELM_Datamodule(LightningDataModule):
 
         # datamodule state, to reproduce pre-processing
         self.state_items = [
-            'clip_ub',
-            'clip_lb',
+            'mask_ub',
+            'mask_lb',
             'signal_mean',
             'signal_stdev',
+            'signal_exkurt',
             'label_median',
         ]
         for item in self.state_items:
@@ -256,28 +260,28 @@ class ELM_Datamodule(LightningDataModule):
                 sample_indices=packaged_valid_t0_indices,
                 signals=packaged_signals,
             )
-            # clip outlier signals
-            if self.clip_sigma_outliers:
-                if None in [self.clip_lb, self.clip_ub]:
+            # mask outlier signals
+            if self.mask_sigma_outliers:
+                if None in [self.mask_lb, self.mask_ub]:
                     assert dataset_stage == 'train' or not self.train_elm_indices, f"Dataset_stage: {dataset_stage}"
-                    print("  Calculating clipping upper/lower bounds from training data")
-                    self.clip_lb = stats['mean'] - self.clip_sigma_outliers * stats['stdev']
-                    self.clip_ub = stats['mean'] + self.clip_sigma_outliers * stats['stdev']
+                    print(f"  Calculating mask upper/lower bounds from {dataset_stage} data")
+                    self.mask_lb = stats['mean'] - self.mask_sigma_outliers * stats['stdev']
+                    self.mask_ub = stats['mean'] + self.mask_sigma_outliers * stats['stdev']
                     self.save_hyperparameters({
-                        'clip_lb': self.clip_lb.item(),
-                        'clip_ub': self.clip_ub.item(),
+                        'mask_lb': self.mask_lb.item(),
+                        'mask_ub': self.mask_ub.item(),
                     })
-                print(f"  Clipping {self.clip_sigma_outliers:.2f} sigma outliers from signals")
-                print(f"  Clipping lower bound {self.clip_lb:.3f} upper bound {self.clip_ub:.3f} based on training data")
+                print(f"  Mask {self.mask_sigma_outliers:.2f} sigma outliers from signals")
+                print(f"  Mask lower bound {self.mask_lb:.3f} upper bound {self.mask_ub:.3f}")
                 mask = np.zeros(packaged_valid_t0_indices.size, dtype=bool)
                 for i_t0_index, t0_index in enumerate(packaged_valid_t0_indices):
                     signal_window = packaged_signals[t0_index: t0_index + self.signal_window_size, :, :]
                     mask[i_t0_index] = (
-                        np.max(signal_window) <= self.clip_ub and
-                        np.min(signal_window) >= self.clip_lb
+                        np.max(signal_window) <= self.mask_ub and
+                        np.min(signal_window) >= self.mask_lb
                     )
                 packaged_valid_t0_indices = packaged_valid_t0_indices[mask]
-                print("  Clipped data stats")
+                print("  Masked data stats")
                 stats = self._get_statistics(
                     sample_indices=packaged_valid_t0_indices,
                     signals=packaged_signals,
@@ -285,14 +289,16 @@ class ELM_Datamodule(LightningDataModule):
             # standardize signals based on training data
             if None in [self.signal_mean, self.signal_stdev]:
                 assert dataset_stage == 'train' or not self.train_elm_indices, f"Dataset_stage: {dataset_stage}"
-                print("  Calculating signal mean and std from training data")
+                print(f"  Calculating signal mean and std from {dataset_stage} data")
                 self.signal_mean = stats['mean']
                 self.signal_stdev = stats['stdev']
+                self.signal_exkurt = stats['exkurt']
                 self.save_hyperparameters({
                     'signal_mean': self.signal_mean.item(),
                     'signal_stdev': self.signal_stdev.item(),
+                    'signal_exkurt': self.signal_exkurt.item(),
                 })
-            print(f"  Standarizing signals with mean {self.signal_mean:.3f} and std {self.signal_stdev:.3f} form training data")
+            print(f"  Standarizing signals with mean {self.signal_mean:.3f} and std {self.signal_stdev:.3f}")
             packaged_signals = (packaged_signals - self.signal_mean) / self.signal_stdev
             print("  Standardized signal stats")
             self._get_statistics(
@@ -303,10 +309,10 @@ class ELM_Datamodule(LightningDataModule):
             # normalize labels with min=-1 and median=0
             if self.label_median is None:
                 assert dataset_stage == 'train' or not self.train_elm_indices, f"Dataset_stage: {dataset_stage}"
-                print("  Calculating median label from training labels")
+                print(f"  Calculating median label from {dataset_stage} labels")
                 self.label_median = np.median(packaged_labels[packaged_valid_t0_indices+self.signal_window_size])
                 self.save_hyperparameters({'label_median': self.label_median.item()})
-            print(f"  Normalizing labels (min=-1 and median~0) with median {self.label_median:.3f} form training labels")
+            print(f"  Normalizing labels (min=-1 and median~0) with median {self.label_median:.3f}")
             packaged_labels = (packaged_labels - self.label_median) / (self.label_median-1)
             label_min = np.nanmin(packaged_labels)
             label_median = np.median(packaged_labels[packaged_valid_t0_indices+self.signal_window_size])
@@ -439,6 +445,7 @@ class ELM_Datamodule(LightningDataModule):
         cummulative_hist = np.zeros(n_bins, dtype=int)
         stat_samples = int(1e4)
         stat_interval = np.max([1, sample_indices.size//stat_samples])
+        n_samples = sample_indices.size // stat_interval
         for i in sample_indices[::stat_interval]:
             signal_window = signals[i: i + self.signal_window_size, :, :]
             signal_min = np.min([signal_min, signal_window.min()])
@@ -452,13 +459,15 @@ class ELM_Datamodule(LightningDataModule):
         bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
         mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
         stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
-        print(f"    Stats: count {sample_indices.size:,} min {signal_min:.3f} max {signal_max:.3f} mean {mean:.3f} stdev {stdev:.3f}")
+        exkurt = np.sum(cummulative_hist * ((bin_center - mean)/stdev) ** 4) / np.sum(cummulative_hist) - 3
+        print(f"    Stats: count {sample_indices.size:,} min {signal_min:.3f} max {signal_max:.3f} mean {mean:.3f} stdev {stdev:.3f} exkurt {exkurt:.3f} n_samples {n_samples:,}")
         return {
             'count': sample_indices.size,
             'min': signal_min,
             'max': signal_max,
             'mean': mean,
             'stdev': stdev,
+            'exkurt': exkurt,
         }
 
     def train_dataloader(self):

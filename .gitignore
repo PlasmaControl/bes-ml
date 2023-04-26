@@ -12,6 +12,7 @@ lightning_logs/
 *.xlsx
 
 # visualization files
+*.pdf
 *.png
 *.png
 *.eps
