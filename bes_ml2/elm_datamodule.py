@@ -60,8 +60,13 @@ class ELM_Predict_Dataset(torch.utils.data.Dataset):
             signals: np.ndarray,
             labels: np.ndarray,
             signal_window_size: int,
+            shot: int,
+            elm_index: int,
             prediction_horizon: int = 0,  # =0 for time-to-ELM regression; >=0 for classification prediction
+            pre_elm_only: bool = False,
     ) -> None:
+        self.shot = shot
+        self.elm_index = elm_index
         self.signals = torch.from_numpy(signals[np.newaxis, ...])
         assert (
             self.signals.ndim == 4 and
@@ -75,17 +80,30 @@ class ELM_Predict_Dataset(torch.utils.data.Dataset):
         assert self.labels.numel() == self.signals.size(1), "Labels and signals have different time dimensions"
         self.signal_window_size = signal_window_size
         self.prediction_horizon = prediction_horizon
-        last_signal_window_start_index = self.labels.numel() - self.signal_window_size
-        assert last_signal_window_start_index+self.signal_window_size == self.labels.numel()
+        if pre_elm_only:
+            last_signal_window_start_index = self.active_elm_start_index-1 - self.signal_window_size
+        else:
+            last_signal_window_start_index = self.labels.numel() - self.signal_window_size
+            assert last_signal_window_start_index+self.signal_window_size == self.labels.numel()
         valid_t0 = np.zeros(self.labels.numel(), dtype=int)  # size = n_pre_elm_phase
         valid_t0[:last_signal_window_start_index+1] = 1
         assert valid_t0[last_signal_window_start_index] == 1  # last signal window start with pre-ELM label
         assert valid_t0[last_signal_window_start_index+1] == 0  # first invalid signal window start with active ELM label
         sample_indices = np.arange(valid_t0.size, dtype=int)
         sample_indices = sample_indices[valid_t0 == 1]
-        assert sample_indices.size-1 + self.signal_window_size - 1 == labels.size - 1
-        assert sample_indices[-1] + self.signal_window_size-1 == labels.size-1
         self.sample_indices = torch.from_numpy(sample_indices)
+
+    def stats(self) -> dict:
+        signals = torch.squeeze(self.signals[:,:self.active_elm_start_index,...])
+        min, _ = torch.min(signals, dim=0)
+        max, _ = torch.max(signals, dim=0)
+        std, mean = torch.std_mean(signals, dim=0)
+        return {
+            'min': min.flatten(),
+            'max': max.flatten(),
+            'mean': mean.flatten(),
+            'std': std.flatten(),
+        }
 
     def __len__(self) -> int:
         return self.sample_indices.numel()
@@ -181,10 +199,6 @@ class ELM_Datamodule(LightningDataModule):
                 stage: self.test_elm_indices,
             }
 
-        if stage != 'fit':
-            for state_item in self.state_items:
-                assert getattr(self, state_item), f"self.{state_item} is False"
-
         for dataset_stage, indices in dataset_elm_indices.items():
 
             if dataset_stage in self.datasets and self.datasets[dataset_stage]:
@@ -209,6 +223,8 @@ class ELM_Datamodule(LightningDataModule):
                         'signals': signals, 
                         'labels': labels, 
                         'valid_t0': valid_t0,
+                        'elm_index': elm_index,
+                        'shot': elm_event.attrs['shot'],
                     })
 
             packaged_labels = np.concatenate([elm['labels'] for elm in elm_data], axis=0)
@@ -222,6 +238,14 @@ class ELM_Datamodule(LightningDataModule):
                 packaged_window_start.append(index)
                 index += elm['labels'].size
             packaged_window_start = np.array(packaged_window_start, dtype=int)
+            packeged_elm_index = np.array(
+                [elm['elm_index'] for elm in elm_data],
+                dtype=int,
+            )
+            packeged_shot = np.array(
+                [elm['shot'] for elm in elm_data],
+                dtype=int,
+            )
             # valid t0 indices
             packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
             packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
@@ -235,7 +259,7 @@ class ELM_Datamodule(LightningDataModule):
             # clip outlier signals
             if self.clip_sigma_outliers:
                 if None in [self.clip_lb, self.clip_ub]:
-                    assert dataset_stage == 'train', f"Dataset_stage: {dataset_stage}"
+                    assert dataset_stage == 'train' or not self.train_elm_indices, f"Dataset_stage: {dataset_stage}"
                     print("  Calculating clipping upper/lower bounds from training data")
                     self.clip_lb = stats['mean'] - self.clip_sigma_outliers * stats['stdev']
                     self.clip_ub = stats['mean'] + self.clip_sigma_outliers * stats['stdev']
@@ -260,7 +284,7 @@ class ELM_Datamodule(LightningDataModule):
                 )
             # standardize signals based on training data
             if None in [self.signal_mean, self.signal_stdev]:
-                assert dataset_stage == 'train', f"Dataset_stage: {dataset_stage}"
+                assert dataset_stage == 'train' or not self.train_elm_indices, f"Dataset_stage: {dataset_stage}"
                 print("  Calculating signal mean and std from training data")
                 self.signal_mean = stats['mean']
                 self.signal_stdev = stats['stdev']
@@ -278,7 +302,7 @@ class ELM_Datamodule(LightningDataModule):
 
             # normalize labels with min=-1 and median=0
             if self.label_median is None:
-                assert dataset_stage == 'train', f"Dataset_stage: {dataset_stage}"
+                assert dataset_stage == 'train' or not self.train_elm_indices, f"Dataset_stage: {dataset_stage}"
                 print("  Calculating median label from training labels")
                 self.label_median = np.median(packaged_labels[packaged_valid_t0_indices+self.signal_window_size])
                 self.save_hyperparameters({'label_median': self.label_median.item()})
@@ -307,10 +331,15 @@ class ELM_Datamodule(LightningDataModule):
                         idx_stop = packaged_window_start[i_elm+1]-1
                     signals = packaged_signals[idx_start:idx_stop, ...]
                     labels = packaged_labels[idx_start:idx_stop]
+                    shot = packeged_shot[i_elm]
+                    elm_index = packeged_elm_index[i_elm]
                     dataset = ELM_Predict_Dataset(
                         signals=signals,
                         labels=labels,
                         signal_window_size=self.signal_window_size,
+                        shot=shot,
+                        elm_index=elm_index,
+                        pre_elm_only=True if self.fraction_test==1 else False,
                     )
                     predict_datasets.append(dataset)
                 self.datasets['predict'] = predict_datasets
@@ -360,7 +389,7 @@ class ELM_Datamodule(LightningDataModule):
         print(f"  Validation  {n_validation_elms}  ({n_validation_elms/self.all_elm_indices.size*100:.1f}%)")
         print(f"  Test  {n_test_elms}  ({n_test_elms/self.all_elm_indices.size*100:.1f}%)")
         # split into test and train/val
-        self.test_elm_indices = self.all_elm_indices[:n_test_elms]
+        self.test_elm_indices = np.sort(self.all_elm_indices[:n_test_elms])
         train_val_elm_indices = self.all_elm_indices[n_test_elms:]
         self.validation_elm_indices = train_val_elm_indices[:n_validation_elms]
         self.train_elm_indices = train_val_elm_indices[n_validation_elms:]

@@ -26,13 +26,14 @@ class Lightning_Model(LightningModule):
     weight_decay: float = 1e-6
     monitor_metric: str = 'score/val'
     log_dir: str = dataclasses.field(default=None, init=False)
+    signal_window_size: int = dataclasses.field(default=None, init=False)
     
     def __post_init__(self):
         super().__init__()
         self.torch_model = None
 
-    def set_torch_model(self, torch_model: torch.nn.Module = None):
-        assert torch_model and hasattr(torch_model, 'signal_window_size')
+    def set_torch_model(self, torch_model: torch.nn.Module):
+        assert hasattr(torch_model, 'signal_window_size')
         hp_fields = dataclasses.asdict(self) | dataclasses.asdict(torch_model)
         hp_fields['torch_model_name'] = torch_model.__class__.__name__
         for field in ['lr_scheduler_patience','lr_scheduler_threshold']:
@@ -65,18 +66,6 @@ class Lightning_Model(LightningModule):
                 param.data.uniform_(-sqrt_k, sqrt_k)
                 print(f"    n_in*var: {n_in*torch.var(param.data):.3f}")
        
-        # sample_batch = torch.empty(
-        #     (512, 1, self.signal_window_size, 8, 8), 
-        #     dtype=torch.float32,
-        # )
-        # sample_batch.normal_()
-        # self.eval()
-        # with torch.no_grad():
-        #     sample_batch_outputs = self(sample_batch)
-        # print(sample_batch_outputs.size())
-        # print(torch.mean(sample_batch_outputs))
-        # print(torch.var(sample_batch_outputs))
-
         self.example_input_array = torch.zeros(
             (2, 1, self.signal_window_size, 8, 8), 
             dtype=torch.float32,
@@ -115,11 +104,8 @@ class Lightning_Model(LightningModule):
         predictions = self(signals)
         self.mse_loss(predictions, labels)
         self.log("loss/val", self.mse_loss)
-        # if self.current_epoch >= 25:
         self.r2_score(predictions, labels)
         self.log("score/val", self.r2_score)
-        # else:
-        #     self.log("score/val", 0.)
 
     def test_step(self, batch, batch_idx):
         signals, labels = batch
@@ -128,7 +114,6 @@ class Lightning_Model(LightningModule):
         self.log("loss/test", self.mse_loss)
         self.r2_score(predictions, labels)
         self.log("score/test", self.r2_score)
-        # self.log("hp_metric", self.r2_score)
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0) -> None:
         signals, labels = batch
@@ -204,7 +189,7 @@ class Lightning_Model(LightningModule):
 
 @dataclasses.dataclass(eq=False)
 class Lightning_Unsupervised_Model(Lightning_Model):
-    monitor_metric: str = 'val_loss'
+    monitor_metric: str = 'loss/val'
 
     def __post_init__(self):
         super().__post_init__()
@@ -213,23 +198,23 @@ class Lightning_Unsupervised_Model(Lightning_Model):
         signals, _ = batch
         predictions = self(signals)
         loss = self.mse_loss(predictions, signals)
-        self.log("train_loss", self.mse_loss)
+        self.log("loss/train", self.mse_loss)
         return loss
 
     def validation_step(self, batch, batch_idx):
         signals, _ = batch
         predictions = self(signals)
         self.mse_loss(predictions, signals)
-        self.log("val_loss", self.mse_loss)
+        self.log("loss/val", self.mse_loss)
 
     def test_step(self, batch, batch_idx):
         signals, _ = batch
         predictions = self(signals)
         self.mse_loss(predictions, signals)
-        self.log("test_loss", self.mse_loss)
+        self.log("loss/test", self.mse_loss)
 
-    def predict_step(self, batch, batch_idx, dataloader_idx=0) -> dict:
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
         pass
     
-    def on_predict_epoch_end(self, results) -> None:
+    def on_predict_epoch_end(self, results):
         pass

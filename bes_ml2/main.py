@@ -210,6 +210,6 @@ if __name__=='__main__':
         datamodule=datamodule,
         max_epochs=2,
         # wandb_log=True,
-        skip_test_predict=True,
+        # skip_test_predict=True,
     )
     trainer.run_all()
