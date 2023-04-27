@@ -94,14 +94,14 @@ class ELM_Predict_Dataset(torch.utils.data.Dataset):
         self.sample_indices = torch.from_numpy(sample_indices)
 
     def pre_elm_stats(self) -> dict[str, torch.Tensor]:
-        signals = torch.squeeze(self.signals[:,:self.active_elm_start_index,...])
-        maxabs, _ = torch.max(torch.abs(signals), dim=0)
-        std, mean = torch.std_mean(signals, dim=0)
+        pre_elm_signals = self.signals[0,:self.active_elm_start_index,...]
+        maxabs, _ = torch.max(torch.abs(pre_elm_signals), dim=0)
+        std, mean = torch.std_mean(pre_elm_signals, dim=0)
         # exkurt = np.sum(cummulative_hist * (bin_center - mean) ** 4) / np.sum(cummulative_hist) - 3
         return {
-            'maxabs': maxabs.flatten(),
-            'mean': mean.flatten(),
-            'std': std.flatten(),
+            'maxabs': maxabs.numpy(force=True),
+            'mean': mean.numpy(force=True),
+            'std': std.numpy(force=True),
         }
 
     def __len__(self) -> int:

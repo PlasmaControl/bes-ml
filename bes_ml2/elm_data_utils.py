@@ -36,7 +36,7 @@ def plot_stats(
     i_page = 1
     fig, axes = plt.subplots(ncols=5, nrows=4, figsize=(14, 8.5))
     axes = axes.flatten()
-    n_axes = axes.size
+    n_elms_per_page = axes.size // 2
     channels = np.arange(1,65)
     for i_elm, dataloader in enumerate(dataloaders):
         dataset: elm_datamodule.ELM_Predict_Dataset = dataloader.dataset
@@ -44,21 +44,39 @@ def plot_stats(
         shot = dataset.shot
         pre_elm_size = dataset.active_elm_start_index-1
         stats = dataset.pre_elm_stats()
-        if i_elm%n_axes == 0:
+        i_elm_on_page = i_elm%n_elms_per_page
+        if i_elm_on_page == 0:
             plt.suptitle(f"Channel-wise ELM stats (page {i_page})")
             for ax in axes:
                 ax.clear()
-        plt.sca(axes[i_elm%n_axes])
+        # plot stats
+        plt.sca(axes[i_elm_on_page + 5*(i_elm_on_page//5)])
         for key in stats:
-            plt.plot(channels, stats[key], label=key)
-        plt.axhline(0, linestyle='--')
-        plt.axhline(datamodule.max_abs_valid_signal, linestyle='--')
+            plt.plot(channels, stats[key].flatten(), label=key)
+        plt.axhline(0, linestyle='--', color='k')
+        plt.axhline(datamodule.max_abs_valid_signal, linestyle='--', color='k')
         plt.title(f"ELM index {elm_index} Shot {shot}", fontsize='medium')
         plt.xlabel('Channel')
-        plt.ylim(-1,1.2*datamodule.max_abs_valid_signal)
-        if i_elm%n_axes==0:
+        plt.ylim(-1,1.3*datamodule.max_abs_valid_signal)
+        if i_elm_on_page==0:
             plt.legend(loc='lower right', fontsize='small')
-        if i_elm%n_axes==n_axes-1 or i_elm==n_elms-1:
+        # plot time-series signals
+        plt.sca(axes[i_elm_on_page + 5*(i_elm_on_page//5) + 5])
+        max_abs_channel = np.unravel_index(np.argmax(stats['maxabs']), stats['maxabs'].shape)
+        max_std_channel = np.unravel_index(np.argmax(stats['std']), stats['std'].shape)
+        interval = np.amax([pre_elm_size//500,1])
+        time_axis = (np.arange(-pre_elm_size,0)/1e3)[::interval]
+        plt.plot(time_axis, dataset.signals[0, 0:pre_elm_size:interval, max_abs_channel[0], max_abs_channel[1]])
+        if not np.array_equal(max_abs_channel, max_std_channel):
+            plt.plot(time_axis, dataset.signals[0, 0:pre_elm_size:interval, max_std_channel[0], max_std_channel[1]])
+        plt.title(f"ELM index {elm_index} Shot {shot}", fontsize='medium')
+        plt.xlabel('Time-to-ELM (ms)')
+        plt.ylabel('Scaled BES signals')
+        plt.axhline(datamodule.max_abs_valid_signal, linestyle='--', color='k')
+        plt.axhline(-datamodule.max_abs_valid_signal, linestyle='--', color='k')
+        plt.axhline(0, linestyle='--', color='k')
+        plt.ylim(np.array([-1.3,1.3])*datamodule.max_abs_valid_signal)
+        if i_elm_on_page==n_elms_per_page-1 or i_elm==n_elms-1:
             plt.tight_layout()
             if save:
                 filepath = os.path.join(figure_dir, f'elm_stats_{i_page:03d}.pdf')
@@ -96,11 +114,11 @@ def plot_stats(
 
 if __name__=='__main__':
     plot_stats(
-        data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
+        # data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
         block_show=False,
         max_elms=500,
         mask_sigma_outliers=8,
-        save=False,
+        # save=False,
         merge=False,
     )
     
