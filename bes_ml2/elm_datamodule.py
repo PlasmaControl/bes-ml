@@ -97,7 +97,6 @@ class ELM_Predict_Dataset(torch.utils.data.Dataset):
         pre_elm_signals = self.signals[0,:self.active_elm_start_index,...]
         maxabs, _ = torch.max(torch.abs(pre_elm_signals), dim=0)
         std, mean = torch.std_mean(pre_elm_signals, dim=0)
-        # exkurt = np.sum(cummulative_hist * (bin_center - mean) ** 4) / np.sum(cummulative_hist) - 3
         return {
             'maxabs': maxabs.numpy(force=True),
             'mean': mean.numpy(force=True),
@@ -225,7 +224,12 @@ class ELM_Datamodule(LightningDataModule):
                     labels = np.array(elm_event["labels"], dtype=int)
                     # last_pre_elm_index = np.flatnonzero(labels == 1)[0]-1  # last pre-ELM index
                     # total_pre_elm += last_pre_elm_index
-                    labels, signals, valid_t0 = self._get_valid_indices(labels, signals)
+                    try:
+                        labels, signals, valid_t0 = self._get_valid_indices(labels, signals)
+                    except Exception as e:
+                        print(f"ELM index {elm_index} failed")
+                        print(signals.shape, labels.shape, labels.min(), labels.max())
+                        raise e
                     elm_data.append({
                         'signals': signals, 
                         'labels': labels, 
