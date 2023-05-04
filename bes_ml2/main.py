@@ -177,7 +177,7 @@ if __name__=='__main__':
     torch_model = elm_torch_model.Torch_CNN_Model(
         signal_window_size=signal_window_size,
         cnn_nlayers=6,
-        cnn_num_kernels=4,
+        cnn_num_kernels=16,
         cnn_kernel_time_size=2,
         cnn_padding=[[0,1,1]]*3 + [0]*3,
     )
@@ -196,10 +196,10 @@ if __name__=='__main__':
     Step 1a: Initiate pytorch_lightning.LightningDataModule
     """
     datamodule = elm_datamodule.ELM_Datamodule(
-        # data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
+        data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
         signal_window_size=signal_window_size,
-        max_elms=100,
-        batch_size=64,
+        max_elms=10,
+        batch_size=128,
         # fraction_validation=0.1,
         # fraction_test=0.1,
     )
@@ -210,8 +210,8 @@ if __name__=='__main__':
     trainer = BES_Trainer(
         lightning_model=lightning_model,
         datamodule=datamodule,
-        max_epochs=2,
-        # wandb_log=True,
+        max_epochs=1,
+        wandb_log=True,
         # skip_test_predict=True,
     )
     trainer.run_all()

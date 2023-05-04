@@ -74,7 +74,7 @@ class Lightning_Model(LightningModule):
         self.r2_score = torchmetrics.R2Score()
         self.predict_outputs: list[list] = []
 
-    def forward(self, signals):
+    def forward(self, signals) -> torch.Tensor:
         return self.torch_model(signals)
 
     def training_step(self, batch, batch_idx) -> torch.Tensor:
@@ -115,7 +115,7 @@ class Lightning_Model(LightningModule):
         self.r2_score(predictions, labels)
         self.log("score/test", self.r2_score)
 
-    def predict_step(self, batch, batch_idx, dataloader_idx=0) -> None:
+    def predict_step(self, batch: tuple[torch.Tensor,torch.Tensor], batch_idx, dataloader_idx=0) -> None:
         signals, labels = batch
         predictions = self(signals)
         if batch_idx == 0:
@@ -129,14 +129,14 @@ class Lightning_Model(LightningModule):
     def on_predict_epoch_end(self) -> None:
         i_page = 1
         for i_elm, result in enumerate(self.predict_outputs):
-            labels = torch.concat([batch['labels'] for batch in result]).squeeze()
-            predictions = torch.concat([batch['predictions'] for batch in result]).squeeze()
+            labels = torch.concat([batch['labels'] for batch in result]).squeeze().numpy(force=True)
+            predictions = torch.concat([batch['predictions'] for batch in result]).squeeze().numpy(force=True)
             assert labels.shape[0] == predictions.shape[0]
             dataloader: torch.utils.data.DataLoader = self.trainer.predict_dataloaders[i_elm]
             dataset: elm_datamodule.ELM_Predict_Dataset = dataloader.dataset
-            signal = dataset.signals[..., 2, 3].squeeze()
+            signal = dataset.signals[..., 2, 3].squeeze().numpy(force=True)
             assert signal.shape[0] == labels.shape[0]-1+self.signal_window_size
-            time = (np.arange(signal.numel()) - dataset.active_elm_start_index)/1e3
+            time = (np.arange(signal.size) - dataset.active_elm_start_index)/1e3
             if i_elm % 6 == 0:
                 plt.close('all')
                 fig, axes = plt.subplots(ncols=3, nrows=2, figsize=(12, 6))

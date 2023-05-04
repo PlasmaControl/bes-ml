@@ -269,7 +269,7 @@ class ELM_Datamodule(LightningDataModule):
             if self.plot_data_stats:
                 _, axes = plt.subplots(ncols=3, nrows=2, figsize=(9, 4.5))
                 axes = axes.flatten()
-                bins = 11
+                bins = 25
                 plt.suptitle(f"Pre-ELM statistics | `{dataset_stage}` dataset with {len(elm_data)} ELMs")
                 plt.sca(axes[0])
                 plt.hist(
