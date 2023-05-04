@@ -25,7 +25,7 @@ class Lightning_Model(LightningModule):
     lr_scheduler_threshold: float = 1e-3
     weight_decay: float = 1e-6
     monitor_metric: str = 'score/val'
-    log_dir: str = dataclasses.field(default=None, init=False)
+    log_dir: str = dataclasses.field(default='.', init=False)
     signal_window_size: int = dataclasses.field(default=None, init=False)
     
     def __post_init__(self):
@@ -216,5 +216,5 @@ class Lightning_Unsupervised_Model(Lightning_Model):
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
         pass
     
-    def on_predict_epoch_end(self, results):
+    def on_predict_epoch_end(self):
         pass

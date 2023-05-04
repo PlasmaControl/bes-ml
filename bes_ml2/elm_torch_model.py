@@ -155,7 +155,7 @@ class Torch_CNN_Mixin(Torch_Base):
             print(f"    Output data shape: {data_shape}  (size {np.prod(data_shape)})")
             assert np.all(np.array(data_shape) >= 1), f"Bad data shape {data_shape} after Decoder layer {i}"
             decoder.extend([
-                torch.nn.Dropout(p=self.cnn_dropout) if i!=0 else torch.nn.Identity(),
+                # torch.nn.Identity(),
                 conv3d,
                 torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope) if i!=0 else torch.nn.Identity(),
             ])

@@ -82,8 +82,9 @@ class BES_Trainer:
             default_hp_metric=False,
         )
         self.loggers.append(tb_logger)
-        # version_str = tb_logger.version if tb_logger.version is str else f"version_{tb_logger.version}"
+        os.makedirs(tb_logger.log_dir, exist_ok=True)
         self.lightning_model.log_dir = tb_logger.log_dir
+        self.datamodule.log_dir = tb_logger.log_dir
         
         if self.wandb_log:
             wandb.login()
@@ -168,18 +169,6 @@ if __name__=='__main__':
     signal_window_size = 256
 
     """
-    Step 1a: Initiate pytorch_lightning.LightningDataModule
-    """
-    datamodule = elm_datamodule.ELM_Datamodule(
-        # data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
-        signal_window_size=signal_window_size,
-        max_elms=100,
-        batch_size=64,
-        fraction_validation=0.1,
-        fraction_test=0.1,
-    )
-
-    """
     Step 1b: Initiate torch and lightning models
         Ugly hack: must initiate lightning model, then initiate torch model, 
         then add torch model to lightning model
@@ -195,12 +184,25 @@ if __name__=='__main__':
     # lightning_model = elm_lightning_model.Lightning_Unsupervised_Model()
     # torch_model = elm_torch_model.Torch_AE_Model(
     #     signal_window_size=signal_window_size,
-    #     cnn_nlayers=6,
-    #     cnn_num_kernels=4,
+    #     cnn_nlayers=3,
+    #     cnn_num_kernels=16,
     #     cnn_kernel_time_size=2,
-    #     cnn_padding=[[0,1,1]]*3 + [0]*3,
+    #     # cnn_padding=[[0,1,1]]*3 + [0]*3,
+    #     cnn_padding=[[0,1,1]]*3,
     # )
     lightning_model.set_torch_model(torch_model=torch_model)
+
+    """
+    Step 1a: Initiate pytorch_lightning.LightningDataModule
+    """
+    datamodule = elm_datamodule.ELM_Datamodule(
+        # data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
+        signal_window_size=signal_window_size,
+        max_elms=100,
+        batch_size=64,
+        # fraction_validation=0.1,
+        # fraction_test=0.1,
+    )
 
     """
     Step 2: Initiate pytorch_lightning.Trainer and run

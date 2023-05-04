@@ -18,10 +18,10 @@ def plot_stats(
     figure_dir: str = '.', 
     block_show: bool = True,
     mask_sigma_outliers: float = 8.,
-    save: bool = True, 
-    merge: bool = True,
     max_std: float = np.inf,
     max_channels_above_sigma: int = np.inf,
+    save: bool = True, 
+    merge: bool = True,
     bad_elm_indices_csv: bool = True,
     bad_elm_indices: list = None,
     skip_elm_plots: bool = False,
@@ -41,7 +41,7 @@ def plot_stats(
     dataloaders = datamodule.predict_dataloader()
     n_elms = len(dataloaders)
     i_page = 1
-    shot_stats = {
+    all_channel_stats = {
         'max_std': [],
         'min_maxabs': [],
         'max_maxabs': [],
@@ -52,39 +52,38 @@ def plot_stats(
     count_rejected_elms = 0
     for i_elm, dataloader in enumerate(dataloaders):
         dataset: elm_datamodule.ELM_Predict_Dataset = dataloader.dataset
-        stats = dataset.pre_elm_stats()
-        shot_stats['max_std'].append(np.amax(stats['std']))
-        shot_stats['min_maxabs'].append(np.amin(stats['maxabs']))
-        shot_stats['max_maxabs'].append(np.amax(stats['maxabs']))
-        shot_stats['channels_above_sigma'].append(np.count_nonzero(stats['maxabs']>datamodule.max_abs_valid_signal))
+        channel_wise_stats = dataset.pre_elm_stats()
+        all_channel_stats['max_std'].append(np.amax(channel_wise_stats['std']))
+        all_channel_stats['min_maxabs'].append(np.amin(channel_wise_stats['maxabs']))
+        all_channel_stats['max_maxabs'].append(np.amax(channel_wise_stats['maxabs']))
+        all_channel_stats['channels_above_sigma'].append(
+            np.count_nonzero(channel_wise_stats['maxabs']>datamodule.max_abs_valid_signal)
+        )
+        elm_index = dataset.elm_index
+        shot = dataset.shot
+        pre_elm_size = dataset.active_elm_start_index-1
+        acceptable_elm = (
+            True if np.all(np.array(channel_wise_stats['std']) <= max_std) 
+            and all_channel_stats['channels_above_sigma'][-1] <= max_channels_above_sigma
+            else False
+        )
+        if not acceptable_elm:
+            count_rejected_elms += 1
         if skip_elm_plots:
             continue
+        # plot stats
         if i_elm==0:
             _, axes = plt.subplots(ncols=5, nrows=4, figsize=(14, 8.5))
             axes = axes.flatten()
             n_elms_per_page = axes.size // 2
-        elm_index = dataset.elm_index
-        shot = dataset.shot
-        pre_elm_size = dataset.active_elm_start_index-1
         i_elm_on_page = i_elm%n_elms_per_page
         if i_elm_on_page == 0:
             plt.suptitle(f"Channel-wise pre-ELM stats (page {i_page})")
             for ax in axes:
                 ax.clear()
-        acceptable_elm = (
-            True 
-            if 
-            # np.all(np.array(shot_stats['max_std']) <= max_std) 
-            # and 
-            shot_stats['channels_above_sigma'] <= max_channels_above_sigma
-            else False
-        )
-        if not acceptable_elm:
-            count_rejected_elms += 1
-        # plot stats
         plt.sca(axes[i_elm_on_page + 5*(i_elm_on_page//5)])
-        for key in stats:
-            plt.plot(np.arange(1,65), stats[key].flatten(), label=key)
+        for key in channel_wise_stats:
+            plt.plot(np.arange(1,65), channel_wise_stats[key].flatten(), label=key)
         plt.axhline(0, linestyle='--', color='k', linewidth=0.5)
         plt.axhline(datamodule.max_abs_valid_signal, linestyle='--', color='k', linewidth=0.5)
         plt.title(
@@ -101,8 +100,8 @@ def plot_stats(
             plt.legend(loc='lower right', fontsize='small')
         # plot time-series signals
         plt.sca(axes[i_elm_on_page + 5*(i_elm_on_page//5) + 5])
-        max_abs_channel = np.unravel_index(np.argmax(stats['maxabs']), stats['maxabs'].shape)
-        max_std_channel = np.unravel_index(np.argmax(stats['std']), stats['std'].shape)
+        max_abs_channel = np.unravel_index(np.argmax(channel_wise_stats['maxabs']), channel_wise_stats['maxabs'].shape)
+        max_std_channel = np.unravel_index(np.argmax(channel_wise_stats['std']), channel_wise_stats['std'].shape)
         interval = np.amax([pre_elm_size//500,1])
         time_axis = (np.arange(-pre_elm_size,0)/1e3)[::interval]
         plt.plot(
@@ -142,16 +141,16 @@ def plot_stats(
             i_page += 1
             plt.show(block=block_show)
 
-    n_elms_above_max_std = np.count_nonzero(np.array(shot_stats['max_std'])>max_std)
+    n_elms_above_max_std = np.count_nonzero(np.array(all_channel_stats['max_std'])>max_std)
     print(f"ELMs above max_std {max_std:.3f}: {n_elms_above_max_std}")
     print(f"Rejected ELMs: {count_rejected_elms}")
 
     _, axes = plt.subplots(nrows=2, ncols=2)
     plt.suptitle('Distribution of maximum channel-wise stats during pre_ELM phase')
     axes = axes.flatten()
-    for i_axis, key in enumerate(shot_stats):
+    for i_axis, key in enumerate(all_channel_stats):
         plt.sca(axes[i_axis])
-        plt.hist(shot_stats[key], bins=31)
+        plt.hist(all_channel_stats[key], bins=31)
         plt.ylabel('# ELMs')
         plt.yscale('log')
         plt.ylim(bottom=0.8)
@@ -195,14 +194,15 @@ def plot_stats(
 
 if __name__=='__main__':
     plot_stats(
-        data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
-        mask_sigma_outliers=6,
-        max_std=5.,
-        max_channels_above_sigma=18,
+        # data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
+        # mask_sigma_outliers=6,
+        # max_std=5.,
+        # max_channels_above_sigma=18,
         # max_elms=500,
         bad_elm_indices_csv=False,
-        skip_elm_plots=True,
+        # skip_elm_plots=True,
         # save=False,
         # merge=False,
+        block_show=False,
     )
     

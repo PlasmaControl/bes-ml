@@ -1,8 +1,11 @@
 from __future__ import annotations
 import dataclasses
 from pathlib import Path
+import os
 
 import numpy as np
+import matplotlib.pyplot as plt
+import scipy.stats
 import h5py
 
 import torch
@@ -130,6 +133,8 @@ class ELM_Datamodule(LightningDataModule):
     bad_elm_indices_csv: str | bool = True  # CSV file to read bad ELM indices
     log_time: bool = False  # if True, use label = log(time_to_elm_onset)
     prepare_data_per_node: bool = None  # hack to avoid error between dataclass and LightningDataModule
+    plot_data_stats: bool = True
+    log_dir: str = dataclasses.field(default='.', init=False)
 
     def __post_init__(self):
         super().__init__()
@@ -209,9 +214,9 @@ class ELM_Datamodule(LightningDataModule):
             # package ELM events into pytorch dataset
             print(f"Reading ELM events for dataset `{dataset_stage}`")
             elm_data = []
-            # total_pre_elm = 0
-            # n_bins = 200
-            # cummulative_hist = np.zeros(n_bins, dtype=int)
+            all_data_pre_elm_size = 0
+            n_bins = 201
+            cummulative_hist = np.zeros(n_bins, dtype=int)
             with h5py.File(self.data_file, 'r') as h5_file:
                 if indices.size >= 5:
                     print(f"  Initial indices: {indices[:5]}")
@@ -222,8 +227,14 @@ class ELM_Datamodule(LightningDataModule):
                     signals = np.array(elm_event["signals"], dtype=np.float32)  # (64, <time>)
                     signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (<time>, 8, 8)
                     labels = np.array(elm_event["labels"], dtype=int)
-                    # last_pre_elm_index = np.flatnonzero(labels == 1)[0]-1  # last pre-ELM index
-                    # total_pre_elm += last_pre_elm_index
+                    pre_elm_size = np.flatnonzero(labels == 1)[0]  # pre-ELM size = index of first active ELM
+                    assert labels[pre_elm_size-1]==0 and labels[pre_elm_size]==1
+                    all_data_pre_elm_size += pre_elm_size
+                    pre_elm_maxabs_by_channel = np.amax(np.abs(signals[:pre_elm_size,:,:]), axis=0)
+                    pre_elm_maxcount_by_channel = np.count_nonzero(np.isclose(signals[:pre_elm_size,:,:], 10.3758), axis=0)
+                    pre_elm_mean_by_channel = np.mean(signals[:pre_elm_size,:,:], axis=0)
+                    pre_elm_std_by_channel = np.std(signals[:pre_elm_size,:,:], axis=0)
+                    pre_elm_kurt_by_channel = scipy.stats.kurtosis(signals[:pre_elm_size,:,:], axis=0, fisher=False)
                     try:
                         labels, signals, valid_t0 = self._get_valid_indices(labels, signals)
                     except Exception as e:
@@ -236,21 +247,76 @@ class ELM_Datamodule(LightningDataModule):
                         'valid_t0': valid_t0,
                         'elm_index': elm_index,
                         'shot': elm_event.attrs['shot'],
-                        # 'last_pre_elm_index': last_pre_elm_index,
+                        'pre_elm_size': pre_elm_size,
+                        'pre_elm_maxabs_by_channel': pre_elm_maxabs_by_channel,
+                        'pre_elm_maxcount_by_channel': pre_elm_maxcount_by_channel,
+                        'pre_elm_mean_by_channel': pre_elm_mean_by_channel,
+                        'pre_elm_std_by_channel': pre_elm_std_by_channel,
+                        'pre_elm_kurt_by_channel': pre_elm_kurt_by_channel,
                     })
-                    # hist, bin_edges = np.histogram(
-                    #     signals[:last_pre_elm_index:50, :, :],
-                    #     bins=n_bins,
-                    #     range=[-10.4, 10.4],
-                    # )
-                    # cummulative_hist += hist
+                    hist, bin_edges = np.histogram(
+                        signals[:pre_elm_size:50, :, :],
+                        bins=n_bins,
+                        range=[-10.4, 10.4],
+                    )
+                    cummulative_hist += hist
 
-            # bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
-            # mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
-            # stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
-            # exkurt = np.sum(cummulative_hist * ((bin_center - mean)/stdev) ** 4) / np.sum(cummulative_hist) - 3
-            # print(f"{total_pre_elm} {mean:.3f} {stdev:.3f} {exkurt:.3f}")
+            bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
+            mean_all_data = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
+            stdev_all_data = np.sqrt(np.sum(cummulative_hist * (bin_center - mean_all_data) ** 2) / np.sum(cummulative_hist))
+            exkurt_all_data = np.sum(cummulative_hist * ((bin_center - mean_all_data)/stdev_all_data) ** 4) / np.sum(cummulative_hist) - 3
 
+            if self.plot_data_stats:
+                _, axes = plt.subplots(ncols=3, nrows=2, figsize=(9, 4.5))
+                axes = axes.flatten()
+                bins = 11
+                plt.suptitle(f"Pre-ELM statistics | `{dataset_stage}` dataset with {len(elm_data)} ELMs")
+                plt.sca(axes[0])
+                plt.hist(
+                    np.array([elm['pre_elm_size'] for elm in elm_data])/1e3, 
+                    bins=bins,
+                )
+                plt.xlabel('Pre-ELM size (ms)')
+                plt.sca(axes[1])
+                plt.hist(
+                    np.concatenate([elm['pre_elm_maxabs_by_channel'] for elm in elm_data], axis=None), 
+                    bins=bins,
+                )
+                plt.xlabel('Channel-wise max(abs())')
+                plt.sca(axes[2])
+                plt.hist(
+                    np.concatenate([elm['pre_elm_maxcount_by_channel'] for elm in elm_data], axis=None), 
+                    bins=bins,
+                )
+                plt.xlabel('Channel-wise saturated points')
+                plt.sca(axes[3])
+                plt.hist(
+                    np.concatenate([elm['pre_elm_mean_by_channel'] for elm in elm_data], axis=None), 
+                    bins=bins,
+                )
+                plt.xlabel('Channel-wise mean')
+                plt.sca(axes[4])
+                plt.hist(
+                    np.concatenate([elm['pre_elm_std_by_channel'] for elm in elm_data], axis=None), 
+                    bins=bins,
+                )
+                plt.xlabel('Channel-wise std. dev.')
+                plt.sca(axes[5])
+                plt.hist(
+                    np.log10(np.concatenate([elm['pre_elm_kurt_by_channel'] for elm in elm_data], axis=None)),
+                    bins=bins,
+                )
+                plt.xlabel('Channel-wise log10(kurt)')
+                for axis in axes:
+                    plt.sca(axis)
+                    plt.ylabel('Counts')
+                    plt.yscale('log')
+                    plt.ylim(bottom=0.8)
+                plt.tight_layout()
+                filepath = os.path.join(self.log_dir, f'{dataset_stage}_dataset_stats.pdf')
+                print(f"Saving figure {filepath}")
+                plt.savefig(filepath, format='pdf', transparent=True)
+                plt.show(block=False)
 
             packaged_labels = np.concatenate([elm['labels'] for elm in elm_data], axis=0)
             packaged_signals = np.concatenate([elm['signals'] for elm in elm_data], axis=0)
