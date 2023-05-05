@@ -145,8 +145,8 @@ class Lightning_Model(LightningModule):
             signals = torch.concat([batch['signals'] for batch in result]).squeeze().numpy(force=True)
             assert labels.shape[0] == predictions.shape[0] and labels.shape[0] == signals.shape[0]
             signal = signals[:, -1, 2, 3].squeeze()
-            pre_elm_size = np.flatnonzero(labels == 1)[0]
-            time = (np.arange(-len(labels), 0) + (len(labels)-pre_elm_size)) / 1e3
+            pre_elm_size = np.count_nonzero(np.isfinite(labels))
+            time = (np.arange(len(labels)) - pre_elm_size) / 1e3
             if i_elm % 6 == 0:
                 plt.close('all')
                 fig, axes = plt.subplots(ncols=3, nrows=2, figsize=(12, 6))

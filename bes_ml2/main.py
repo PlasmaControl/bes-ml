@@ -150,25 +150,6 @@ class BES_Trainer:
             ckpt_path='best',
         )
 
-        # # ugly hack to properly predict a single ELM
-        # if torch.distributed.is_initialized():
-        #     torch.distributed.destroy_process_group()
-        # if self.trainer.is_global_zero:
-        #     tmp_trainer = pl.Trainer(
-        #         enable_model_summary=False,
-        #         enable_progress_bar=self.enable_progress_bar,
-        #         num_nodes=1,
-        #         num_processes=1,
-        #         devices=1,
-        #         accelerator="auto",
-        #         logger=False,
-        #     )
-        #     tmp_trainer.predict(
-        #         model=self.lightning_model, 
-        #         datamodule=self.datamodule, 
-        #         ckpt_path=self.trainer.checkpoint_callback.best_model_path,
-        #     )
-
 
 if __name__=='__main__':
     signal_window_size = 256
@@ -201,7 +182,7 @@ if __name__=='__main__':
     Step 1a: Initiate pytorch_lightning.LightningDataModule
     """
     datamodule = elm_datamodule.ELM_Datamodule(
-        data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
+        # data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
         signal_window_size=signal_window_size,
         max_elms=10,
         batch_size=128,
