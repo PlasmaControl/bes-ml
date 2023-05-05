@@ -37,13 +37,16 @@ class BES_Trainer:
         assert self.datamodule.signal_window_size == self.lightning_model.signal_window_size
 
         self.monitor_metric = self.lightning_model.monitor_metric
+        self.is_global_zero = self.lightning_model.global_rank == 0
         self.trainer = None
+
 
         if self.experiment_name is None:
             datetime_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             self.experiment_name = f"run_{datetime_str}"
 
-        print(f'Initiating {self.__class__.__name__}')
+        if self.is_global_zero:
+            print(f'Initiating {self.__class__.__name__}')
         class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
         for field_name in dataclasses.asdict(self):
             if field_name in ['datamodule', 'lightning_model']:
@@ -53,10 +56,12 @@ class BES_Trainer:
             default_value = class_fields_dict[field_name].default
             if value != default_value:
                 field_str += f" (default {default_value})"
-            print(field_str)
+            if self.is_global_zero:
+                print(field_str)
 
-        print("Model Summary:")
-        print(ModelSummary(self.lightning_model, max_depth=-1))
+        if self.is_global_zero:
+            print("Model Summary:")
+            print(ModelSummary(self.lightning_model, max_depth=-1))
 
     def run_fast_dev(self):
         tmp_trainer = Trainer(
@@ -177,7 +182,7 @@ if __name__=='__main__':
     torch_model = elm_torch_model.Torch_CNN_Model(
         signal_window_size=signal_window_size,
         cnn_nlayers=6,
-        cnn_num_kernels=16,
+        cnn_num_kernels=4,
         cnn_kernel_time_size=2,
         cnn_padding=[[0,1,1]]*3 + [0]*3,
     )
@@ -211,7 +216,7 @@ if __name__=='__main__':
         lightning_model=lightning_model,
         datamodule=datamodule,
         max_epochs=1,
-        wandb_log=True,
+        # wandb_log=True,
         # skip_test_predict=True,
     )
     trainer.run_all()

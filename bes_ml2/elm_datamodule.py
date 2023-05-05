@@ -164,15 +164,18 @@ class ELM_Datamodule(LightningDataModule):
         self.train_elm_indices = None
         self.validation_elm_indices = None
 
-        print(f'Initiating {self.__class__.__name__}')
-        class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
-        for field_name in dataclasses.asdict(self):
-            value = getattr(self, field_name)
-            field_str = f"  {field_name}: {value}"
-            default_value = class_fields_dict[field_name].default
-            if value != default_value:
-                field_str += f" (default {default_value})"
-            print(field_str)
+        self.is_global_zero = self.trainer.is_global_zero if self.trainer else True
+
+        if self.is_global_zero:
+            print(f'Initiating {self.__class__.__name__}')
+            class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
+            for field_name in dataclasses.asdict(self):
+                value = getattr(self, field_name)
+                field_str = f"  {field_name}: {value}"
+                default_value = class_fields_dict[field_name].default
+                if value != default_value:
+                    field_str += f" (default {default_value})"
+                print(field_str)
 
     def prepare_data(self):
         # only called in main process
@@ -185,14 +188,16 @@ class ELM_Datamodule(LightningDataModule):
         return state
 
     def load_state_dict(self, state: dict) -> None:
-        print("**** Loading state_dict ****")
+        if self.is_global_zero:
+            print("**** Loading state_dict ****")
         for item in self.state_items:
             setattr(self, item, state[item])
 
     def setup(self, stage=None):
         # called on every process
         # open ELM data file, read ELM indices, removed ignored ELM events
-        print(f"Running ELM_Datamodule.setup(stage={stage})")
+        if self.is_global_zero:
+            print(f"Running ELM_Datamodule.setup(stage={stage})")
         self._get_elm_indices_and_split()
 
         if stage == 'fit':
@@ -208,21 +213,25 @@ class ELM_Datamodule(LightningDataModule):
         for dataset_stage, indices in dataset_elm_indices.items():
 
             if dataset_stage in self.datasets and self.datasets[dataset_stage]:
-                print(f"Dataset for `{dataset_stage}` is loaded, continuing")
+                if self.is_global_zero:
+                    print(f"Dataset for `{dataset_stage}` is loaded, continuing")
                 continue
 
             # package ELM events into pytorch dataset
-            print(f"Reading ELM events for dataset `{dataset_stage}`")
+            if self.is_global_zero:
+                print(f"Reading ELM events for dataset `{dataset_stage}`")
             elm_data = []
             all_data_pre_elm_size = 0
             n_bins = 201
             cummulative_hist = np.zeros(n_bins, dtype=int)
             with h5py.File(self.data_file, 'r') as h5_file:
                 if indices.size >= 5:
-                    print(f"  Initial indices: {indices[:5]}")
+                    if self.is_global_zero:
+                        print(f"  Initial indices: {indices[:5]}")
                 for i_elm, elm_index in enumerate(indices):
                     if i_elm%100 == 0:
-                        print(f"  Reading ELM event {i_elm:04d}/{indices.size:04d}")
+                        if self.is_global_zero:
+                            print(f"  Reading ELM event {i_elm:04d}/{indices.size:04d}")
                     elm_event = h5_file[f"{elm_index:05d}"]
                     signals = np.array(elm_event["signals"], dtype=np.float32)  # (64, <time>)
                     signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (<time>, 8, 8)
@@ -235,12 +244,7 @@ class ELM_Datamodule(LightningDataModule):
                     pre_elm_mean_by_channel = np.mean(signals[:pre_elm_size,:,:], axis=0)
                     pre_elm_std_by_channel = np.std(signals[:pre_elm_size,:,:], axis=0)
                     pre_elm_kurt_by_channel = scipy.stats.kurtosis(signals[:pre_elm_size,:,:], axis=0, fisher=False)
-                    try:
-                        labels, signals, valid_t0 = self._get_valid_indices(labels, signals)
-                    except Exception as e:
-                        print(f"ELM index {elm_index} failed")
-                        print(signals.shape, labels.shape, labels.min(), labels.max())
-                        raise e
+                    labels, signals, valid_t0 = self._get_valid_indices(labels, signals)
                     elm_data.append({
                         'signals': signals, 
                         'labels': labels, 
@@ -266,7 +270,7 @@ class ELM_Datamodule(LightningDataModule):
             stdev_all_data = np.sqrt(np.sum(cummulative_hist * (bin_center - mean_all_data) ** 2) / np.sum(cummulative_hist))
             exkurt_all_data = np.sum(cummulative_hist * ((bin_center - mean_all_data)/stdev_all_data) ** 4) / np.sum(cummulative_hist) - 3
 
-            if self.plot_data_stats:
+            if self.plot_data_stats and self.is_global_zero:
                 _, axes = plt.subplots(ncols=3, nrows=2, figsize=(9, 4.5))
                 axes = axes.flatten()
                 bins = 25
@@ -314,7 +318,7 @@ class ELM_Datamodule(LightningDataModule):
                     plt.ylim(bottom=0.8)
                 plt.tight_layout()
                 filepath = os.path.join(self.log_dir, f'{dataset_stage}_dataset_stats.pdf')
-                print(f"Saving figure {filepath}")
+                print(f"  Saving figure {filepath}")
                 plt.savefig(filepath, format='pdf', transparent=True)
                 plt.show(block=False)
 
@@ -342,7 +346,8 @@ class ELM_Datamodule(LightningDataModule):
             packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
             assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices]))
             assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices + self.signal_window_size]))
-            print("  Raw data stats")
+            if self.is_global_zero:
+                print("  Raw data stats")
             stats = self._get_statistics(
                 sample_indices=packaged_valid_t0_indices,
                 signals=packaged_signals,
@@ -351,15 +356,17 @@ class ELM_Datamodule(LightningDataModule):
             if self.mask_sigma_outliers:
                 if None in [self.mask_lb, self.mask_ub]:
                     assert dataset_stage == 'train' or not self.train_elm_indices, f"Dataset_stage: {dataset_stage}"
-                    print(f"  Calculating mask upper/lower bounds from {dataset_stage} data")
+                    if self.is_global_zero:
+                        print(f"  Calculating mask upper/lower bounds from {dataset_stage} data")
                     self.mask_lb = stats['mean'] - self.mask_sigma_outliers * stats['stdev']
                     self.mask_ub = stats['mean'] + self.mask_sigma_outliers * stats['stdev']
                     self.save_hyperparameters({
                         'mask_lb': self.mask_lb.item(),
                         'mask_ub': self.mask_ub.item(),
                     })
-                print(f"  Mask {self.mask_sigma_outliers:.2f} sigma outliers from signals")
-                print(f"  Mask lower bound {self.mask_lb:.3f} upper bound {self.mask_ub:.3f}")
+                if self.is_global_zero:
+                    print(f"  Mask {self.mask_sigma_outliers:.2f} sigma outliers from signals")
+                    print(f"  Mask lower bound {self.mask_lb:.3f} upper bound {self.mask_ub:.3f}")
                 mask = np.zeros(packaged_valid_t0_indices.size, dtype=bool)
                 for i_t0_index, t0_index in enumerate(packaged_valid_t0_indices):
                     signal_window = packaged_signals[t0_index: t0_index + self.signal_window_size, :, :]
@@ -368,7 +375,8 @@ class ELM_Datamodule(LightningDataModule):
                         np.min(signal_window) >= self.mask_lb
                     )
                 packaged_valid_t0_indices = packaged_valid_t0_indices[mask]
-                print("  Masked data stats")
+                if self.is_global_zero:
+                    print("  Masked data stats")
                 stats = self._get_statistics(
                     sample_indices=packaged_valid_t0_indices,
                     signals=packaged_signals,
@@ -376,7 +384,8 @@ class ELM_Datamodule(LightningDataModule):
             # standardize signals based on training data
             if None in [self.signal_mean, self.signal_stdev]:
                 assert dataset_stage == 'train' or not self.train_elm_indices, f"Dataset_stage: {dataset_stage}"
-                print(f"  Calculating signal mean and std from {dataset_stage} data")
+                if self.is_global_zero:
+                    print(f"  Calculating signal mean and std from {dataset_stage} data")
                 self.signal_mean = stats['mean']
                 self.signal_stdev = stats['stdev']
                 self.signal_exkurt = stats['exkurt']
@@ -385,9 +394,10 @@ class ELM_Datamodule(LightningDataModule):
                     'signal_stdev': self.signal_stdev.item(),
                     'signal_exkurt': self.signal_exkurt.item(),
                 })
-            print(f"  Standarizing signals with mean {self.signal_mean:.3f} and std {self.signal_stdev:.3f}")
+            if self.is_global_zero:
+                print(f"  Standarizing signals with mean {self.signal_mean:.3f} and std {self.signal_stdev:.3f}")
+                print("  Standardized signal stats")
             packaged_signals = (packaged_signals - self.signal_mean) / self.signal_stdev
-            print("  Standardized signal stats")
             stats = self._get_statistics(
                 sample_indices=packaged_valid_t0_indices,
                 signals=packaged_signals,
@@ -397,14 +407,17 @@ class ELM_Datamodule(LightningDataModule):
             # normalize labels with min=-1 and median=0
             if self.label_median is None:
                 assert dataset_stage == 'train' or not self.train_elm_indices, f"Dataset_stage: {dataset_stage}"
-                print(f"  Calculating median label from {dataset_stage} labels")
+                if self.is_global_zero:
+                    print(f"  Calculating median label from {dataset_stage} labels")
                 self.label_median = np.median(packaged_labels[packaged_valid_t0_indices+self.signal_window_size])
                 self.save_hyperparameters({'label_median': self.label_median.item()})
-            print(f"  Normalizing labels (min=-1 and median~0) with median {self.label_median:.3f}")
+            if self.is_global_zero:
+                print(f"  Normalizing labels (min=-1 and median~0) with median {self.label_median:.3f}")
             packaged_labels = (packaged_labels - self.label_median) / (self.label_median-1)
             label_min = np.nanmin(packaged_labels)
             label_median = np.median(packaged_labels[packaged_valid_t0_indices+self.signal_window_size])
-            print(f"    Label min {label_min:.3f} median {label_median:.3f}")
+            if self.is_global_zero:
+                print(f"    Label min {label_min:.3f} median {label_median:.3f}")
             assert label_min == -1
             if dataset_stage in ['train', 'validation', 'test']:
                 self.datasets[dataset_stage] = ELM_TrainValTest_Dataset(
@@ -440,12 +453,14 @@ class ELM_Datamodule(LightningDataModule):
 
     def _get_elm_indices_and_split(self):
         if self.all_elm_indices is not None:
-            print("Reusing previous ELM indices read and split")
+            if self.is_global_zero:
+                print("Reusing previous ELM indices read and split")
             return
         print(f"Data file: {self.data_file}")
         # gather ELM indices
         with h5py.File(self.data_file, "r") as elm_h5:
-            print(f"  ELM events in data file: {len(elm_h5)}")
+            if self.is_global_zero:
+                print(f"  ELM events in data file: {len(elm_h5)}")
             self.all_elm_indices = [int(elm_key) for elm_key in elm_h5]
         # bad ELM events to ignore?
         if self.bad_elm_indices or self.bad_elm_indices_csv:
@@ -454,7 +469,8 @@ class ELM_Datamodule(LightningDataModule):
             if self.bad_elm_indices_csv is True:
                 self.bad_elm_indices_csv = bad_elm_indices_csv
             if self.bad_elm_indices_csv:
-                print(f"  Ignoring ELM events from {self.bad_elm_indices_csv}")
+                if self.is_global_zero:
+                    print(f"  Ignoring ELM events from {self.bad_elm_indices_csv}")
                 with Path(self.bad_elm_indices_csv).open() as file:
                     self.bad_elm_indices = [int(line) for line in file]
             ignored_elm_count = 0
@@ -462,18 +478,22 @@ class ELM_Datamodule(LightningDataModule):
                 if bad_elm_index in self.all_elm_indices:
                     self.all_elm_indices.remove(bad_elm_index)
                     ignored_elm_count += 1
-            print(f"  Ignored ELM events: {ignored_elm_count}")
-            print(f"  Usable ELM events: {len(self.all_elm_indices)}")
+            if self.is_global_zero:
+                print(f"  Ignored ELM events: {ignored_elm_count}")
+                print(f"  Usable ELM events: {len(self.all_elm_indices)}")
         self.all_elm_indices = np.array(self.all_elm_indices, dtype=int)
         # shuffle ELM indices
-        print(f"  Shuffling ELM events with RNG seed {self.seed}")
+        if self.is_global_zero:
+            print(f"  Shuffling ELM events with RNG seed {self.seed}")
         np.random.default_rng(seed=self.seed).shuffle(self.all_elm_indices)
         if self.all_elm_indices.size >= 5:
-            print(f"  Initial ELM order after shuffling: {self.all_elm_indices[0:5]}")
+            if self.is_global_zero:
+                print(f"  Initial ELM order after shuffling: {self.all_elm_indices[0:5]}")
         # limit number of ELM events
         if self.max_elms:
             self.all_elm_indices = self.all_elm_indices[:self.max_elms]
-            print(f"  Limiting data to {self.max_elms} ELM events")
+            if self.is_global_zero:
+                print(f"  Limiting data to {self.max_elms} ELM events")
         # split ELM indicies
         n_test_elms = int(self.fraction_test * self.all_elm_indices.size)
         n_validation_elms = int(self.fraction_validation * self.all_elm_indices.size)
@@ -481,10 +501,11 @@ class ELM_Datamodule(LightningDataModule):
         train_val_elm_indices = self.all_elm_indices[n_test_elms:]
         self.validation_elm_indices = train_val_elm_indices[:n_validation_elms]
         self.train_elm_indices = train_val_elm_indices[n_validation_elms:]
-        print(f"Total ELM events  {self.all_elm_indices.size}")
-        print(f"  Train  {self.train_elm_indices.size}  ({self.train_elm_indices.size/self.all_elm_indices.size*100:.1f}%)")
-        print(f"  Validation  {self.validation_elm_indices.size}  ({self.validation_elm_indices.size/self.all_elm_indices.size*100:.1f}%)")
-        print(f"  Test  {self.test_elm_indices.size}  ({self.test_elm_indices.size/self.all_elm_indices.size*100:.1f}%)")
+        if self.is_global_zero:
+            print(f"Total ELM events  {self.all_elm_indices.size}")
+            print(f"  Train  {self.train_elm_indices.size}  ({self.train_elm_indices.size/self.all_elm_indices.size*100:.1f}%)")
+            print(f"  Validation  {self.validation_elm_indices.size}  ({self.validation_elm_indices.size/self.all_elm_indices.size*100:.1f}%)")
+            print(f"  Test  {self.test_elm_indices.size}  ({self.test_elm_indices.size/self.all_elm_indices.size*100:.1f}%)")
 
     def _get_valid_indices(
         self,
@@ -546,7 +567,8 @@ class ELM_Datamodule(LightningDataModule):
         mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
         stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
         exkurt = np.sum(cummulative_hist * ((bin_center - mean)/stdev) ** 4) / np.sum(cummulative_hist) - 3
-        print(f"    Stats: count {sample_indices.size:,} min {signal_min:.3f} max {signal_max:.3f} mean {mean:.3f} stdev {stdev:.3f} exkurt {exkurt:.3f} n_samples {n_samples:,}")
+        if self.is_global_zero:
+            print(f"    Stats: count {sample_indices.size:,} min {signal_min:.3f} max {signal_max:.3f} mean {mean:.3f} stdev {stdev:.3f} exkurt {exkurt:.3f} n_samples {n_samples:,}")
         return {
             'count': sample_indices.size,
             'min': signal_min,

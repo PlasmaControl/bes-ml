@@ -198,7 +198,7 @@ if __name__=='__main__':
         # mask_sigma_outliers=6,
         # max_std=5.,
         # max_channels_above_sigma=18,
-        # max_elms=500,
+        # max_elms=10,
         bad_elm_indices_csv=False,
         # skip_elm_plots=True,
         # save=False,
