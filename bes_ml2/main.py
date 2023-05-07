@@ -37,7 +37,7 @@ class BES_Trainer:
         assert self.datamodule.signal_window_size == self.lightning_model.signal_window_size
 
         self.monitor_metric = self.lightning_model.monitor_metric
-        self.is_global_zero = self.lightning_model.global_rank == 0
+        self.is_global_zero = self.lightning_model.is_global_zero
         self.trainer = None
 
 
@@ -188,6 +188,7 @@ if __name__=='__main__':
         batch_size=128,
         # fraction_validation=0.1,
         # fraction_test=0.1,
+        is_global_zero=lightning_model.is_global_zero,
     )
 
     """
@@ -196,8 +197,9 @@ if __name__=='__main__':
     trainer = BES_Trainer(
         lightning_model=lightning_model,
         datamodule=datamodule,
-        max_epochs=1,
+        max_epochs=4,
         # wandb_log=True,
         # skip_test_predict=True,
+        enable_progress_bar=False,
     )
     trainer.run_all()

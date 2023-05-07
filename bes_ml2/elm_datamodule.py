@@ -2,6 +2,7 @@ from __future__ import annotations
 import dataclasses
 from pathlib import Path
 import os
+import time
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -134,6 +135,7 @@ class ELM_Datamodule(LightningDataModule):
     log_time: bool = False  # if True, use label = log(time_to_elm_onset)
     prepare_data_per_node: bool = None  # hack to avoid error between dataclass and LightningDataModule
     plot_data_stats: bool = True
+    is_global_zero: bool = False
     log_dir: str = dataclasses.field(default='.', init=False)
 
     def __post_init__(self):
@@ -163,8 +165,6 @@ class ELM_Datamodule(LightningDataModule):
         self.test_elm_indices = None
         self.train_elm_indices = None
         self.validation_elm_indices = None
-
-        self.is_global_zero = self.trainer.is_global_zero if self.trainer else True
 
         if self.is_global_zero:
             print(f'Initiating {self.__class__.__name__}')
@@ -211,7 +211,7 @@ class ELM_Datamodule(LightningDataModule):
             }
 
         for dataset_stage, indices in dataset_elm_indices.items():
-
+            t0 = time.time()
             if dataset_stage in self.datasets and self.datasets[dataset_stage]:
                 if self.is_global_zero:
                     print(f"Dataset for `{dataset_stage}` is loaded, continuing")
@@ -240,7 +240,13 @@ class ELM_Datamodule(LightningDataModule):
                     assert labels[pre_elm_size-1]==0 and labels[pre_elm_size]==1
                     all_data_pre_elm_size += pre_elm_size
                     pre_elm_maxabs_by_channel = np.amax(np.abs(signals[:pre_elm_size,:,:]), axis=0)
-                    pre_elm_maxcount_by_channel = np.count_nonzero(np.isclose(signals[:pre_elm_size,:,:], 10.3758), axis=0)
+                    min_max_mask = (
+                        np.isclose(signals[:pre_elm_size,:4,:], 10.375800) |
+                        np.isclose(signals[:pre_elm_size,:4,:], -10.376433) |
+                        np.isclose(signals[:pre_elm_size,4:,:], 5.186306) |
+                        np.isclose(signals[:pre_elm_size,4:,:], -5.405264)
+                    )
+                    pre_elm_maxcount_by_channel = np.count_nonzero(min_max_mask, axis=0)
                     pre_elm_mean_by_channel = np.mean(signals[:pre_elm_size,:,:], axis=0)
                     pre_elm_std_by_channel = np.std(signals[:pre_elm_size,:,:], axis=0)
                     pre_elm_kurt_by_channel = scipy.stats.kurtosis(signals[:pre_elm_size,:,:], axis=0, fisher=False)
@@ -290,7 +296,8 @@ class ELM_Datamodule(LightningDataModule):
                 plt.sca(axes[2])
                 plt.hist(
                     np.concatenate([elm['pre_elm_maxcount_by_channel'] for elm in elm_data], axis=None), 
-                    bins=bins,
+                    bins=21,
+                    range=(0,20),
                 )
                 plt.xlabel('Channel-wise saturated points')
                 plt.sca(axes[3])
@@ -324,6 +331,9 @@ class ELM_Datamodule(LightningDataModule):
 
             packaged_labels = np.concatenate([elm['labels'] for elm in elm_data], axis=0)
             packaged_signals = np.concatenate([elm['signals'] for elm in elm_data], axis=0)
+            if self.is_global_zero:
+                print(f"  Global min/max raw signal, ch 1-32: {np.amin(packaged_signals[:,:4,:]):.6f}, {np.amax(packaged_signals[:,:4,:]):.6f}")
+                print(f"  Global min/max raw signal, ch 33-64: {np.amin(packaged_signals[:,4:,:]):.6f}, {np.amax(packaged_signals[:,4:,:]):.6f}")
             packaged_valid_t0 = np.concatenate([elm['valid_t0'] for elm in elm_data], axis=0)
             assert packaged_labels.size == packaged_valid_t0.size
             # start indices for each ELM event in concatenated dataset
@@ -450,6 +460,8 @@ class ELM_Datamodule(LightningDataModule):
                     )
                     predict_datasets.append(dataset)
                 self.datasets['predict'] = predict_datasets
+            if self.is_global_zero:
+                print(f"  Data stage `{dataset_stage}` elapsed time {(time.time()-t0)/60:.1f} min")
 
     def _get_elm_indices_and_split(self):
         if self.all_elm_indices is not None:

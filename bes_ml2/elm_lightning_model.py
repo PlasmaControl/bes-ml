@@ -1,5 +1,6 @@
 import dataclasses
 import os
+import time
 
 import numpy as np
 import matplotlib.axes
@@ -27,6 +28,7 @@ class Lightning_Model(LightningModule):
     monitor_metric: str = 'score/val'
     log_dir: str = dataclasses.field(default='.', init=False)
     signal_window_size: int = dataclasses.field(default=None, init=False)
+    is_global_zero: bool = dataclasses.field(default=None, init=False)
     
     def __post_init__(self):
         super().__init__()
@@ -94,6 +96,8 @@ class Lightning_Model(LightningModule):
     def on_train_epoch_start(self):
         if not self.is_global_zero:
             return
+        self.t_epoch_start = time.time()
+        print(f"Epoch {self.current_epoch} start")
         for name, param in self.torch_model.named_parameters():
             if 'weight' in name:
                 values = param.data.detach()
@@ -106,6 +110,18 @@ class Lightning_Model(LightningModule):
                 self.log(f"param_std/{name}", std, rank_zero_only=True, sync_dist=True)
                 self.log(f"param_skew/{name}", skew, rank_zero_only=True, sync_dist=True)
                 self.log(f"param_kurt/{name}", kurt, rank_zero_only=True, sync_dist=True)
+
+    def on_train_epoch_end(self) -> None:
+    # def on_validation_epoch_end(self) -> None:
+        if self.is_global_zero:
+            print(f"Epoch {self.current_epoch} elapsed train time: {(time.time()-self.t_epoch_start)/60:0.1f} min")
+
+    def on_fit_start(self) -> None:
+        self.t_fit_start = time.time()
+
+    def on_fit_end(self) -> None:
+        if self.is_global_zero:
+            print(f"Fit elapsed time {(time.time()-self.t_fit_start)/60:0.1f} min")
 
     def validation_step(self, batch, batch_idx):
         signals, labels = batch
