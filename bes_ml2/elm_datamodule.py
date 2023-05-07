@@ -135,7 +135,7 @@ class ELM_Datamodule(LightningDataModule):
     log_time: bool = False  # if True, use label = log(time_to_elm_onset)
     prepare_data_per_node: bool = None  # hack to avoid error between dataclass and LightningDataModule
     plot_data_stats: bool = True
-    is_global_zero: bool = False
+    is_global_zero: bool = True
     log_dir: str = dataclasses.field(default='.', init=False)
 
     def __post_init__(self):
@@ -468,7 +468,8 @@ class ELM_Datamodule(LightningDataModule):
             if self.is_global_zero:
                 print("Reusing previous ELM indices read and split")
             return
-        print(f"Data file: {self.data_file}")
+        if self.is_global_zero:
+            print(f"  Data file: {self.data_file}")
         # gather ELM indices
         with h5py.File(self.data_file, "r") as elm_h5:
             if self.is_global_zero:
