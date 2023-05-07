@@ -25,7 +25,7 @@ class BES_Trainer:
     wandb_log: bool = False
     early_stopping_min_delta: float = 1e-3
     early_stopping_patience: int = 10
-    enable_progress_bar: bool = True
+    enable_progress_bar: bool = False
     datamodule: elm_datamodule.ELM_Datamodule = None
     lightning_model: elm_lightning_model.Lightning_Model = None
     wandb_log_freq: int = 100
