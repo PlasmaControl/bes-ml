@@ -142,6 +142,7 @@ class ELM_Datamodule_Dataclass(
     log_time: bool = False  # if True, use label = log(time_to_elm_onset)
     prepare_data_per_node: bool = None  # hack to avoid error between dataclass and LightningDataModule
     plot_data_stats: bool = True
+    log_dir: str = dataclasses.field(default='.', init=False)
 
 
 @dataclasses.dataclass(eq=False)

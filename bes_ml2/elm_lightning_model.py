@@ -38,14 +38,14 @@ class Lightning_Model_Dataclass(
 
 @dataclasses.dataclass(eq=False)
 class Lightning_Model(
-    LightningModule,
     Lightning_Model_Dataclass,
+    LightningModule,
 ):
 
     def __post_init__(self):
         print(self.__class__.__mro__)
-        super(Lightning_Model_Dataclass,self).__init__()
-        # self.torch_model = None
+        super().__init__()
+        self.torch_model = None
 
     def set_torch_model(self, torch_model: torch.nn.Module):
         assert hasattr(torch_model, 'signal_window_size')
