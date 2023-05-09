@@ -13,39 +13,27 @@ import torch.utils.data
 from lightning.pytorch import LightningModule, loggers
 import torchmetrics
 
-# try:
-#     from .main import Signal_Window_Size_Dataclass
-# except:
-#     from bes_ml2.main import Signal_Window_Size_Dataclass
+try:
+    from . import elm_datamodule
+except:
+    from bes_ml2 import elm_datamodule
 
 
 @dataclasses.dataclass(eq=False)
-class Signal_Window_Size_Dataclass:
-    signal_window_size: int = 128
-    log_dir: str = None
-
-
-@dataclasses.dataclass(eq=False)
-class Lightning_Model_Dataclass(
-    Signal_Window_Size_Dataclass,
-):
+class Lightning_Model(LightningModule):
     lr: float = 1e-3
     lr_scheduler_patience: int = 20
     lr_scheduler_threshold: float = 1e-3
     weight_decay: float = 1e-6
     monitor_metric: str = 'score/val'
-
-
-@dataclasses.dataclass(eq=False)
-class Lightning_Model(
-    Lightning_Model_Dataclass,
-    LightningModule,
-):
-
+    log_dir: str = dataclasses.field(default='.', init=False)
+    signal_window_size: int = dataclasses.field(default=None, init=False)
+    is_global_zero: bool = dataclasses.field(default=None, init=False)
+    
     def __post_init__(self):
-        print(self.__class__.__mro__)
         super().__init__()
         self.torch_model = None
+        self.is_global_zero = self.global_rank == 0
 
     def set_torch_model(self, torch_model: torch.nn.Module):
         assert hasattr(torch_model, 'signal_window_size')
@@ -55,7 +43,8 @@ class Lightning_Model(
             hp_fields.pop(field)
         self.save_hyperparameters(hp_fields)
 
-        print(f'Initiating {self.__class__.__name__}')
+        if self.global_rank==0:
+            print(f'Initiating {self.__class__.__name__}')
         class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
         for field_name in dataclasses.asdict(self):
             value = getattr(self, field_name)
@@ -63,22 +52,28 @@ class Lightning_Model(
             default_value = class_fields_dict[field_name].default
             if value != default_value:
                 field_str += f" (default {default_value})"
-            print(field_str)
+            if self.global_rank==0:
+                print(field_str)
 
         self.torch_model = torch_model
+        self.signal_window_size = self.torch_model.signal_window_size
 
         # initialize trainable parameters
-        print("Initializing model layers")
+        if self.global_rank==0:
+            print("Initializing model layers")
         for name, param in self.torch_model.named_parameters():
             if name.endswith(".bias"):
-                print(f"  {name}: initialized to zeros (numel {param.data.numel()})")
+                if self.global_rank==0:
+                    print(f"  {name}: initialized to zeros (numel {param.data.numel()})")
                 param.data.fill_(0)
             elif name.endswith(".weight"):
                 n_in = np.prod(param.shape[1:])
                 sqrt_k = np.sqrt(3. / n_in)
-                print(f"  {name}: initialized to uniform +- {sqrt_k:.1e} (numel {param.data.numel()})")
+                if self.global_rank==0:
+                    print(f"  {name}: initialized to uniform +- {sqrt_k:.1e} (numel {param.data.numel()})")
                 param.data.uniform_(-sqrt_k, sqrt_k)
-                print(f"    n_in*var: {n_in*torch.var(param.data):.3f}")
+                if self.global_rank==0:
+                    print(f"    n_in*var: {n_in*torch.var(param.data):.3f}")
        
         self.example_input_array = torch.zeros(
             (2, 1, self.signal_window_size, 8, 8), 
@@ -99,7 +94,9 @@ class Lightning_Model(
         return loss
 
     def on_train_epoch_start(self):
-        self.t_train_epoch_start = time.time()
+        if not self.is_global_zero:
+            return
+        self.t_epoch_start = time.time()
         print(f"Epoch {self.current_epoch} start")
         for name, param in self.torch_model.named_parameters():
             if 'weight' in name:
@@ -115,31 +112,16 @@ class Lightning_Model(
                 self.log(f"param_kurt/{name}", kurt, rank_zero_only=True, sync_dist=True)
 
     def on_train_epoch_end(self) -> None:
-        print(f"Epoch {self.current_epoch} elapsed train time: {(time.time()-self.t_train_epoch_start)/60:0.1f} min")
-
-    def on_validation_epoch_start(self) -> None:
-        self.t_val_epoch_start = time.time()
-
-    def on_validation_epoch_end(self) -> None:
-        print(f"Epoch {self.current_epoch} elapsed valid. time: {(time.time()-self.t_val_epoch_start)/60:0.1f} min")
+    # def on_validation_epoch_end(self) -> None:
+        if self.is_global_zero:
+            print(f"Epoch {self.current_epoch} elapsed train time: {(time.time()-self.t_epoch_start)/60:0.1f} min")
 
     def on_fit_start(self) -> None:
         self.t_fit_start = time.time()
 
     def on_fit_end(self) -> None:
-        print(f"Fit elapsed time {(time.time()-self.t_fit_start)/60:0.1f} min")
-
-    def on_test_start(self) -> None:
-        self.t_test_start = time.time()
-
-    def on_test_end(self) -> None:
-        print(f"Test elapsed time {(time.time()-self.t_test_start)/60:0.1f} min")
-
-    def on_predict_start(self) -> None:
-        self.t_predict_start = time.time()
-
-    def on_predict_end(self) -> None:
-        print(f"Predict elapsed time {(time.time()-self.t_predict_start)/60:0.1f} min")
+        if self.is_global_zero:
+            print(f"Fit elapsed time {(time.time()-self.t_fit_start)/60:0.1f} min")
 
     def validation_step(self, batch, batch_idx):
         signals, labels = batch
@@ -170,7 +152,7 @@ class Lightning_Model(
         })
     
     def on_predict_epoch_end(self) -> None:
-        if not self.trainer.is_global_zero:
+        if not self.is_global_zero:
             return
         i_page = 1
         for i_elm, result in enumerate(self.predict_outputs):
@@ -199,7 +181,8 @@ class Lightning_Model(
                 plt.tight_layout()
                 filename = f'inference_{i_page:02d}'
                 filepath = os.path.join(self.log_dir, filename)
-                print(f"Saving figures {filepath}{{.pdf,.png}}")
+                if self.global_rank==0:
+                    print(f"Saving figures {filepath}{{.pdf,.png}}")
                 plt.savefig(filepath+'.pdf', format='pdf', transparent=True)
                 plt.savefig(filepath+'.png', format='png', transparent=True)
                 for logger in self.loggers:
@@ -209,6 +192,7 @@ class Lightning_Model(
                         logger.log_image(key='inference', images=[filepath+'.png'])
                 i_page += 1
                 plt.close(fig)
+        # self.predict_outputs.clear()
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(
@@ -230,34 +214,34 @@ class Lightning_Model(
         }
 
 
-# @dataclasses.dataclass(eq=False)
-# class Lightning_Unsupervised_Model(Lightning_Model):
-#     monitor_metric: str = 'loss/val'
+@dataclasses.dataclass(eq=False)
+class Lightning_Unsupervised_Model(Lightning_Model):
+    monitor_metric: str = 'loss/val'
 
-#     def __post_init__(self):
-#         super().__post_init__()
+    def __post_init__(self):
+        super().__post_init__()
 
-#     def training_step(self, batch, batch_idx) -> torch.Tensor:
-#         signals, _ = batch
-#         predictions = self(signals)
-#         loss = self.mse_loss(predictions, signals)
-#         self.log("loss/train", self.mse_loss)
-#         return loss
+    def training_step(self, batch, batch_idx) -> torch.Tensor:
+        signals, _ = batch
+        predictions = self(signals)
+        loss = self.mse_loss(predictions, signals)
+        self.log("loss/train", self.mse_loss)
+        return loss
 
-#     def validation_step(self, batch, batch_idx):
-#         signals, _ = batch
-#         predictions = self(signals)
-#         self.mse_loss(predictions, signals)
-#         self.log("loss/val", self.mse_loss)
+    def validation_step(self, batch, batch_idx):
+        signals, _ = batch
+        predictions = self(signals)
+        self.mse_loss(predictions, signals)
+        self.log("loss/val", self.mse_loss)
 
-#     def test_step(self, batch, batch_idx):
-#         signals, _ = batch
-#         predictions = self(signals)
-#         self.mse_loss(predictions, signals)
-#         self.log("loss/test", self.mse_loss)
+    def test_step(self, batch, batch_idx):
+        signals, _ = batch
+        predictions = self(signals)
+        self.mse_loss(predictions, signals)
+        self.log("loss/test", self.mse_loss)
 
-#     def predict_step(self, batch, batch_idx, dataloader_idx=0):
-#         pass
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
+        pass
     
-#     def on_predict_epoch_end(self):
-#         pass
+    def on_predict_epoch_end(self):
+        pass

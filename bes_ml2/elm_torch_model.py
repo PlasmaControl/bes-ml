@@ -8,16 +8,9 @@ import torch.nn
 import torch.utils.data
 
 
-try:
-    from .elm_lightning_model import Signal_Window_Size_Dataclass
-except:
-    from bes_ml2.elm_lightning_model import Signal_Window_Size_Dataclass
-
 @dataclasses.dataclass(eq=False)
-class Torch_Base(
-    torch.nn.Module,
-    Signal_Window_Size_Dataclass,
-):
+class Torch_Base(torch.nn.Module):
+    signal_window_size: int = 128  # power of 2; ~16-512
     leaky_relu_slope: float = 1e-2
 
     def __post_init__(self):
@@ -173,19 +166,11 @@ class Torch_CNN_Mixin(Torch_Base):
 
 
 @dataclasses.dataclass(eq=False)
-class Torch_CNN_Model_Dataclass(
+class Torch_CNN_Model(
     Torch_CNN_Mixin,
     Torch_MLP_Mixin,
 ):
-    pass
-    # def __post_init__(self):
-    #     super().__post_init__()
     
-@dataclasses.dataclass(eq=False)
-class Torch_CNN_Model(
-    Torch_CNN_Model_Dataclass,
-):
- 
     def __post_init__(self):
         super().__post_init__()
 
@@ -193,9 +178,9 @@ class Torch_CNN_Model(
         self.mlp = self.make_mlp(mlp_in_features=cnn_features)
             
         total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"Total parameters {total_parameters:,}")
         cnn_parameters = sum(p.numel() for p in self.cnn.parameters() if p.requires_grad)
         mlp_parameters = sum(p.numel() for p in self.mlp.parameters() if p.requires_grad)
-        print(f"Total parameters {total_parameters:,}")
         print(f"  CNN parameters {cnn_parameters:,}")
         print(f"  MLP parameters {mlp_parameters:,}")
 
@@ -219,10 +204,10 @@ class Torch_AE_Model(
         )
             
         total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        encoder_parameters = sum(p.numel() for p in self.encoder.parameters() if p.requires_grad)
-        decoder_parameters = sum(p.numel() for p in self.decoder.parameters() if p.requires_grad)
         print(f"Total parameters {total_parameters:,}")
+        encoder_parameters = sum(p.numel() for p in self.encoder.parameters() if p.requires_grad)
         print(f"  Encoder parameters {encoder_parameters:,}")
+        decoder_parameters = sum(p.numel() for p in self.decoder.parameters() if p.requires_grad)
         print(f"  Decoder parameters {decoder_parameters:,}")
 
     def forward(self, signals: torch.Tensor):
