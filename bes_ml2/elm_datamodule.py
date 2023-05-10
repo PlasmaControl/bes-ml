@@ -189,7 +189,7 @@ class ELM_Datamodule(LightningDataModule):
 
     def load_state_dict(self, state: dict) -> None:
         if self.is_global_zero:
-            print("**** Loading state_dict ****")
+            print("Loading state_dict")
         for item in self.state_items:
             setattr(self, item, state[item])
 
@@ -296,7 +296,7 @@ class ELM_Datamodule(LightningDataModule):
                 plt.sca(axes[2])
                 plt.hist(
                     np.concatenate([elm['pre_elm_maxcount_by_channel'] for elm in elm_data], axis=None), 
-                    bins=21,
+                    bins=20,
                     range=(0,20),
                 )
                 plt.xlabel('Channel-wise saturated points')
@@ -406,7 +406,7 @@ class ELM_Datamodule(LightningDataModule):
                 })
             if self.is_global_zero:
                 print(f"  Standarizing signals with mean {self.signal_mean:.3f} and std {self.signal_stdev:.3f}")
-                print("  Standardized signal stats")
+                print(f"  Standardized signal stats")
             packaged_signals = (packaged_signals - self.signal_mean) / self.signal_stdev
             stats = self._get_statistics(
                 sample_indices=packaged_valid_t0_indices,

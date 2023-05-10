@@ -1,6 +1,8 @@
-import dataclasses
 import os
+import sys
+import dataclasses
 from datetime import datetime
+import time
 
 from lightning.pytorch import loggers, callbacks, Trainer
 from lightning.pytorch.utilities.model_summary import ModelSummary
@@ -31,15 +33,14 @@ class BES_Trainer:
     wandb_log_freq: int = 100
     lit_log_freq: int = 50
     skip_test_predict: bool = False
+    is_global_zero: bool = True
 
     def __post_init__(self):
         assert self.datamodule and self.lightning_model
         assert self.datamodule.signal_window_size == self.lightning_model.signal_window_size
 
         self.monitor_metric = self.lightning_model.monitor_metric
-        self.is_global_zero = self.lightning_model.is_global_zero
         self.trainer = None
-
 
         if self.experiment_name is None:
             datetime_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -62,17 +63,6 @@ class BES_Trainer:
         if self.is_global_zero:
             print("Model Summary:")
             print(ModelSummary(self.lightning_model, max_depth=-1))
-
-    def run_fast_dev(self):
-        tmp_trainer = Trainer(
-            fast_dev_run=True,
-            enable_progress_bar=self.enable_progress_bar,
-            enable_model_summary=False,
-        )
-        tmp_trainer.fit(
-            model=self.lightning_model, 
-            datamodule=self.datamodule,
-        )
 
     def make_loggers_and_callbacks(self):
         self.experiment_group_dir = os.path.abspath(self.experiment_group_dir)
@@ -131,75 +121,71 @@ class BES_Trainer:
             devices="auto",
             accelerator="auto",
         )
-        self.trainer.fit(
-            model=self.lightning_model, 
-            datamodule=self.datamodule,
-        )
+        assert self.trainer.is_global_zero == self.is_global_zero
 
+        self.trainer.fit(self.lightning_model, datamodule=self.datamodule)
+        
         if self.skip_test_predict:
-            return
-
-        self.trainer.test(
-            model=self.lightning_model,
-            datamodule=self.datamodule, 
-            ckpt_path='best',
-        )
-        self.trainer.predict(
-            model=self.lightning_model,
-            datamodule=self.datamodule, 
-            ckpt_path='best',
-        )
+            pass
+        else:
+            self.trainer.test(datamodule=self.datamodule, ckpt_path='best')
+            self.trainer.predict(datamodule=self.datamodule, ckpt_path='best', return_predictions=True)
 
 
 if __name__=='__main__':
-    signal_window_size = 256
+    world_size = int(os.getenv("SLURM_NTASKS", 0))
+    world_rank = int(os.getenv("SLURM_PROCID", 0))
+    local_rank = int(os.getenv("SLURM_LOCALID", 0))
+    node_rank = int(os.getenv("SLURM_NODEID", 0))
+    print(f"World rank {world_rank} of {world_size} (local rank {local_rank} on node {node_rank})")
 
-    """
-    Step 1b: Initiate torch and lightning models
-        Ugly hack: must initiate lightning model, then initiate torch model, 
-        then add torch model to lightning model
-    """
-    lightning_model = elm_lightning_model.Lightning_Model()
-    torch_model = elm_torch_model.Torch_CNN_Model(
-        signal_window_size=signal_window_size,
-        cnn_nlayers=6,
-        cnn_num_kernels=4,
-        cnn_kernel_time_size=2,
-        cnn_padding=[[0,1,1]]*3 + [0]*3,
-    )
-    # lightning_model = elm_lightning_model.Lightning_Unsupervised_Model()
-    # torch_model = elm_torch_model.Torch_AE_Model(
-    #     signal_window_size=signal_window_size,
-    #     cnn_nlayers=3,
-    #     cnn_num_kernels=16,
-    #     cnn_kernel_time_size=2,
-    #     # cnn_padding=[[0,1,1]]*3 + [0]*3,
-    #     cnn_padding=[[0,1,1]]*3,
-    # )
-    lightning_model.set_torch_model(torch_model=torch_model)
+    is_global_zero = world_rank == 0
 
-    """
-    Step 1a: Initiate pytorch_lightning.LightningDataModule
-    """
-    datamodule = elm_datamodule.ELM_Datamodule(
-        # data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
-        signal_window_size=signal_window_size,
-        max_elms=10,
-        batch_size=128,
-        # fraction_validation=0.1,
-        # fraction_test=0.1,
-        is_global_zero=lightning_model.is_global_zero,
-    )
+    if not is_global_zero:
+        f = open(os.devnull, 'w')
+        sys.stdout = f
 
-    """
-    Step 2: Initiate pytorch_lightning.Trainer and run
-    """
-    trainer = BES_Trainer(
-        lightning_model=lightning_model,
-        datamodule=datamodule,
-        max_epochs=4,
-        # wandb_log=True,
-        # skip_test_predict=True,
-        enable_progress_bar=False,
-    )
-    trainer.run_all()
+    try:
+        t_start = time.time()
+        signal_window_size = 256
+
+        lightning_model = elm_lightning_model.Lightning_Model(
+            is_global_zero=is_global_zero,
+        )
+        assert lightning_model.global_rank == world_rank
+        torch_model = elm_torch_model.Torch_CNN_Model(
+            signal_window_size=signal_window_size,
+            cnn_nlayers=6,
+            cnn_num_kernels=4,
+            cnn_kernel_time_size=2,
+            cnn_padding=[[0,1,1]]*3 + [0]*3,
+            is_global_zero=is_global_zero,
+        )
+        lightning_model.set_torch_model(torch_model=torch_model)
+
+        datamodule = elm_datamodule.ELM_Datamodule(
+            # data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
+            signal_window_size=signal_window_size,
+            max_elms=5,
+            batch_size=128,
+            is_global_zero=is_global_zero,
+        )
+
+        trainer = BES_Trainer(
+            lightning_model=lightning_model,
+            datamodule=datamodule,
+            max_epochs=2,
+            # wandb_log=True,
+            enable_progress_bar=False,
+        )
+        trainer.run_all()
+        print(f"Elapsed time {(time.time()-t_start)/60:.1f} min")
+    except:
+        if not is_global_zero:
+            f.close()
+            sys.stdout = sys.__stdout__
+        raise
+    finally:
+        if not is_global_zero:
+            f.close()
+            sys.stdout = sys.__stdout__

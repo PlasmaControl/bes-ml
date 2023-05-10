@@ -12,22 +12,42 @@ import torch.utils.data
 class Torch_Base(torch.nn.Module):
     signal_window_size: int = 128  # power of 2; ~16-512
     leaky_relu_slope: float = 1e-2
+    is_global_zero: bool = True
 
     def __post_init__(self):
         super().__init__()
 
-        print(f'Initiating {self.__class__.__name__}')
-        class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
-        for field_name in dataclasses.asdict(self):
-            value = getattr(self, field_name)
-            field_str = f"  {field_name}: {value}"
-            default_value = class_fields_dict[field_name].default
-            if value != default_value:
-                field_str += f" (default {default_value})"
-            print(field_str)
+        if self.is_global_zero:
+            print(f'Initiating {self.__class__.__name__}')
+            class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
+            for field_name in dataclasses.asdict(self):
+                value = getattr(self, field_name)
+                field_str = f"  {field_name}: {value}"
+                default_value = class_fields_dict[field_name].default
+                if value != default_value:
+                    field_str += f" (default {default_value})"
+                print(field_str)
 
         assert np.log2(self.signal_window_size).is_integer(), 'Signal window must be power of 2'
 
+    def initialize_layers(self):
+        # initialize trainable parameters
+        if self.is_global_zero:
+            print("Initializing model layers")
+        for name, param in self.named_parameters():
+            if name.endswith(".bias"):
+                if self.is_global_zero:
+                    print(f"  {name}: initialized to zeros (numel {param.data.numel()})")
+                param.data.fill_(0)
+            elif name.endswith(".weight"):
+                n_in = np.prod(param.shape[1:])
+                sqrt_k = np.sqrt(3. / n_in)
+                if self.is_global_zero:
+                    print(f"  {name}: initialized to uniform +- {sqrt_k:.1e} (numel {param.data.numel()})")
+                param.data.uniform_(-sqrt_k, sqrt_k)
+                if self.is_global_zero:
+                    print(f"    n_in*var: {n_in*torch.var(param.data):.3f}")
+       
 
 @dataclasses.dataclass(eq=False)
 class Torch_MLP_Mixin(Torch_Base):
@@ -36,12 +56,14 @@ class Torch_MLP_Mixin(Torch_Base):
 
     def make_mlp(self, mlp_in_features: int, mlp_out_features: int = 1) -> torch.nn.Module:
         # MLP layers
-        print("Constructing MLP layers")
+        if self.is_global_zero:
+            print("Constructing MLP layers")
         mlp_layers = torch.nn.Sequential(torch.nn.Flatten())
         n_layers = len(self.mlp_layers)
         for i, layer_size in enumerate(self.mlp_layers):
             in_features = mlp_in_features if i==0 else self.mlp_layers[i-1]
-            print(f"  MLP layer {i} with in/out features: {in_features}/{layer_size} (LeakyReLU activ.)")
+            if self.is_global_zero:
+                print(f"  MLP layer {i} with in/out features: {in_features}/{layer_size} (LeakyReLU activ.)")
             mlp_layers.extend([
                 torch.nn.Dropout(p=self.mlp_dropout) if i!=n_layers-1 else torch.nn.Identity(),
                 torch.nn.Linear(
@@ -52,7 +74,8 @@ class Torch_MLP_Mixin(Torch_Base):
             ])
 
         # output layer
-        print(f"  MLP output layer with in/out features {self.mlp_layers[-1]}/{mlp_out_features} (no activ.)")
+        if self.is_global_zero:
+            print(f"  MLP output layer with in/out features {self.mlp_layers[-1]}/{mlp_out_features} (no activ.)")
         mlp_layers.append(
             torch.nn.Linear(
                 in_features=self.mlp_layers[-1], 
@@ -89,11 +112,13 @@ class Torch_CNN_Mixin(Torch_Base):
         for time_dim in self.cnn_kernel_time_size:
             assert np.log2(time_dim).is_integer(), 'Kernel time dims must be power of 2'
 
-        print("Constructing CNN layers")
+        if self.is_global_zero:
+            print("Constructing CNN layers")
 
         data_shape = (self.cnn_input_channels, self.signal_window_size, 8, 8)
         self.input_data_shape = tuple(data_shape)
-        print(f"  Input data shape {data_shape}  (size {np.prod(data_shape)})")
+        if self.is_global_zero:
+            print(f"  Input data shape {data_shape}  (size {np.prod(data_shape)})")
 
         # CNN layers
         cnn = torch.nn.Sequential()
@@ -104,10 +129,11 @@ class Torch_CNN_Mixin(Torch_Base):
                 self.cnn_kernel_spatial_size[i],
             )
             stride = (self.cnn_kernel_time_size[i], 1, 1)
-            print(f"  CNN Layer {i}")
-            print(f"    Kernel {kernel}")
-            print(f"    Stride {stride}")
-            print(f"    Padding {self.cnn_padding[i]}")
+            if self.is_global_zero:
+                print(f"  CNN Layer {i}")
+                print(f"    Kernel {kernel}")
+                print(f"    Stride {stride}")
+                print(f"    Padding {self.cnn_padding[i]}")
             conv3d = torch.nn.Conv3d(
                 in_channels=self.cnn_num_kernels[i-1] if i!=0 else self.cnn_input_channels,
                 out_channels=self.cnn_num_kernels[i],
@@ -117,7 +143,8 @@ class Torch_CNN_Mixin(Torch_Base):
                 padding_mode='reflect',
             )
             data_shape = tuple(conv3d(torch.zeros(size=data_shape)).size())
-            print(f"    Output data shape: {data_shape}  (size {np.prod(data_shape)})")
+            if self.is_global_zero:
+                print(f"    Output data shape: {data_shape}  (size {np.prod(data_shape)})")
             assert np.all(np.array(data_shape) >= 1), f"Bad data shape {data_shape} after CNN layer {i}"
             cnn.extend([
                 torch.nn.Dropout(p=self.cnn_dropout),
@@ -126,7 +153,8 @@ class Torch_CNN_Mixin(Torch_Base):
             ])
 
         num_features = np.prod(data_shape)
-        print(f"  CNN output features: {num_features}")
+        if self.is_global_zero:
+            print(f"  CNN output features: {num_features}")
 
         return cnn, num_features, data_shape
 
@@ -140,10 +168,11 @@ class Torch_CNN_Mixin(Torch_Base):
                 self.cnn_kernel_spatial_size[i],
             )
             stride = (self.cnn_kernel_time_size[i], 1, 1)
-            print(f"  Decoder Layer {i}")
-            print(f"    Kernel {kernel}")
-            print(f"    Stride {stride}")
-            print(f"    Padding {self.cnn_padding[i]}")
+            if self.is_global_zero:
+                print(f"  Decoder Layer {i}")
+                print(f"    Kernel {kernel}")
+                print(f"    Stride {stride}")
+                print(f"    Padding {self.cnn_padding[i]}")
             conv3d = torch.nn.ConvTranspose3d(
                 in_channels=self.cnn_num_kernels[i],
                 out_channels=self.cnn_num_kernels[i-1] if i!=0 else self.cnn_input_channels,
@@ -152,16 +181,16 @@ class Torch_CNN_Mixin(Torch_Base):
                 padding=self.cnn_padding[i],
             )
             data_shape = tuple(conv3d(torch.zeros(size=data_shape)).size())
-            print(f"    Output data shape: {data_shape}  (size {np.prod(data_shape)})")
+            if self.is_global_zero:
+                print(f"    Output data shape: {data_shape}  (size {np.prod(data_shape)})")
             assert np.all(np.array(data_shape) >= 1), f"Bad data shape {data_shape} after Decoder layer {i}"
             decoder.extend([
                 conv3d,
                 torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope) if i!=0 else torch.nn.Identity(),
             ])
-        assert np.array_equal(
-            self.input_data_shape,
-            data_shape,
-        )
+    
+        assert np.array_equal(self.input_data_shape, data_shape)
+    
         return decoder
 
 
@@ -178,11 +207,14 @@ class Torch_CNN_Model(
         self.mlp = self.make_mlp(mlp_in_features=cnn_features)
             
         total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        print(f"Total parameters {total_parameters:,}")
         cnn_parameters = sum(p.numel() for p in self.cnn.parameters() if p.requires_grad)
         mlp_parameters = sum(p.numel() for p in self.mlp.parameters() if p.requires_grad)
-        print(f"  CNN parameters {cnn_parameters:,}")
-        print(f"  MLP parameters {mlp_parameters:,}")
+        if self.is_global_zero:
+            print(f"Total parameters {total_parameters:,}")
+            print(f"  CNN parameters {cnn_parameters:,}")
+            print(f"  MLP parameters {mlp_parameters:,}")
+
+        self.initialize_layers()
 
     def forward(self, signals: torch.Tensor):
         features = self.cnn(signals)
@@ -204,11 +236,14 @@ class Torch_AE_Model(
         )
             
         total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        print(f"Total parameters {total_parameters:,}")
         encoder_parameters = sum(p.numel() for p in self.encoder.parameters() if p.requires_grad)
-        print(f"  Encoder parameters {encoder_parameters:,}")
         decoder_parameters = sum(p.numel() for p in self.decoder.parameters() if p.requires_grad)
-        print(f"  Decoder parameters {decoder_parameters:,}")
+        if self.is_global_zero:
+            print(f"Total parameters {total_parameters:,}")
+            print(f"  Encoder parameters {encoder_parameters:,}")
+            print(f"  Decoder parameters {decoder_parameters:,}")
+
+        self.initialize_layers()
 
     def forward(self, signals: torch.Tensor):
         features = self.encoder(signals)
