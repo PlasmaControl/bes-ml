@@ -21,14 +21,11 @@ class Lightning_Model(LightningModule):
     lr_scheduler_threshold: float = 1e-3
     weight_decay: float = 1e-6
     monitor_metric: str = 'score/val'
-    is_global_zero: bool = True
     log_dir: str = dataclasses.field(default='.', init=False)
     
     def __post_init__(self):
         super().__init__()
         self.torch_model = None
-        if self.is_global_zero:
-            assert self.global_rank == 0
 
     def set_torch_model(self, torch_model: torch.nn.Module):
         assert hasattr(torch_model, 'signal_window_size')
@@ -38,8 +35,7 @@ class Lightning_Model(LightningModule):
             hp_fields.pop(field)
         self.save_hyperparameters(hp_fields)
 
-        if self.is_global_zero:
-            print(f'Initiating {self.__class__.__name__}')
+        print(f'Initiating {self.__class__.__name__}')
         class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
         for field_name in dataclasses.asdict(self):
             value = getattr(self, field_name)
@@ -47,8 +43,7 @@ class Lightning_Model(LightningModule):
             default_value = class_fields_dict[field_name].default
             if value != default_value:
                 field_str += f" (default {default_value})"
-            if self.is_global_zero:
-                print(field_str)
+            print(field_str)
 
         self.torch_model = torch_model
         self.signal_window_size = self.torch_model.signal_window_size
@@ -59,7 +54,6 @@ class Lightning_Model(LightningModule):
         )
         self.mse_loss = torchmetrics.MeanSquaredError()
         self.r2_score = torchmetrics.R2Score()
-        self.predict_outputs: list[list] = []
 
     def forward(self, signals) -> torch.Tensor:
         return self.torch_model(signals)
@@ -73,7 +67,7 @@ class Lightning_Model(LightningModule):
 
     def on_train_epoch_start(self):
         self.t_train_epoch_start = time.time()
-        if not self.is_global_zero:
+        if self.global_rank != 0:
             return
         print(f"Epoch {self.current_epoch} start")
         for name, param in self.torch_model.named_parameters():
@@ -111,6 +105,7 @@ class Lightning_Model(LightningModule):
         print(f"Test elapsed time {(time.time()-self.t_test_start)/60:0.1f} min")
 
     def on_predict_start(self) -> None:
+        self.predict_outputs: list[list] = []
         self.t_predict_start = time.time()
 
     def on_predict_end(self) -> None:
@@ -145,7 +140,7 @@ class Lightning_Model(LightningModule):
         })
     
     def on_predict_epoch_end(self) -> None:
-        if not self.is_global_zero:
+        if self.global_rank != 0:
             return
         i_page = 1
         for i_elm, result in enumerate(self.predict_outputs):
@@ -174,8 +169,7 @@ class Lightning_Model(LightningModule):
                 plt.tight_layout()
                 filename = f'inference_{i_page:02d}'
                 filepath = os.path.join(self.log_dir, filename)
-                if self.is_global_zero:
-                    print(f"Saving figures {filepath}{{.pdf,.png}}")
+                print(f"Saving figures {filepath}{{.pdf,.png}}")
                 plt.savefig(filepath+'.pdf', format='pdf', transparent=True)
                 plt.savefig(filepath+'.png', format='png', transparent=True)
                 for logger in self.loggers:
