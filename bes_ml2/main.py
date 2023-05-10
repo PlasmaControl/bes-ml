@@ -121,7 +121,7 @@ class BES_Trainer:
             devices="auto",
             accelerator="auto",
         )
-        assert self.trainer.is_global_zero == self.is_global_zero
+        assert self.trainer.is_global_zero == self.is_global_zero, f"{self.is_global_zero} {self.trainer.is_global_zero}"
 
         self.trainer.fit(self.lightning_model, datamodule=self.datamodule)
         
@@ -152,7 +152,6 @@ if __name__=='__main__':
         lightning_model = elm_lightning_model.Lightning_Model(
             is_global_zero=is_global_zero,
         )
-        assert lightning_model.global_rank == world_rank
         torch_model = elm_torch_model.Torch_CNN_Model(
             signal_window_size=signal_window_size,
             cnn_nlayers=6,
@@ -179,7 +178,7 @@ if __name__=='__main__':
             enable_progress_bar=False,
         )
         trainer.run_all()
-        print(f"Elapsed time {(time.time()-t_start)/60:.1f} min")
+        print(f"Python elapsed time {(time.time()-t_start)/60:.1f} min")
     except:
         if not is_global_zero:
             f.close()

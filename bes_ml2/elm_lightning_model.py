@@ -72,9 +72,9 @@ class Lightning_Model(LightningModule):
         return loss
 
     def on_train_epoch_start(self):
+        self.t_train_epoch_start = time.time()
         if not self.is_global_zero:
             return
-        self.t_train_epoch_start = time.time()
         print(f"Epoch {self.current_epoch} start")
         for name, param in self.torch_model.named_parameters():
             if 'weight' in name:
