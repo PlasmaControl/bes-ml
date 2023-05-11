@@ -20,7 +20,7 @@ class Lightning_Model(LightningModule):
     lr_scheduler_patience: int = 20
     lr_scheduler_threshold: float = 1e-3
     weight_decay: float = 1e-6
-    monitor_metric: str = 'score/val'
+    monitor_metric: str = 'sum_loss/val'
     log_dir: str = dataclasses.field(default='.', init=False)
     
     def __post_init__(self):
@@ -52,19 +52,75 @@ class Lightning_Model(LightningModule):
             (2, 1, self.signal_window_size, 8, 8), 
             dtype=torch.float32,
         )
-        self.mse_loss = torchmetrics.MeanSquaredError()
-        self.r2_score = torchmetrics.R2Score()
+        self.regression_mse_loss = torchmetrics.MeanSquaredError()
+        self.regression_r2_score = torchmetrics.R2Score()
+        self.reconstruction_mse_loss = torchmetrics.MeanSquaredError()
 
     def forward(self, signals) -> torch.Tensor:
         return self.torch_model(signals)
 
-    def training_step(self, batch, batch_idx) -> torch.Tensor:
+    def training_step(self, batch, batch_idx) -> list[torch.Tensor]:
         signals, labels = batch
-        predictions = self(signals)
-        loss = self.mse_loss(predictions, labels)
-        self.log("loss/train", self.mse_loss)
+        results = self(signals)
+        losses = []
+        if self.torch_model.cnn_regression_active:
+            predictions = results.pop(0)
+            regression_mse_loss = self.regression_mse_loss(predictions, labels)
+            self.log("regression_mse_loss/train", self.regression_mse_loss)
+            losses.append(regression_mse_loss)
+        if self.torch_model.autoencoder_active:
+            predictions = results.pop(0)
+            reconstruction_mse_loss = self.reconstruction_mse_loss(predictions, signals)
+            self.log("reconstruction_mse_loss/train", self.reconstruction_mse_loss)
+            losses.append(reconstruction_mse_loss)
+        loss = sum(losses)
+        self.log("sum_loss/train", loss)
         return loss
 
+    def validation_step(self, batch, batch_idx) -> None:
+        signals, labels = batch
+        predictions = self(signals)
+        # self.regression_mse_loss(predictions, labels)
+        # self.log("regression_mse_loss/val", self.regression_mse_loss)
+        # self.regression_r2_score(predictions, labels)
+        # self.log("score/val", self.regression_r2_score)
+        results = self(signals)
+        losses = []
+        if self.torch_model.cnn_regression_active:
+            predictions = results.pop(0)
+            regression_mse_loss = self.regression_mse_loss(predictions, labels)
+            self.log("regression_mse_loss/val", self.regression_mse_loss)
+            losses.append(regression_mse_loss)
+            self.regression_r2_score(predictions, labels)
+            self.log("regression_r2_score/val", self.regression_r2_score)
+        if self.torch_model.autoencoder_active:
+            predictions = results.pop(0)
+            reconstruction_mse_loss = self.reconstruction_mse_loss(predictions, signals)
+            self.log("reconstruction_mse_loss/val", self.reconstruction_mse_loss)
+            losses.append(reconstruction_mse_loss)
+        loss = sum(losses)
+        self.log("sum_loss/val", loss)
+
+    def test_step(self, batch, batch_idx) -> None:
+        signals, labels = batch
+        predictions = self(signals)
+        self.regression_mse_loss(predictions, labels)
+        self.log("regression_mse_loss/test", self.regression_mse_loss)
+        self.regression_r2_score(predictions, labels)
+        self.log("score/test", self.regression_r2_score)
+
+    def predict_step(self, batch, batch_idx, dataloader_idx=0) -> None:
+        signals, labels = batch
+        predictions = self(signals)
+        if batch_idx == 0:
+            self.predict_outputs.append([])
+            assert dataloader_idx == len(self.predict_outputs)-1
+        self.predict_outputs[-1].append({
+            'labels': labels,
+            'predictions': predictions,
+            'signals': signals,
+        })
+    
     def on_train_epoch_start(self):
         self.t_train_epoch_start = time.time()
         if self.global_rank != 0:
@@ -111,34 +167,6 @@ class Lightning_Model(LightningModule):
     def on_predict_end(self) -> None:
         print(f"Predict elapsed time {(time.time()-self.t_predict_start)/60:0.1f} min")
 
-    def validation_step(self, batch, batch_idx):
-        signals, labels = batch
-        predictions = self(signals)
-        self.mse_loss(predictions, labels)
-        self.log("loss/val", self.mse_loss)
-        self.r2_score(predictions, labels)
-        self.log("score/val", self.r2_score)
-
-    def test_step(self, batch, batch_idx):
-        signals, labels = batch
-        predictions = self(signals)
-        self.mse_loss(predictions, labels)
-        self.log("loss/test", self.mse_loss)
-        self.r2_score(predictions, labels)
-        self.log("score/test", self.r2_score)
-
-    def predict_step(self, batch: tuple[torch.Tensor,torch.Tensor], batch_idx, dataloader_idx=0):
-        signals, labels = batch
-        predictions = self(signals)
-        if batch_idx == 0:
-            self.predict_outputs.append([])
-            assert dataloader_idx == len(self.predict_outputs)-1
-        self.predict_outputs[-1].append({
-            'labels': labels,
-            'predictions': predictions,
-            'signals': signals,
-        })
-    
     def on_predict_epoch_end(self) -> None:
         if self.global_rank != 0:
             return
