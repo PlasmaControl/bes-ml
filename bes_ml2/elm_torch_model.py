@@ -48,7 +48,12 @@ class Torch_MLP_Mixin(Torch_Base):
     mlp_layers: tuple = (64, 32)
     mlp_dropout: float = 0.5
 
-    def make_mlp(self, mlp_in_features: int, mlp_out_features: int = 1) -> torch.nn.Module:
+    def make_mlp(
+            self, 
+            mlp_in_features: int, 
+            mlp_out_features: int = 1,
+            with_sigmoid: bool = False,
+    ) -> torch.nn.Module:
         # MLP layers
         print("Constructing MLP layers")
         mlp_layers = torch.nn.Sequential(torch.nn.Flatten())
@@ -73,6 +78,8 @@ class Torch_MLP_Mixin(Torch_Base):
                 out_features=mlp_out_features,
             )
         )
+        if with_sigmoid:
+            mlp_layers.append(torch.nn.Sigmoid())
         return mlp_layers
 
 
@@ -187,12 +194,14 @@ class Torch_CNN_Model(
     autoencoder_active: bool = True
     cnn_regression: bool = True
     cnn_regression_active: bool = True
+    cnn_classification: bool = True
+    cnn_classification_active: bool = True
     
     def __post_init__(self):
         super().__post_init__()
 
         self.cnn, cnn_features, cnn_output_shape = self.make_cnn()
-        self.mlp = (
+        self.regression_mlp = (
             self.make_mlp(mlp_in_features=cnn_features)
             if self.cnn_regression
             else None
@@ -202,15 +211,23 @@ class Torch_CNN_Model(
             if self.autoencoder
             else None
         )
+        self.classification_mlp = (
+            self.make_mlp(
+                mlp_in_features=cnn_features,
+                with_sigmoid=True,
+            )
+            if self.cnn_classification
+            else None
+        )
             
         total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"Total parameters {total_parameters:,}")
         cnn_parameters = sum(p.numel() for p in self.cnn.parameters() if p.requires_grad)
         print(f"  CNN parameters {cnn_parameters:,}")
-        
-        if self.mlp:
-            mlp_parameters = sum(p.numel() for p in self.mlp.parameters() if p.requires_grad)
-            print(f"  MLP parameters {mlp_parameters:,}")
+
+        if self.regression_mlp:
+            mlp_parameters = sum(p.numel() for p in self.regression_mlp.parameters() if p.requires_grad)
+            print(f"  Regression MLP parameters {mlp_parameters:,}")
         else:
             self.cnn_regression_active = False
         
@@ -220,43 +237,24 @@ class Torch_CNN_Model(
         else:
             self.autoencoder_active = False
 
+        if self.classification_mlp:
+            mlp_parameters = sum(p.numel() for p in self.regression_mlp.parameters() if p.requires_grad)
+            print(f"  Classification MLP parameters {mlp_parameters:,}")
+        else:
+            self.cnn_classification_active = False
+        
         self.initialize_layers()
 
     def forward(self, signals: torch.Tensor) -> list[torch.Tensor]:
         results = []
         features = self.cnn(signals)
-        if self.mlp and self.cnn_regression_active:
-            prediction = self.mlp(features)
+        if self.regression_mlp and self.cnn_regression_active:
+            prediction = self.regression_mlp(features)
             results.append(prediction)
         if self.decoder and self.autoencoder_active:
             reconstruction = self.decoder(features)
             results.append(reconstruction)
+        if self.classification_mlp and self.cnn_classification_active:
+            class_prediction = self.classification_mlp(features)
+            results.append(class_prediction)
         return results
-
-
-# @dataclasses.dataclass(eq=False)
-# class Torch_AE_Model(
-#     Torch_CNN_Mixin,
-# ):
-    
-#     def __post_init__(self):
-#         super().__post_init__()
-
-#         self.encoder, _, encoder_output_shape = self.make_cnn()
-#         self.decoder = self.make_cnn_decoder(
-#             input_data_shape=encoder_output_shape,
-#         )
-            
-#         total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
-#         encoder_parameters = sum(p.numel() for p in self.encoder.parameters() if p.requires_grad)
-#         decoder_parameters = sum(p.numel() for p in self.decoder.parameters() if p.requires_grad)
-#         print(f"Total parameters {total_parameters:,}")
-#         print(f"  Encoder parameters {encoder_parameters:,}")
-#         print(f"  Decoder parameters {decoder_parameters:,}")
-
-#         self.initialize_layers()
-
-#     def forward(self, signals: torch.Tensor):
-#         features = self.encoder(signals)
-#         reconstruction = self.decoder(features)
-#         return reconstruction

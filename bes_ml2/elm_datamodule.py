@@ -28,7 +28,7 @@ class ELM_TrainValTest_Dataset(torch.utils.data.Dataset):
             sample_indices: np.ndarray,
             window_start_indices: np.ndarray,
             signal_window_size: int,
-            prediction_horizon: int = 0,  # =0 for time-to-ELM regression; >=0 for classification prediction
+            # prediction_horizon: int = 0,  # =0 for time-to-ELM regression; >=0 for classification prediction
     ) -> None:
         self.signals = torch.from_numpy(signals[np.newaxis, ...])
         assert (
@@ -41,10 +41,10 @@ class ELM_TrainValTest_Dataset(torch.utils.data.Dataset):
         assert self.labels.ndim == 1, "Labels have incorrect shape"
         assert self.labels.numel() == self.signals.size(1), "Labels and signals have different time dimensions"
         self.signal_window_size = signal_window_size
-        self.prediction_horizon = prediction_horizon
+        # self.prediction_horizon = prediction_horizon
         self.window_start_indices = torch.from_numpy(window_start_indices)
         self.sample_indices = torch.from_numpy(sample_indices)
-        assert torch.max(self.sample_indices)+self.signal_window_size+self.prediction_horizon-1 < self.labels.numel()
+        assert torch.max(self.sample_indices)+self.signal_window_size-1 < self.labels.numel()
 
     def __len__(self) -> int:
         return self.sample_indices.numel()
@@ -52,9 +52,10 @@ class ELM_TrainValTest_Dataset(torch.utils.data.Dataset):
     def __getitem__(self, i: int) -> tuple:
         i_t0 = self.sample_indices[i]
         signal_window = self.signals[:, i_t0 : i_t0 + self.signal_window_size, :, :]
-        label_index = i_t0 + self.signal_window_size + self.prediction_horizon - 1
+        label_index = i_t0 + self.signal_window_size - 1
         label = self.labels[ label_index : label_index + 1 ]
-        return signal_window, label
+        label_class = torch.tensor([0]) if label >= 0 else torch.tensor([1])
+        return signal_window, label, label_class
 
 
 class ELM_Predict_Dataset(torch.utils.data.Dataset):
@@ -66,7 +67,7 @@ class ELM_Predict_Dataset(torch.utils.data.Dataset):
             signal_window_size: int,
             shot: int,
             elm_index: int,
-            prediction_horizon: int = 0,  # =0 for time-to-ELM regression; >=0 for classification prediction
+            # prediction_horizon: int = 0,  # =0 for time-to-ELM regression; >=0 for classification prediction
             pre_elm_only: bool = False,
     ) -> None:
         self.shot = shot
@@ -83,7 +84,7 @@ class ELM_Predict_Dataset(torch.utils.data.Dataset):
         assert self.labels.ndim == 1, "Labels have incorrect shape"
         assert self.labels.numel() == self.signals.size(1), "Labels and signals have different time dimensions"
         self.signal_window_size = signal_window_size
-        self.prediction_horizon = prediction_horizon
+        # self.prediction_horizon = prediction_horizon
         if pre_elm_only:
             last_signal_window_start_index = self.active_elm_start_index-1 - self.signal_window_size
         else:
@@ -113,9 +114,10 @@ class ELM_Predict_Dataset(torch.utils.data.Dataset):
     def __getitem__(self, i: int) -> tuple:
         i_t0 = self.sample_indices[i]
         signal_window = self.signals[:, i_t0 : i_t0 + self.signal_window_size, :, :]
-        label_index = i_t0 + self.signal_window_size + self.prediction_horizon - 1
+        label_index = i_t0 + self.signal_window_size - 1
         label = self.labels[ label_index : label_index + 1 ]
-        return signal_window, label
+        label_class = torch.tensor([0]) if label >= 0 else torch.tensor([1])
+        return signal_window, label, label_class
 
 
 @dataclasses.dataclass(eq=False)

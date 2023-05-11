@@ -20,6 +20,9 @@ except:
     from bes_ml2 import elm_torch_model
 
 
+DEFAULT_PRECISION = 'bf16' if torch.cuda.is_available() else '32'
+
+
 @dataclasses.dataclass(eq=False)
 class BES_Trainer:
     lightning_model: elm_lightning_model.Lightning_Model
@@ -34,7 +37,7 @@ class BES_Trainer:
     wandb_log_freq: int = 100
     lit_log_freq: int = 50
     skip_test_predict: bool = False
-    precision: str|int = '16-mixed'
+    precision: str|int = DEFAULT_PRECISION
 
     def __post_init__(self):
 
@@ -168,9 +171,8 @@ if __name__=='__main__':
         lightning_model=lightning_model,
         datamodule=datamodule,
         # wandb_log=True,
-        skip_test_predict=True,
-        precision=32,
+        # skip_test_predict=True,
     )
     trainer.run_all(
-        max_epochs=10,
+        max_epochs=2,
     )

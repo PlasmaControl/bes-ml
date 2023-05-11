@@ -20,7 +20,7 @@ class Lightning_Model(LightningModule):
     lr_scheduler_patience: int = 20
     lr_scheduler_threshold: float = 1e-3
     weight_decay: float = 1e-6
-    monitor_metric: str = 'sum_loss/val'
+    monitor_metric: str = 'loss/sum/val'
     log_dir: str = dataclasses.field(default='.', init=False)
     
     def __post_init__(self):
@@ -55,63 +55,108 @@ class Lightning_Model(LightningModule):
         self.regression_mse_loss = torchmetrics.MeanSquaredError()
         self.regression_r2_score = torchmetrics.R2Score()
         self.reconstruction_mse_loss = torchmetrics.MeanSquaredError()
+        self.classification_bce_loss = torchmetrics.Accuracy(task='binary')
+        self.classification_f1_score = torchmetrics.F1Score(task='binary')
 
     def forward(self, signals) -> torch.Tensor:
         return self.torch_model(signals)
 
     def training_step(self, batch, batch_idx) -> list[torch.Tensor]:
-        signals, labels = batch
+        signals, labels, class_labels = batch
         results = self(signals)
         losses = []
         if self.torch_model.cnn_regression_active:
             predictions = results.pop(0)
             regression_mse_loss = self.regression_mse_loss(predictions, labels)
-            self.log("regression_mse_loss/train", self.regression_mse_loss)
+            self.log("loss/regression_mse/train", self.regression_mse_loss)
             losses.append(regression_mse_loss)
         if self.torch_model.autoencoder_active:
             predictions = results.pop(0)
             reconstruction_mse_loss = self.reconstruction_mse_loss(predictions, signals)
-            self.log("reconstruction_mse_loss/train", self.reconstruction_mse_loss)
+            self.log("loss/reconstruction_mse/train", self.reconstruction_mse_loss)
             losses.append(reconstruction_mse_loss)
+        if self.torch_model.cnn_classification_active:
+            class_predictions = results.pop(0)
+            classification_bce_loss = self.classification_bce_loss(
+                class_predictions,
+                class_labels,
+            )
+            self.log("loss/classification_bce/train", self.reconstruction_mse_loss)
+            losses.append(classification_bce_loss)
         loss = sum(losses)
-        self.log("sum_loss/train", loss)
+        self.log("loss/sum/train", loss)
         return loss
 
     def validation_step(self, batch, batch_idx) -> None:
-        signals, labels = batch
-        predictions = self(signals)
-        # self.regression_mse_loss(predictions, labels)
-        # self.log("regression_mse_loss/val", self.regression_mse_loss)
-        # self.regression_r2_score(predictions, labels)
-        # self.log("score/val", self.regression_r2_score)
+        signals, labels, class_labels = batch
         results = self(signals)
         losses = []
         if self.torch_model.cnn_regression_active:
             predictions = results.pop(0)
             regression_mse_loss = self.regression_mse_loss(predictions, labels)
-            self.log("regression_mse_loss/val", self.regression_mse_loss)
+            self.log("loss/regression_mse/val", self.regression_mse_loss)
             losses.append(regression_mse_loss)
             self.regression_r2_score(predictions, labels)
-            self.log("regression_r2_score/val", self.regression_r2_score)
+            self.log("score/regression_r2/val", self.regression_r2_score)
         if self.torch_model.autoencoder_active:
             predictions = results.pop(0)
             reconstruction_mse_loss = self.reconstruction_mse_loss(predictions, signals)
-            self.log("reconstruction_mse_loss/val", self.reconstruction_mse_loss)
+            self.log("loss/reconstruction_mse/val", self.reconstruction_mse_loss)
             losses.append(reconstruction_mse_loss)
+        if self.torch_model.cnn_classification_active:
+            class_predictions = results.pop(0)
+            classification_bce_loss = self.classification_bce_loss(
+                class_predictions,
+                class_labels,
+            )
+            self.log("loss/classification_bce/val", self.reconstruction_mse_loss)
+            losses.append(classification_bce_loss)
+            self.classification_f1_score(
+                class_predictions,
+                class_labels,
+            )
+            self.log("score/classification_f1/val", self.classification_f1_score)
         loss = sum(losses)
-        self.log("sum_loss/val", loss)
+        self.log("loss/sum/val", loss)
 
     def test_step(self, batch, batch_idx) -> None:
-        signals, labels = batch
-        predictions = self(signals)
-        self.regression_mse_loss(predictions, labels)
-        self.log("regression_mse_loss/test", self.regression_mse_loss)
-        self.regression_r2_score(predictions, labels)
-        self.log("score/test", self.regression_r2_score)
+        signals, labels, class_labels = batch
+        results = self(signals)
+        losses = []
+        if self.torch_model.cnn_regression_active:
+            predictions = results.pop(0)
+            regression_mse_loss = self.regression_mse_loss(predictions, labels)
+            self.log("loss/regression_mse/test", self.regression_mse_loss)
+            losses.append(regression_mse_loss)
+            self.regression_r2_score(predictions, labels)
+            self.log("score/regression_r2/test", self.regression_r2_score)
+        if self.torch_model.autoencoder_active:
+            predictions = results.pop(0)
+            reconstruction_mse_loss = self.reconstruction_mse_loss(predictions, signals)
+            self.log("loss/reconstruction_mse/test", self.reconstruction_mse_loss)
+            losses.append(reconstruction_mse_loss)
+        if self.torch_model.cnn_classification_active:
+            class_predictions = results.pop(0)
+            classification_bce_loss = self.classification_bce_loss(
+                class_predictions,
+                class_labels,
+            )
+            self.log("loss/classification_bce/test", self.reconstruction_mse_loss)
+            losses.append(classification_bce_loss)
+            self.classification_f1_score(
+                class_predictions,
+                class_labels,
+            )
+            self.log("score/classification_f1/test", self.classification_f1_score)
+        loss = sum(losses)
+        self.log("loss/sum/test", loss)
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0) -> None:
-        signals, labels = batch
-        predictions = self(signals)
+        signals, labels, class_labels = batch
+        results = self(signals)
+        predictions = results.pop(0) if self.torch_model.cnn_regression_active else None
+        reconstruction = results.pop(0) if self.torch_model.autoencoder_active else None
+        class_predictions = results.pop(0) if self.torch_model.cnn_classification_active else None
         if batch_idx == 0:
             self.predict_outputs.append([])
             assert dataloader_idx == len(self.predict_outputs)-1
@@ -119,6 +164,8 @@ class Lightning_Model(LightningModule):
             'labels': labels,
             'predictions': predictions,
             'signals': signals,
+            'reconstruction': reconstruction,
+            'class_predictions': class_predictions,
         })
     
     def on_train_epoch_start(self):
@@ -226,36 +273,3 @@ class Lightning_Model(LightningModule):
             ),
             'monitor': self.monitor_metric,
         }
-
-
-# @dataclasses.dataclass(eq=False)
-# class Lightning_Unsupervised_Model(Lightning_Model):
-#     monitor_metric: str = 'loss/val'
-
-#     def __post_init__(self):
-#         super().__post_init__()
-
-#     def training_step(self, batch, batch_idx) -> torch.Tensor:
-#         signals, _ = batch
-#         predictions = self(signals)
-#         loss = self.mse_loss(predictions, signals)
-#         self.log("loss/train", self.mse_loss)
-#         return loss
-
-#     def validation_step(self, batch, batch_idx):
-#         signals, _ = batch
-#         predictions = self(signals)
-#         self.mse_loss(predictions, signals)
-#         self.log("loss/val", self.mse_loss)
-
-#     def test_step(self, batch, batch_idx):
-#         signals, _ = batch
-#         predictions = self(signals)
-#         self.mse_loss(predictions, signals)
-#         self.log("loss/test", self.mse_loss)
-
-#     def predict_step(self, batch, batch_idx, dataloader_idx=0):
-#         pass
-    
-#     def on_predict_epoch_end(self):
-#         pass
