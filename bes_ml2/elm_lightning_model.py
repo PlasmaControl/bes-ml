@@ -1,3 +1,4 @@
+from __future__ import annotations
 import dataclasses
 import os
 import time
@@ -13,6 +14,11 @@ import torch.utils.data
 from lightning.pytorch import LightningModule, loggers
 import torchmetrics
 
+try:
+    from .elm_torch_model import Torch_CNN_Model
+except:
+    from bes_ml2.elm_torch_model import Torch_CNN_Model
+
 
 @dataclasses.dataclass(eq=False)
 class Lightning_Model(LightningModule):
@@ -27,7 +33,7 @@ class Lightning_Model(LightningModule):
         super().__init__()
         self.torch_model = None
 
-    def set_torch_model(self, torch_model: torch.nn.Module):
+    def set_torch_model(self, torch_model: Torch_CNN_Model|torch.nn.Module):
         assert hasattr(torch_model, 'signal_window_size')
         hp_fields = dataclasses.asdict(self) | dataclasses.asdict(torch_model)
         hp_fields['torch_model_name'] = torch_model.__class__.__name__
@@ -61,28 +67,28 @@ class Lightning_Model(LightningModule):
     def forward(self, signals) -> torch.Tensor:
         return self.torch_model(signals)
 
-    def training_step(self, batch, batch_idx) -> list[torch.Tensor]:
+    def training_step(self, batch, batch_idx) -> torch.Tensor:
         signals, labels, class_labels = batch
         results = self(signals)
         losses = []
-        if self.torch_model.cnn_regression_active:
-            predictions = results.pop(0)
-            regression_mse_loss = self.regression_mse_loss(predictions, labels)
-            self.log("loss/regression_mse/train", self.regression_mse_loss)
-            losses.append(regression_mse_loss)
-        if self.torch_model.autoencoder_active:
-            predictions = results.pop(0)
-            reconstruction_mse_loss = self.reconstruction_mse_loss(predictions, signals)
-            self.log("loss/reconstruction_mse/train", self.reconstruction_mse_loss)
-            losses.append(reconstruction_mse_loss)
-        if self.torch_model.cnn_classification_active:
-            class_predictions = results.pop(0)
-            classification_bce_loss = self.classification_bce_loss(
-                class_predictions,
-                class_labels,
-            )
-            self.log("loss/classification_bce/train", self.reconstruction_mse_loss)
-            losses.append(classification_bce_loss)
+        for key, is_active in self.torch_model.frontends_active.items():
+            if not is_active:
+                continue
+            frontend_result = results[key]
+            if 'regression' in key:
+                loss = self.regression_mse_loss(frontend_result, labels)
+                self.log("loss/regression_mse/train", self.regression_mse_loss)
+                self.regression_r2_score(frontend_result, labels)
+                self.log("score/regression_r2/train", self.regression_r2_score)
+            elif 'reconstruction' in key:
+                loss = self.reconstruction_mse_loss(frontend_result, signals)
+                self.log("loss/reconstruction_mse/train", self.reconstruction_mse_loss)
+            elif 'classification' in key:
+                loss = self.classification_bce_loss(frontend_result, class_labels)
+                self.log("loss/classification_bce/train", self.classification_bce_loss)
+                self.classification_f1_score(frontend_result, class_labels)
+                self.log("score/classification_f1/train", self.classification_f1_score)
+            losses.append(loss)
         loss = sum(losses)
         self.log("loss/sum/train", loss)
         return loss
@@ -91,31 +97,24 @@ class Lightning_Model(LightningModule):
         signals, labels, class_labels = batch
         results = self(signals)
         losses = []
-        if self.torch_model.cnn_regression_active:
-            predictions = results.pop(0)
-            regression_mse_loss = self.regression_mse_loss(predictions, labels)
-            self.log("loss/regression_mse/val", self.regression_mse_loss)
-            losses.append(regression_mse_loss)
-            self.regression_r2_score(predictions, labels)
-            self.log("score/regression_r2/val", self.regression_r2_score)
-        if self.torch_model.autoencoder_active:
-            predictions = results.pop(0)
-            reconstruction_mse_loss = self.reconstruction_mse_loss(predictions, signals)
-            self.log("loss/reconstruction_mse/val", self.reconstruction_mse_loss)
-            losses.append(reconstruction_mse_loss)
-        if self.torch_model.cnn_classification_active:
-            class_predictions = results.pop(0)
-            classification_bce_loss = self.classification_bce_loss(
-                class_predictions,
-                class_labels,
-            )
-            self.log("loss/classification_bce/val", self.reconstruction_mse_loss)
-            losses.append(classification_bce_loss)
-            self.classification_f1_score(
-                class_predictions,
-                class_labels,
-            )
-            self.log("score/classification_f1/val", self.classification_f1_score)
+        for key, is_active in self.torch_model.frontends_active.items():
+            if not is_active:
+                continue
+            frontend_result = results[key]
+            if 'regression' in key:
+                loss = self.regression_mse_loss(frontend_result, labels)
+                self.log("loss/regression_mse/val", self.regression_mse_loss)
+                self.regression_r2_score(frontend_result, labels)
+                self.log("score/regression_r2/val", self.regression_r2_score)
+            elif 'reconstruction' in key:
+                loss = self.reconstruction_mse_loss(frontend_result, signals)
+                self.log("loss/reconstruction_mse/val", self.reconstruction_mse_loss)
+            elif 'classification' in key:
+                loss = self.classification_bce_loss(frontend_result, class_labels)
+                self.log("loss/classification_bce/val", self.classification_bce_loss)
+                self.classification_f1_score(frontend_result, class_labels)
+                self.log("score/classification_f1/val", self.classification_f1_score)
+            losses.append(loss)
         loss = sum(losses)
         self.log("loss/sum/val", loss)
 
@@ -123,50 +122,40 @@ class Lightning_Model(LightningModule):
         signals, labels, class_labels = batch
         results = self(signals)
         losses = []
-        if self.torch_model.cnn_regression_active:
-            predictions = results.pop(0)
-            regression_mse_loss = self.regression_mse_loss(predictions, labels)
-            self.log("loss/regression_mse/test", self.regression_mse_loss)
-            losses.append(regression_mse_loss)
-            self.regression_r2_score(predictions, labels)
-            self.log("score/regression_r2/test", self.regression_r2_score)
-        if self.torch_model.autoencoder_active:
-            predictions = results.pop(0)
-            reconstruction_mse_loss = self.reconstruction_mse_loss(predictions, signals)
-            self.log("loss/reconstruction_mse/test", self.reconstruction_mse_loss)
-            losses.append(reconstruction_mse_loss)
-        if self.torch_model.cnn_classification_active:
-            class_predictions = results.pop(0)
-            classification_bce_loss = self.classification_bce_loss(
-                class_predictions,
-                class_labels,
-            )
-            self.log("loss/classification_bce/test", self.reconstruction_mse_loss)
-            losses.append(classification_bce_loss)
-            self.classification_f1_score(
-                class_predictions,
-                class_labels,
-            )
-            self.log("score/classification_f1/test", self.classification_f1_score)
+        for key, is_active in self.torch_model.frontends_active.items():
+            if not is_active:
+                continue
+            frontend_result = results[key]
+            if 'regression' in key:
+                loss = self.regression_mse_loss(frontend_result, labels)
+                self.log("loss/regression_mse/test", self.regression_mse_loss)
+                self.regression_r2_score(frontend_result, labels)
+                self.log("score/regression_r2/test", self.regression_r2_score)
+            elif 'reconstruction' in key:
+                loss = self.reconstruction_mse_loss(frontend_result, signals)
+                self.log("loss/reconstruction_mse/test", self.reconstruction_mse_loss)
+            elif 'classification' in key:
+                loss = self.classification_bce_loss(frontend_result, class_labels)
+                self.log("loss/classification_bce/test", self.classification_bce_loss)
+                self.classification_f1_score(frontend_result, class_labels)
+                self.log("score/classification_f1/test", self.classification_f1_score)
+            losses.append(loss)
         loss = sum(losses)
         self.log("loss/sum/test", loss)
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0) -> None:
         signals, labels, class_labels = batch
         results = self(signals)
-        predictions = results.pop(0) if self.torch_model.cnn_regression_active else None
-        reconstruction = results.pop(0) if self.torch_model.autoencoder_active else None
-        class_predictions = results.pop(0) if self.torch_model.cnn_classification_active else None
         if batch_idx == 0:
             self.predict_outputs.append([])
             assert dataloader_idx == len(self.predict_outputs)-1
-        self.predict_outputs[-1].append({
+        outputs = {
             'labels': labels,
-            'predictions': predictions,
             'signals': signals,
-            'reconstruction': reconstruction,
-            'class_predictions': class_predictions,
-        })
+            'class_labels': class_labels,
+        }
+        outputs.update(results)
+        self.predict_outputs[-1].append(outputs)
     
     def on_train_epoch_start(self):
         self.t_train_epoch_start = time.time()
@@ -215,12 +204,12 @@ class Lightning_Model(LightningModule):
         print(f"Predict elapsed time {(time.time()-self.t_predict_start)/60:0.1f} min")
 
     def on_predict_epoch_end(self) -> None:
-        if self.global_rank != 0:
+        if self.global_rank != 0 or 'time_to_elm_regression' not in self.predict_outputs[0][0]:
             return
         i_page = 1
         for i_elm, result in enumerate(self.predict_outputs):
             labels = torch.concat([batch['labels'] for batch in result]).squeeze().numpy(force=True)
-            predictions = torch.concat([batch['predictions'] for batch in result]).squeeze().numpy(force=True)
+            predictions = torch.concat([batch['time_to_elm_regression'] for batch in result]).squeeze().numpy(force=True)
             signals = torch.concat([batch['signals'] for batch in result]).squeeze().numpy(force=True)
             assert labels.shape[0] == predictions.shape[0] and labels.shape[0] == signals.shape[0]
             signal = signals[:, -1, 2, 3].squeeze()

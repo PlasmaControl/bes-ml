@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+from pathlib import Path
 import dataclasses
 from datetime import datetime
 
@@ -7,6 +8,7 @@ import torch
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from lightning.pytorch.callbacks import LearningRateMonitor, EarlyStopping, ModelCheckpoint
 from lightning.pytorch import Trainer
+from lightning.pytorch.strategies import DDPStrategy
 from lightning.pytorch.utilities.model_summary import ModelSummary
 import wandb
 
@@ -20,24 +22,22 @@ except:
     from bes_ml2 import elm_torch_model
 
 
-DEFAULT_PRECISION = 'bf16' if torch.cuda.is_available() else '32'
 
 
 @dataclasses.dataclass(eq=False)
 class BES_Trainer:
     lightning_model: elm_lightning_model.Lightning_Model
     datamodule: elm_datamodule.ELM_Datamodule
-    experiment_group_dir: str = './experiment_default'
-    experiment_name: str = None  # if None, use default Tensorboard scheme
-    gradient_clip_value: int = None
-    wandb_log: bool = False
+    experiment_dir: str = './experiment_default'
+    trial_name: str = None  # if None, use default Tensorboard scheme
     early_stopping_min_delta: float = 1e-3
     early_stopping_patience: int = 50
     enable_progress_bar: bool = False
-    wandb_log_freq: int = 100
-    lit_log_freq: int = 50
+    log_freq: int = 100
+    wandb_log: bool = False
+    gradient_clip_value: int = None
     skip_test_predict: bool = False
-    precision: str|int = DEFAULT_PRECISION
+    float_precision: str|int = 16 if torch.cuda.is_available() else 32
 
     def __post_init__(self):
 
@@ -51,39 +51,42 @@ class BES_Trainer:
                 field_str += f" (default {default_value})"
             print(field_str)
 
-        self.experiment_group_dir = os.path.abspath(self.experiment_group_dir)
-        os.makedirs(self.experiment_group_dir, exist_ok=True)
-
-        if not self.experiment_name:
+        if not self.trial_name:
             datetime_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             slurm_identifier = os.getenv('UNIQUE_IDENTIFIER', None)
             if slurm_identifier:
-                self.experiment_name = f"run_{slurm_identifier}_{datetime_str}"
+                self.trial_name = f"run_{slurm_identifier}_{datetime_str}"
             else:
-                self.experiment_name = f"run_{datetime_str}"
+                self.trial_name = f"run_{datetime_str}"
+
+        self.experiment_dir = Path(self.experiment_dir)
+        self.experiment_dir.mkdir(parents=True, exist_ok=True)
+        self.experiment_name = self.experiment_dir.name
+        self.experiment_parent_dir = self.experiment_dir.parent
 
         # set loggers
         tb_logger = TensorBoardLogger(
-            save_dir=os.path.dirname(self.experiment_group_dir), 
-            name=os.path.basename(self.experiment_group_dir), 
-            version=self.experiment_name,
+            save_dir=self.experiment_parent_dir,
+            name=self.experiment_name,
+            version=self.trial_name,
             default_hp_metric=False,
         )
-        os.makedirs(tb_logger.log_dir, exist_ok=True)
-        self.log_dir = tb_logger.log_dir
+        self.trial_dir = Path(tb_logger.log_dir).absolute()
+        self.trial_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Trial directory: {self.trial_dir}")
         self.loggers = [tb_logger]
 
         if self.wandb_log:
             wandb.login()
             wandb_logger = WandbLogger(
-                save_dir=self.experiment_group_dir,
-                project=os.path.basename(self.experiment_group_dir),
-                name=self.experiment_name,
+                save_dir=self.experiment_dir,
+                project=self.experiment_name,
+                name=self.trial_name,
             )
             wandb_logger.watch(
                 self.lightning_model, 
                 log='all', 
-                log_freq=self.wandb_log_freq,
+                log_freq=self.log_freq,
             )
             self.loggers.append(wandb_logger)
         else:
@@ -97,7 +100,7 @@ class BES_Trainer:
         restart_chpt_path: str = None,
         max_epochs: int = 2,
     ):
-        self.lightning_model.log_dir = self.datamodule.log_dir = self.log_dir
+        self.lightning_model.log_dir = self.datamodule.log_dir = self.trial_dir
 
         # set callbacks
         callbacks = [
@@ -122,9 +125,10 @@ class BES_Trainer:
             callbacks=callbacks,
             enable_model_summary=False,
             enable_progress_bar=self.enable_progress_bar,
-            log_every_n_steps=self.lit_log_freq,
+            log_every_n_steps=self.log_freq,
             num_nodes=int(os.getenv('SLURM_NNODES', default=1)),
-            precision=self.precision,
+            precision=self.float_precision,
+            strategy=DDPStrategy(find_unused_parameters=True)
         )
         self.datamodule.is_global_zero = trainer.is_global_zero
 
@@ -140,9 +144,9 @@ class BES_Trainer:
             trainer.test(datamodule=self.datamodule, ckpt_path='best')
             trainer.predict(datamodule=self.datamodule, ckpt_path='best')
 
-        print(f"Experiment group dir: {self.experiment_group_dir}")
-        print(f"Experiment name: {self.experiment_name}")
-        print(f"Log dir: {self.log_dir}")
+        print(f"Trial dir: {self.experiment_dir}")
+        print(f"Trial name: {self.trial_name}")
+        print(f"Trial dir: {self.trial_dir}")
         print(f"Best model path: {self.best_model_path}")
         print(f"Last model path: {self.last_model_path}")
 

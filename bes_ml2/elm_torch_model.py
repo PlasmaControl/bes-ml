@@ -10,7 +10,7 @@ import torch.utils.data
 
 @dataclasses.dataclass(eq=False)
 class Torch_Base(torch.nn.Module):
-    signal_window_size: int = 128  # power of 2; ~16-512
+    signal_window_size: int = 128  # power of 2; ~64-512
     leaky_relu_slope: float = 1e-2
 
     def __post_init__(self):
@@ -78,8 +78,14 @@ class Torch_MLP_Mixin(Torch_Base):
                 out_features=mlp_out_features,
             )
         )
+
+        # Logit or probability output?
         if with_sigmoid:
+            print(f"  Applying sigmoid at MLP output for probability with range [0,1]")
             mlp_layers.append(torch.nn.Sigmoid())
+        else:
+            print(f"  Logit output (log odds, log(p/(1-p))) with range [-inf,inf]")
+
         return mlp_layers
 
 
@@ -93,7 +99,7 @@ class Torch_CNN_Mixin(Torch_Base):
     cnn_input_channels: int = 1
     cnn_dropout: float = 0.1
 
-    def make_cnn(self) -> tuple:
+    def make_cnn(self) -> tuple[torch.nn.Module,int,tuple]:
         for attr_name in [
             'cnn_num_kernels',
             'cnn_kernel_time_size',
@@ -190,71 +196,50 @@ class Torch_CNN_Model(
     Torch_CNN_Mixin,
     Torch_MLP_Mixin,
 ):
-    autoencoder: bool = True
-    autoencoder_active: bool = True
-    cnn_regression: bool = True
-    cnn_regression_active: bool = True
-    cnn_classification: bool = True
-    cnn_classification_active: bool = True
+    autoencoder_reconstruction: bool = True
+    time_to_elm_regression: bool = True
+    active_elm_classification: bool = True
+    # frontends: torch.nn.ModuleDict = dataclasses.field(default=None, init=False)
+    # frontends_active: dict = dataclasses.field(default=None, init=False)
     
     def __post_init__(self):
         super().__post_init__()
 
-        self.cnn, cnn_features, cnn_output_shape = self.make_cnn()
-        self.regression_mlp = (
-            self.make_mlp(mlp_in_features=cnn_features)
-            if self.cnn_regression
-            else None
-        )
-        self.decoder = (
-            self.make_cnn_decoder(input_data_shape=cnn_output_shape)
-            if self.autoencoder
-            else None
-        )
-        self.classification_mlp = (
-            self.make_mlp(
-                mlp_in_features=cnn_features,
-                with_sigmoid=True,
-            )
-            if self.cnn_classification
-            else None
-        )
+        # CNN encoder `backend` to featurize input data
+        self.cnn_encoder, cnn_features, cnn_output_shape = self.make_cnn()
+
+        # `frontends` for regression, classification, and self-supervised learning
+        # self.frontends: dict[str, torch.nn.Module] = {}
+        self.frontends = torch.nn.ModuleDict()
+        self.frontends_active: dict[str, bool] = {}
+        if self.time_to_elm_regression:
+            key = 'time_to_elm_regression'
+            self.frontends.update({key: self.make_mlp(mlp_in_features=cnn_features)})
+            self.frontends_active[key] = True
+        if self.autoencoder_reconstruction:
+            key = 'autoencoder_reconstruction'
+            self.frontends.update({key: self.make_cnn_decoder(input_data_shape=cnn_output_shape)})
+            self.frontends_active[key] = True
+        if self.active_elm_classification:
+            key = 'active_elm_classification'
+            self.frontends.update({key: self.make_mlp(mlp_in_features=cnn_features)})
+            self.frontends_active[key] = True
             
         total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"Total parameters {total_parameters:,}")
-        cnn_parameters = sum(p.numel() for p in self.cnn.parameters() if p.requires_grad)
-        print(f"  CNN parameters {cnn_parameters:,}")
+        cnn_parameters = sum(p.numel() for p in self.cnn_encoder.parameters() if p.requires_grad)
+        print(f"  CNN encoder parameters {cnn_parameters:,}")
 
-        if self.regression_mlp:
-            mlp_parameters = sum(p.numel() for p in self.regression_mlp.parameters() if p.requires_grad)
-            print(f"  Regression MLP parameters {mlp_parameters:,}")
-        else:
-            self.cnn_regression_active = False
-        
-        if self.decoder:
-            decoder_parameters = sum(p.numel() for p in self.decoder.parameters() if p.requires_grad)
-            print(f"  Decoder parameters {decoder_parameters:,}")
-        else:
-            self.autoencoder_active = False
+        for key, frontend in self.frontends.items():
+            n_parameters = sum(p.numel() for p in frontend.parameters() if p.requires_grad)
+            print(f"  Frontend `{key}` parameters: {n_parameters:,}")
 
-        if self.classification_mlp:
-            mlp_parameters = sum(p.numel() for p in self.regression_mlp.parameters() if p.requires_grad)
-            print(f"  Classification MLP parameters {mlp_parameters:,}")
-        else:
-            self.cnn_classification_active = False
-        
         self.initialize_layers()
 
-    def forward(self, signals: torch.Tensor) -> list[torch.Tensor]:
-        results = []
-        features = self.cnn(signals)
-        if self.regression_mlp and self.cnn_regression_active:
-            prediction = self.regression_mlp(features)
-            results.append(prediction)
-        if self.decoder and self.autoencoder_active:
-            reconstruction = self.decoder(features)
-            results.append(reconstruction)
-        if self.classification_mlp and self.cnn_classification_active:
-            class_prediction = self.classification_mlp(features)
-            results.append(class_prediction)
+    def forward(self, signals: torch.Tensor) -> dict[torch.Tensor]:
+        results = {}
+        features = self.cnn_encoder(signals)
+        for key, frontend in self.frontends.items():
+            if self.frontends_active[key]:
+                results[key] = frontend(features)
         return results
