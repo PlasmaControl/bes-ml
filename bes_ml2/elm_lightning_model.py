@@ -19,6 +19,35 @@ try:
 except:
     from bes_ml2.elm_torch_model import Torch_CNN_Model
 
+class BCEWithLogit(torchmetrics.Metric):
+    # Set to True if the metric is differentiable else set to False
+    is_differentiable: bool = True
+
+    # Set to True if the metric reaches it optimal value when the metric is maximized.
+    # Set to False if it when the metric is minimized.
+    higher_is_better: bool = False
+
+    # Set to True if the metric during 'update' requires access to the global metric
+    # state for its calculations. If not, setting this to False indicates that all
+    # batch states are independent and we will optimize the runtime of 'forward'
+    full_state_update: bool = True
+
+    def __init__(self):
+        super().__init__()
+        self.add_state("bce", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("counts", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def update(self, input: torch.Tensor, target: torch.Tensor):
+        self.bce += torch.nn.functional.binary_cross_entropy_with_logits(
+            input=input, 
+            target=target.type_as(input),
+            reduction='sum',
+        )
+        self.counts += target.numel()
+
+    def compute(self):
+        return self.bce / self.counts
+
 
 @dataclasses.dataclass(eq=False)
 class Lightning_Model(LightningModule):
@@ -61,7 +90,7 @@ class Lightning_Model(LightningModule):
         self.regression_mse_loss = torchmetrics.MeanSquaredError()
         self.regression_r2_score = torchmetrics.R2Score()
         self.reconstruction_mse_loss = torchmetrics.MeanSquaredError()
-        self.classification_bce_loss = torchmetrics.Accuracy(task='binary')
+        self.classification_bce_loss = BCEWithLogit()
         self.classification_f1_score = torchmetrics.F1Score(task='binary')
 
     def forward(self, signals) -> torch.Tensor:

@@ -167,7 +167,7 @@ if __name__=='__main__':
 
     datamodule = elm_datamodule.ELM_Datamodule(
         signal_window_size=signal_window_size,
-        # max_elms=5,
+        max_elms=5,
         batch_size=128,
     )
 
@@ -175,23 +175,8 @@ if __name__=='__main__':
         lightning_model=lightning_model,
         datamodule=datamodule,
         # wandb_log=True,
-        # skip_test_predict=True,
     )
 
-    lightning_model.torch_model.frontends_active['time_to_elm_regression'] = False
-    lightning_model.torch_model.frontends_active['active_elm_classification'] = False
     trainer.run_all(
         max_epochs=2,
-    )
-
-    lightning_model.torch_model.frontends_active['active_elm_classification'] = True
-    trainer.run_all(
-        max_epochs=2,
-        restart_chpt_path=trainer.last_model_path,
-    )
-
-    lightning_model.torch_model.frontends_active['time_to_elm_regression'] = True
-    trainer.run_all(
-        max_epochs=2,
-        restart_chpt_path=trainer.last_model_path,
     )
