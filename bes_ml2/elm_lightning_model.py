@@ -118,10 +118,12 @@ class Lightning_Model(LightningModule):
                 self.log("loss/classification_bce/train", self.classification_bce_loss)
                 self.classification_f1_score(frontend_result, class_labels)
                 self.log("score/classification_f1/train", self.classification_f1_score)
+            else:
+                raise ValueError
             losses.append(loss)
-        loss = sum(losses)
-        self.log("loss/sum/train", loss)
-        return loss
+        sum_losses = sum(losses)
+        self.log("loss/sum/train", sum_losses)
+        return sum_losses
 
     def validation_step(self, batch, batch_idx) -> None:
         signals, labels, class_labels = batch
@@ -147,8 +149,8 @@ class Lightning_Model(LightningModule):
             else:
                 raise ValueError
             losses.append(loss)
-        loss = sum(losses)
-        self.log("loss/sum/val", loss)
+        sum_losses = sum(losses)
+        self.log("loss/sum/val", sum_losses)
 
     def test_step(self, batch, batch_idx) -> None:
         signals, labels, class_labels = batch
@@ -171,9 +173,11 @@ class Lightning_Model(LightningModule):
                 self.log("loss/classification_bce/test", self.classification_bce_loss)
                 self.classification_f1_score(frontend_result, class_labels)
                 self.log("score/classification_f1/test", self.classification_f1_score)
+            else:
+                raise ValueError
             losses.append(loss)
-        loss = sum(losses)
-        self.log("loss/sum/test", loss)
+        sum_losses = sum(losses)
+        self.log("loss/sum/test", sum_losses)
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0) -> None:
         signals, labels, class_labels = batch
