@@ -6,10 +6,12 @@ import numpy as np
 import torch
 import torch.nn
 import torch.utils.data
+from lightning.pytorch import LightningModule
+
 
 
 @dataclasses.dataclass(eq=False)
-class Torch_Base(torch.nn.Module):
+class Torch_Base(LightningModule):
     signal_window_size: int = 128  # power of 2; ~64-512
     leaky_relu_slope: float = 1e-2
 

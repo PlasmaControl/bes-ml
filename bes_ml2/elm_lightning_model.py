@@ -15,9 +15,10 @@ from lightning.pytorch import LightningModule, loggers
 import torchmetrics
 
 try:
-    from .elm_torch_model import Torch_CNN_Model
+    from . import elm_torch_model
 except:
-    from bes_ml2.elm_torch_model import Torch_CNN_Model
+    from bes_ml2 import elm_torch_model
+
 
 class BCEWithLogit(torchmetrics.Metric):
     # Set to True if the metric is differentiable else set to False
@@ -50,26 +51,52 @@ class BCEWithLogit(torchmetrics.Metric):
 
 
 @dataclasses.dataclass(eq=False)
-class Lightning_Model(LightningModule):
+class Lightning_Model(
+    elm_torch_model.Torch_CNN_Mixin,
+    elm_torch_model.Torch_MLP_Mixin,
+):
     lr: float = 1e-3
     lr_scheduler_patience: int = 20
     lr_scheduler_threshold: float = 1e-3
     weight_decay: float = 1e-6
     monitor_metric: str = 'loss/sum/val'
     log_dir: str = dataclasses.field(default='.', init=False)
+    autoencoder_reconstruction: bool = True
+    time_to_elm_regression: bool = True
+    active_elm_classification: bool = True
     
     def __post_init__(self):
-        super().__init__()
-        self.torch_model = None
-        self.lr_scheduler = None
+        # super().__init__()
+        super().__post_init__()
+        self.save_hyperparameters()
 
-    def set_torch_model(self, torch_model: Torch_CNN_Model|torch.nn.Module):
-        assert hasattr(torch_model, 'signal_window_size')
-        hp_fields = dataclasses.asdict(self) | dataclasses.asdict(torch_model)
-        hp_fields['torch_model_name'] = torch_model.__class__.__name__
-        for field in ['lr_scheduler_patience','lr_scheduler_threshold']:
-            hp_fields.pop(field)
-        self.save_hyperparameters(hp_fields)
+        # CNN encoder `backend` to featurize input data
+        self.cnn_encoder, cnn_features, cnn_output_shape = self.make_cnn()
+
+        # `frontends` for regression, classification, and self-supervised learning
+        self.frontends = torch.nn.ModuleDict()
+        self.frontends_active: dict[str, bool] = {}
+        if self.time_to_elm_regression:
+            key = 'time_to_elm_regression'
+            self.frontends.update({key: self.make_mlp(mlp_in_features=cnn_features)})
+            self.frontends_active[key] = True
+        if self.autoencoder_reconstruction:
+            key = 'autoencoder_reconstruction'
+            self.frontends.update({key: self.make_cnn_decoder(input_data_shape=cnn_output_shape)})
+            self.frontends_active[key] = True
+        if self.active_elm_classification:
+            key = 'active_elm_classification'
+            self.frontends.update({key: self.make_mlp(mlp_in_features=cnn_features)})
+            self.frontends_active[key] = True
+            
+        total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"Total parameters {total_parameters:,}")
+        cnn_parameters = sum(p.numel() for p in self.cnn_encoder.parameters() if p.requires_grad)
+        print(f"  CNN encoder parameters {cnn_parameters:,}")
+
+        for key, frontend in self.frontends.items():
+            n_parameters = sum(p.numel() for p in frontend.parameters() if p.requires_grad)
+            print(f"  Frontend `{key}` parameters: {n_parameters:,}")
 
         print(f'Initiating {self.__class__.__name__}')
         class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
@@ -81,9 +108,6 @@ class Lightning_Model(LightningModule):
                 field_str += f" (default {default_value})"
             print(field_str)
 
-        self.torch_model = torch_model
-        self.signal_window_size = self.torch_model.signal_window_size
-
         self.example_input_array = torch.zeros(
             (2, 1, self.signal_window_size, 8, 8), 
             dtype=torch.float32,
@@ -94,14 +118,21 @@ class Lightning_Model(LightningModule):
         self.classification_bce_loss = BCEWithLogit()
         self.classification_f1_score = torchmetrics.F1Score(task='binary')
 
-    def forward(self, signals) -> torch.Tensor:
-        return self.torch_model(signals)
+        self.initialize_layers()
+
+    def forward(self, signals: torch.Tensor) -> dict[torch.Tensor]:
+        results = {}
+        features = self.cnn_encoder(signals)
+        for key, frontend in self.frontends.items():
+            if self.frontends_active[key]:
+                results[key] = frontend(features)
+        return results
 
     def training_step(self, batch, batch_idx) -> torch.Tensor:
         signals, labels, class_labels = batch
         results = self(signals)
         losses = []
-        for key, is_active in self.torch_model.frontends_active.items():
+        for key, is_active in self.frontends_active.items():
             if not is_active:
                 continue
             frontend_result = results[key]
@@ -129,7 +160,7 @@ class Lightning_Model(LightningModule):
         signals, labels, class_labels = batch
         results = self(signals)
         losses = []
-        for key, is_active in self.torch_model.frontends_active.items():
+        for key, is_active in self.frontends_active.items():
             if is_active is False:
                 continue
             frontend_result = results[key]
@@ -150,13 +181,13 @@ class Lightning_Model(LightningModule):
                 raise ValueError
             losses.append(loss)
         sum_losses = sum(losses)
-        self.log("loss/sum/val", sum_losses)
+        self.log("loss/sum/val", sum_losses, sync_dist=True)
 
     def test_step(self, batch, batch_idx) -> None:
         signals, labels, class_labels = batch
         results = self(signals)
         losses = []
-        for key, is_active in self.torch_model.frontends_active.items():
+        for key, is_active in self.frontends_active.items():
             if not is_active:
                 continue
             frontend_result = results[key]
@@ -177,7 +208,7 @@ class Lightning_Model(LightningModule):
                 raise ValueError
             losses.append(loss)
         sum_losses = sum(losses)
-        self.log("loss/sum/test", sum_losses)
+        self.log("loss/sum/test", sum_losses, sync_dist=True)
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0) -> None:
         signals, labels, class_labels = batch
@@ -198,7 +229,7 @@ class Lightning_Model(LightningModule):
         if self.global_rank != 0:
             return
         print(f"Epoch {self.current_epoch} start")
-        for name, param in self.torch_model.named_parameters():
+        for name, param in self.named_parameters():
             if 'weight' in name:
                 values = param.data.detach()
                 mean = torch.mean(values).item()
@@ -244,9 +275,9 @@ class Lightning_Model(LightningModule):
             return
         i_page = 1
         for i_elm, result in enumerate(self.predict_outputs):
-            labels = torch.concat([batch['labels'] for batch in result]).squeeze().numpy(force=True)
-            predictions = torch.concat([batch['time_to_elm_regression'] for batch in result]).squeeze().numpy(force=True)
-            signals = torch.concat([batch['signals'] for batch in result]).squeeze().numpy(force=True)
+            labels: torch.Tensor = torch.concat([batch['labels'] for batch in result]).squeeze().numpy(force=True)
+            predictions: torch.Tensor = torch.concat([batch['time_to_elm_regression'] for batch in result]).squeeze().numpy(force=True)
+            signals: torch.Tensor = torch.concat([batch['signals'] for batch in result]).squeeze().numpy(force=True)
             assert labels.shape[0] == predictions.shape[0] and labels.shape[0] == signals.shape[0]
             signal = signals[:, -1, 2, 3].squeeze()
             pre_elm_size = np.count_nonzero(np.isfinite(labels))

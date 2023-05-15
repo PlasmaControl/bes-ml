@@ -144,10 +144,9 @@ class ELM_Datamodule(LightningDataModule):
         super().__init__()
         if self.data_file is None:
             self.data_file = sample_elm_data_file.as_posix()
-        self.save_hyperparameters(ignore=[
-            'prepare_data_per_node',
-            'max_predict_elms',
-        ])
+        self.save_hyperparameters(
+            ignore=['prepare_data_per_node', 'max_predict_elms']
+        )
 
         # datamodule state, to reproduce pre-processing
         self.state_items = [
