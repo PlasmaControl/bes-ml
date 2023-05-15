@@ -36,7 +36,6 @@ class BES_Trainer:
     log_freq: int = 100
     wandb_log: bool = False
     gradient_clip_value: int = None
-    skip_test_predict: bool = False
     float_precision: str|int = 16 if torch.cuda.is_available() else 32
 
     def __post_init__(self):
@@ -92,6 +91,15 @@ class BES_Trainer:
         else:
             wandb_logger = None
 
+        self.earlystopping_callback = EarlyStopping(
+            monitor=self.lightning_model.monitor_metric,
+            mode='min' if 'loss' in self.lightning_model.monitor_metric else 'max',
+            min_delta=self.early_stopping_min_delta,
+            patience=self.early_stopping_patience,
+            log_rank_zero_only=True,
+            verbose=True,
+        )
+
         print("Model Summary:")
         print(ModelSummary(self.lightning_model, max_depth=-1))
 
@@ -99,8 +107,24 @@ class BES_Trainer:
         self,
         restart_chpt_path: str = None,
         max_epochs: int = 2,
+        skip_test: bool = False,
+        skip_predict: bool = False,
     ):
         self.lightning_model.log_dir = self.datamodule.log_dir = self.trial_dir
+
+        # reset `best` metrics for early stopping and lr scheduler
+        if self.earlystopping_callback:
+            self.earlystopping_callback.best_score = self.earlystopping_callback.best_score * (
+                torch.inf if 'loss' in self.lightning_model.monitor_metric 
+                else -torch.inf
+            )
+            self.earlystopping_callback.wait_count = self.earlystopping_callback.wait_count * 0
+        if self.lightning_model.lr_scheduler:
+            self.lightning_model.lr_scheduler.best = self.lightning_model.lr_scheduler.best * (
+                torch.inf if 'loss' in self.lightning_model.monitor_metric 
+                else -torch.inf
+            )
+            self.lightning_model.lr_scheduler.num_bad_epochs = self.lightning_model.lr_scheduler.num_bad_epochs * 0
 
         # set callbacks
         callbacks = [
@@ -110,12 +134,7 @@ class BES_Trainer:
                 mode='min' if 'loss' in self.lightning_model.monitor_metric else 'max',
                 save_last=True,
             ),
-            EarlyStopping(
-                monitor=self.lightning_model.monitor_metric,
-                mode='min' if 'loss' in self.lightning_model.monitor_metric else 'max',
-                min_delta=self.early_stopping_min_delta,
-                patience=self.early_stopping_patience,
-            ),
+            self.earlystopping_callback,
         ]
 
         trainer = Trainer(
@@ -140,8 +159,10 @@ class BES_Trainer:
         self.best_model_path = trainer.checkpoint_callback.best_model_path
         self.last_model_path = trainer.checkpoint_callback.last_model_path
         
-        if self.skip_test_predict is False:
+        if skip_test is False:
             trainer.test(datamodule=self.datamodule, ckpt_path='best')
+
+        if skip_predict is False:
             trainer.predict(datamodule=self.datamodule, ckpt_path='best')
 
         print(f"Trial dir: {self.experiment_dir}")
@@ -177,6 +198,20 @@ if __name__=='__main__':
         # wandb_log=True,
     )
 
+    lightning_model.torch_model.frontends_active['time_to_elm_regression'] = False
+    lightning_model.torch_model.frontends_active['active_elm_classification'] = False
     trainer.run_all(
         max_epochs=2,
+        skip_predict=True,
+    )
+    lightning_model.torch_model.frontends_active['active_elm_classification'] = True
+    trainer.run_all(
+        max_epochs=2,
+        skip_predict=True,
+        restart_chpt_path=trainer.last_model_path,
+    )
+    lightning_model.torch_model.frontends_active['time_to_elm_regression'] = True
+    trainer.run_all(
+        max_epochs=2,
+        restart_chpt_path=trainer.last_model_path,
     )

@@ -61,6 +61,7 @@ class Lightning_Model(LightningModule):
     def __post_init__(self):
         super().__init__()
         self.torch_model = None
+        self.lr_scheduler = None
 
     def set_torch_model(self, torch_model: Torch_CNN_Model|torch.nn.Module):
         assert hasattr(torch_model, 'signal_window_size')
@@ -127,7 +128,7 @@ class Lightning_Model(LightningModule):
         results = self(signals)
         losses = []
         for key, is_active in self.torch_model.frontends_active.items():
-            if not is_active:
+            if is_active is False:
                 continue
             frontend_result = results[key]
             if 'regression' in key:
@@ -143,6 +144,8 @@ class Lightning_Model(LightningModule):
                 self.log("loss/classification_bce/val", self.classification_bce_loss)
                 self.classification_f1_score(frontend_result, class_labels)
                 self.log("score/classification_f1/val", self.classification_f1_score)
+            else:
+                raise ValueError
             losses.append(loss)
         loss = sum(losses)
         self.log("loss/sum/val", loss)
@@ -274,20 +277,22 @@ class Lightning_Model(LightningModule):
                 plt.close(fig)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(
+        self.optimizer = torch.optim.Adam(
             self.parameters(), 
             lr=self.lr,
             weight_decay=self.weight_decay,
         )
+        self.lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer=self.optimizer,
+            factor=0.5,
+            patience=self.lr_scheduler_patience,
+            threshold=self.lr_scheduler_threshold,
+            min_lr=5e-5,
+            mode='min' if 'loss' in self.monitor_metric else 'max',
+            verbose=True,
+        )
         return {
-            'optimizer': optimizer,
-            'lr_scheduler': torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer=optimizer,
-                factor=0.5,
-                patience=self.lr_scheduler_patience,
-                threshold=self.lr_scheduler_threshold,
-                min_lr=1e-5,
-                mode='min' if 'loss' in self.monitor_metric else 'max',
-            ),
+            'optimizer': self.optimizer,
+            'lr_scheduler': self.lr_scheduler,
             'monitor': self.monitor_metric,
         }
