@@ -2,6 +2,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import time
+from collections import namedtuple
 
 import numpy as np
 import matplotlib.axes
@@ -21,17 +22,11 @@ except:
 
 
 class BCEWithLogit(torchmetrics.Metric):
-    # Set to True if the metric is differentiable else set to False
     is_differentiable: bool = True
-
-    # Set to True if the metric reaches it optimal value when the metric is maximized.
-    # Set to False if it when the metric is minimized.
     higher_is_better: bool = False
-
-    # Set to True if the metric during 'update' requires access to the global metric
-    # state for its calculations. If not, setting this to False indicates that all
-    # batch states are independent and we will optimize the runtime of 'forward'
     full_state_update: bool = True
+    bce: torch.Tensor
+    counts: torch.Tensor
 
     def __init__(self):
         super().__init__()
@@ -50,6 +45,21 @@ class BCEWithLogit(torchmetrics.Metric):
         return self.bce / self.counts
 
 
+class SumLoss(torchmetrics.Metric):
+    is_differentiable: bool = True
+    higher_is_better: bool = False
+    full_state_update: bool = True
+
+    def __init__(self, classification_bce=True, regression_mse=True, reconstruction_mse=True):
+        super().__init__()
+        self.add_state("counts", default=torch.tensor(0), dist_reduce_fx="sum")
+        if classification_bce:
+            self.add_state("classification_bce", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        if regression_mse:
+            self.add_state("regression_mse", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        if reconstruction_mse:
+            self.add_state("reconstruction_mse", default=torch.tensor(0.0), dist_reduce_fx="sum")
+
 @dataclasses.dataclass(eq=False)
 class Lightning_Model(
     elm_torch_model.Torch_CNN_Mixin,
@@ -61,9 +71,11 @@ class Lightning_Model(
     weight_decay: float = 1e-6
     monitor_metric: str = 'loss/sum/val'
     log_dir: str = dataclasses.field(default='.', init=False)
-    autoencoder_reconstruction: bool = True
-    time_to_elm_regression: bool = True
-    active_elm_classification: bool = True
+    # the following must be listed in `_frontend_names`
+    reconstruction_decoder: bool = True
+    time_to_elm_mlp: bool = True
+    classifier_mlp: bool = True
+    _frontend_names = ['reconstruction_decoder', 'time_to_elm_mlp', 'classifier_mlp']
     
     def __post_init__(self):
         # super().__init__()
@@ -75,27 +87,24 @@ class Lightning_Model(
 
         # `frontends` for regression, classification, and self-supervised learning
         self.frontends = torch.nn.ModuleDict()
-        self.frontends_active: dict[str, bool] = {}
-        if self.time_to_elm_regression:
-            key = 'time_to_elm_regression'
-            self.frontends.update({key: self.make_mlp(mlp_in_features=cnn_features)})
-            self.frontends_active[key] = True
-        if self.autoencoder_reconstruction:
-            key = 'autoencoder_reconstruction'
-            self.frontends.update({key: self.make_cnn_decoder(input_data_shape=cnn_output_shape)})
-            self.frontends_active[key] = True
-        if self.active_elm_classification:
-            key = 'active_elm_classification'
-            self.frontends.update({key: self.make_mlp(mlp_in_features=cnn_features)})
-            self.frontends_active[key] = True
+        self.frontends_active = {}
+        for frontend_key in self._frontend_names:
+            if getattr(self, frontend_key) is True:
+                self.frontends_active[frontend_key] = True
+                if 'mlp' in frontend_key:
+                    self.frontends.update({frontend_key: self.make_mlp(mlp_in_features=cnn_features)})
+                elif 'decoder' in frontend_key:
+                    self.frontends.update({frontend_key: self.make_cnn_decoder(input_data_shape=cnn_output_shape)})
+                else:
+                    raise ValueError
             
         total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"Total parameters {total_parameters:,}")
         cnn_parameters = sum(p.numel() for p in self.cnn_encoder.parameters() if p.requires_grad)
         print(f"  CNN encoder parameters {cnn_parameters:,}")
 
-        for key, frontend in self.frontends.items():
-            n_parameters = sum(p.numel() for p in frontend.parameters() if p.requires_grad)
+        for key, frontend_key in self.frontends.items():
+            n_parameters = sum(p.numel() for p in frontend_key.parameters() if p.requires_grad)
             print(f"  Frontend `{key}` parameters: {n_parameters:,}")
 
         print(f'Initiating {self.__class__.__name__}')
@@ -118,6 +127,23 @@ class Lightning_Model(
         self.classification_bce_loss = BCEWithLogit()
         self.classification_f1_score = torchmetrics.F1Score(task='binary')
 
+        # self.sum_loss = None
+        # if self.frontends_active['time_to_elm_regression']:
+        #     self.sum_loss = (
+        #         self.regression_mse_loss if self.sum_loss is None 
+        #         else self.sum_loss + self.regression_mse_loss
+        #     )
+        # if self.frontends_active['autoencoder_reconstruction']:
+        #     self.sum_loss = (
+        #         self.reconstruction_mse_loss if self.sum_loss is None 
+        #         else self.sum_loss + self.reconstruction_mse_loss
+        #     )
+        # if self.frontends_active['active_elm_classification']:
+        #     self.sum_loss = (
+        #         self.classification_bce_loss if self.sum_loss is None 
+        #         else self.sum_loss + self.classification_bce_loss
+        #     )
+        
         self.initialize_layers()
 
     def forward(self, signals: torch.Tensor) -> dict[torch.Tensor]:
@@ -131,84 +157,93 @@ class Lightning_Model(
     def training_step(self, batch, batch_idx) -> torch.Tensor:
         signals, labels, class_labels = batch
         results = self(signals)
-        losses = []
-        for key, is_active in self.frontends_active.items():
-            if not is_active:
+        sum_loss = None
+        sum_metric = None
+        for frontend_key in self._frontend_names:
+            if self.frontends_active[frontend_key] is False:
                 continue
-            frontend_result = results[key]
-            if 'regression' in key:
+            frontend_result = results[frontend_key]
+            loss = None
+            if 'time_to_elm' in frontend_key:
                 loss = self.regression_mse_loss(frontend_result, labels)
                 self.log("loss/regression_mse/train", self.regression_mse_loss)
-                self.regression_r2_score(frontend_result, labels)
+                loss_compute = self.regression_mse_loss.compute()
+                self.regression_r2_score.update(frontend_result, labels)
                 self.log("score/regression_r2/train", self.regression_r2_score)
-            elif 'reconstruction' in key:
+            elif 'reconstruction' in frontend_key:
                 loss = self.reconstruction_mse_loss(frontend_result, signals)
                 self.log("loss/reconstruction_mse/train", self.reconstruction_mse_loss)
-            elif 'classification' in key:
+                loss_compute = self.reconstruction_mse_loss.compute()
+            elif 'classifier' in frontend_key:
                 loss = self.classification_bce_loss(frontend_result, class_labels)
                 self.log("loss/classification_bce/train", self.classification_bce_loss)
-                self.classification_f1_score(frontend_result, class_labels)
+                loss_compute = self.classification_bce_loss.compute()
+                self.classification_f1_score.update(frontend_result, class_labels)
                 self.log("score/classification_f1/train", self.classification_f1_score)
             else:
                 raise ValueError
-            losses.append(loss)
-        sum_losses = sum(losses)
-        self.log("loss/sum/train", sum_losses)
-        return sum_losses
+            sum_loss = loss if sum_loss is None else sum_loss + loss
+            sum_metric = loss_compute if sum_metric is None else sum_metric + loss_compute
+        self.log("loss/sum/train", sum_metric)
+        return sum_loss
 
     def validation_step(self, batch, batch_idx) -> None:
         signals, labels, class_labels = batch
         results = self(signals)
-        losses = []
-        for key, is_active in self.frontends_active.items():
-            if is_active is False:
+        sum_metric = None
+        for frontend_key in self._frontend_names:
+            if self.frontends_active[frontend_key] is False:
                 continue
-            frontend_result = results[key]
-            if 'regression' in key:
-                loss = self.regression_mse_loss(frontend_result, labels)
+            frontend_result = results[frontend_key]
+            if 'time_to_elm' in frontend_key:
+                self.regression_mse_loss.update(frontend_result, labels)
                 self.log("loss/regression_mse/val", self.regression_mse_loss)
-                self.regression_r2_score(frontend_result, labels)
+                loss_compute = self.regression_mse_loss.compute()
+                self.regression_r2_score.update(frontend_result, labels)
                 self.log("score/regression_r2/val", self.regression_r2_score)
-            elif 'reconstruction' in key:
-                loss = self.reconstruction_mse_loss(frontend_result, signals)
+            elif 'reconstruction' in frontend_key:
+                self.reconstruction_mse_loss.update(frontend_result, signals)
                 self.log("loss/reconstruction_mse/val", self.reconstruction_mse_loss)
-            elif 'classification' in key:
-                loss = self.classification_bce_loss(frontend_result, class_labels)
+                loss_compute = self.reconstruction_mse_loss.compute()
+            elif 'classifier' in frontend_key:
+                self.classification_bce_loss.update(frontend_result, class_labels)
                 self.log("loss/classification_bce/val", self.classification_bce_loss)
-                self.classification_f1_score(frontend_result, class_labels)
+                loss_compute = self.classification_bce_loss.compute()
+                self.classification_f1_score.update(frontend_result, class_labels)
                 self.log("score/classification_f1/val", self.classification_f1_score)
             else:
                 raise ValueError
-            losses.append(loss)
-        sum_losses = sum(losses)
-        self.log("loss/sum/val", sum_losses, sync_dist=True)
+            sum_metric = loss_compute if sum_metric is None else sum_metric + loss_compute
+        self.log("loss/sum/val", sum_metric)
 
     def test_step(self, batch, batch_idx) -> None:
         signals, labels, class_labels = batch
         results = self(signals)
-        losses = []
-        for key, is_active in self.frontends_active.items():
-            if not is_active:
+        sum_metric = None
+        for frontend_key in self._frontend_names:
+            if self.frontends_active[frontend_key] is False:
                 continue
-            frontend_result = results[key]
-            if 'regression' in key:
-                loss = self.regression_mse_loss(frontend_result, labels)
+            frontend_result = results[frontend_key]
+            if 'time_to_elm' in frontend_key:
+                self.regression_mse_loss.update(frontend_result, labels)
                 self.log("loss/regression_mse/test", self.regression_mse_loss)
-                self.regression_r2_score(frontend_result, labels)
+                loss_compute = self.regression_mse_loss.compute()
+                self.regression_r2_score.update(frontend_result, labels)
                 self.log("score/regression_r2/test", self.regression_r2_score)
-            elif 'reconstruction' in key:
-                loss = self.reconstruction_mse_loss(frontend_result, signals)
+            elif 'reconstruction' in frontend_key:
+                self.reconstruction_mse_loss.update(frontend_result, signals)
                 self.log("loss/reconstruction_mse/test", self.reconstruction_mse_loss)
-            elif 'classification' in key:
-                loss = self.classification_bce_loss(frontend_result, class_labels)
+                loss_compute = self.reconstruction_mse_loss.compute()
+            elif 'classifier' in frontend_key:
+                self.classification_bce_loss.update(frontend_result, class_labels)
                 self.log("loss/classification_bce/test", self.classification_bce_loss)
-                self.classification_f1_score(frontend_result, class_labels)
+                loss_compute = self.classification_bce_loss.compute()
+                self.classification_f1_score.update(frontend_result, class_labels)
                 self.log("score/classification_f1/test", self.classification_f1_score)
             else:
                 raise ValueError
-            losses.append(loss)
-        sum_losses = sum(losses)
-        self.log("loss/sum/test", sum_losses, sync_dist=True)
+            sum_metric = loss_compute if sum_metric is None else sum_metric + loss_compute
+        self.log("loss/sum/test", sum_metric)
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0) -> None:
         signals, labels, class_labels = batch
@@ -322,7 +357,7 @@ class Lightning_Model(
             factor=0.5,
             patience=self.lr_scheduler_patience,
             threshold=self.lr_scheduler_threshold,
-            min_lr=5e-5,
+            min_lr=2e-5,
             mode='min' if 'loss' in self.monitor_metric else 'max',
             verbose=True,
         )

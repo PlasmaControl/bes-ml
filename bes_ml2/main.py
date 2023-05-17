@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import dataclasses
 from datetime import datetime
+import shutil
 
 import torch
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
@@ -142,10 +143,15 @@ class BES_Trainer:
         if skip_predict is False:
             trainer.predict(datamodule=self.datamodule, ckpt_path='best')
 
-        self.best_model_path = Path(trainer.checkpoint_callback.best_model_path).absolute()
         self.last_model_path = Path(trainer.checkpoint_callback.last_model_path).absolute()
-        print(f"Best model path: {self.best_model_path}")
         print(f"Last model path: {self.last_model_path}")
+        best_model_path = Path(trainer.checkpoint_callback.best_model_path).absolute()
+        self.best_model_path = best_model_path.parent/'best.ckpt'
+        shutil.copyfile(
+            src=best_model_path,
+            dst=self.best_model_path,
+        )
+        print(f"Best model path: {self.best_model_path}")
 
 
 if __name__=='__main__':
@@ -168,17 +174,17 @@ if __name__=='__main__':
         )
         datamodule = elm_datamodule.ELM_Datamodule(
             signal_window_size=lightning_model.signal_window_size,
-            max_elms=5,
+            # max_elms=5,
             batch_size=128,
         )
 
     trainer = BES_Trainer(
         lightning_model=lightning_model,
         datamodule=datamodule,
-        # wandb_log=True,
+        wandb_log=True,
     )
 
     trainer.run_all(
-        max_epochs=2,
+        max_epochs=4,
         # skip_predict=True,
     )
