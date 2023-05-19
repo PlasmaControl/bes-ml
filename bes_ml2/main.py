@@ -181,10 +181,12 @@ if __name__=='__main__':
     trainer = BES_Trainer(
         lightning_model=lightning_model,
         datamodule=datamodule,
-        wandb_log=True,
+        # wandb_log=True,
     )
 
     trainer.run_all(
-        max_epochs=4,
+        max_epochs=2,
         # skip_predict=True,
+        skip_test=True,
+        skip_predict=True,
     )
