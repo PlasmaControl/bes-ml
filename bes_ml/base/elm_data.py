@@ -33,13 +33,12 @@ class ELM_Data(
     fraction_validation: float = 0.2  # fraction of dataset for validation
     fraction_test: float = 0.2  # fraction of dataset for testing
     num_workers: int = None  # number of subprocess workers for pytorch dataloader
-    pin_memory: bool = True  # data loader pinned memory
     seed: int = None  # RNG seed for deterministic, reproducible shuffling (ELMs, sample indices, etc.)
     label_type: np.int8 | np.float32 = dataclasses.field(default=None, init=False)
     test_data_file: str = 'test_data.pkl'
     standardize_signals: bool = True,  # if True, standardize signals based on training data mean~0, stdev~1
     standardize_fft: bool = True,  # if True, standardize FFTs based on training data log10(FFT^2) mean~0, stdev~1
-    clip_sigma: float = 8.0  # remove signal windows with abs(standardized_signals) > n_sigma
+    clip_signals: float = 8.0  # remove signal windows with abs(standardized_signals) > n_sigma
     data_partition_file: str = 'data_partition.yaml'  # data partition for training, valid., and testing
     max_elms: int = None
     bad_elm_indices: list = None  # iterable of ELM indices to skip when reading data
@@ -290,12 +289,12 @@ class ELM_Data(
             )
             self.logger.info(f"  Standardized signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
             # clip at +/- sigma
-            if self.clip_sigma:
-                self.logger.info(f"  -> Clipping signal windows beyond +/- {self.clip_sigma} sigma")
+            if self.clip_signals:
+                self.logger.info(f"  -> Clipping signal windows beyond +/- {self.clip_signals} sigma")
                 mask = []
                 for i in packaged_valid_t0_indices:
                     signal_window = packaged_signals[i: i + self.signal_window_size, :, :]
-                    mask.append((signal_window.min() >= -self.clip_sigma) and (signal_window.max() <= self.clip_sigma))
+                    mask.append((signal_window.min() >= -self.clip_signals) and (signal_window.max() <= self.clip_signals))
                 packaged_valid_t0_indices = packaged_valid_t0_indices[mask]
                 stats = self._get_statistics(
                     sample_indices=packaged_valid_t0_indices,
@@ -479,7 +478,7 @@ class ELM_Data(
             batch_size=self.batch_size,
             shuffle=(self.seed is None and self.train_sampler is None),
             num_workers=self.num_workers,
-            pin_memory=self.pin_memory,
+            pin_memory=torch.cuda.is_available(),
             drop_last=True,
             persistent_workers=(self.num_workers > 0),
         )
@@ -497,7 +496,7 @@ class ELM_Data(
                 batch_size=self.batch_size,
                 shuffle=False,
                 num_workers=self.num_workers,
-                pin_memory=self.pin_memory,
+                pin_memory=torch.cuda.is_available(),
                 drop_last=True,
                 persistent_workers=(self.num_workers > 0),
             )

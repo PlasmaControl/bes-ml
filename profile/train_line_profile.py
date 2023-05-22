@@ -2,7 +2,7 @@ from line_profiler import LineProfiler
 
 from bes_ml.elm_regression import Trainer
 from bes_ml.base.train_base import Trainer_Base
-from bes_ml.base.models import Multi_Features_Model, Dense_Features, _Base_Features
+from bes_ml.base.models import Multi_Features_Model, Dense_Features, Base_Features
 from bes_ml.base.elm_data import ELM_Dataset
 
 

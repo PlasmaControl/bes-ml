@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 import typing
 import dataclasses
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 import psutil, os, sys
 
@@ -159,6 +159,8 @@ class Trainer_Base(Trainer_Base_Dataclass):
     def _ddp_barrier(self):
         if self.is_ddp:
             torch.distributed.barrier()
+            # async_handle = torch.distributed.barrier(async_op=True)
+            # async_handle.wait(timeout=timedelta(seconds=30))
 
     def _create_logger(self):
         """
@@ -258,7 +260,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
             self._model_alias = self.model
 
     def _make_optimizer_scheduler(self) -> None:
-        self._ddp_barrier()
+        # self._ddp_barrier()
         assert self.optimizer_type in ['adam', 'sgd']
         if self.optimizer_type == 'adam':
             self.optimizer = torch.optim.Adam(
