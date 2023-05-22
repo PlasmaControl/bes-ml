@@ -166,7 +166,7 @@ if __name__=='__main__':
     else:
         # initiate new data and model
         lightning_model = elm_lightning_model.Lightning_Model(
-            signal_window_size=256,
+            signal_window_size=64,
             cnn_nlayers=6,
             cnn_num_kernels=4,
             cnn_kernel_time_size=2,
@@ -175,17 +175,19 @@ if __name__=='__main__':
         datamodule = elm_datamodule.ELM_Datamodule(
             signal_window_size=lightning_model.signal_window_size,
             # max_elms=5,
-            batch_size=128,
+            batch_size=16,
+            # fraction_test=0,
+            # fraction_validation=0.2,
         )
 
     trainer = BES_Trainer(
         lightning_model=lightning_model,
         datamodule=datamodule,
-        # wandb_log=True,
+        wandb_log=True,
     )
 
     trainer.run_all(
-        max_epochs=2,
+        max_epochs=6,
         # skip_test=True,
         skip_predict=True,
     )
