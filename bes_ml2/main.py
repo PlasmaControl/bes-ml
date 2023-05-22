@@ -186,7 +186,6 @@ if __name__=='__main__':
 
     trainer.run_all(
         max_epochs=2,
-        # skip_predict=True,
-        skip_test=True,
+        # skip_test=True,
         skip_predict=True,
     )

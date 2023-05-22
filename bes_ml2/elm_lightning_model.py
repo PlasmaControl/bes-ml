@@ -78,7 +78,6 @@ class Lightning_Model(
     _frontend_names = ['reconstruction_decoder', 'classifier_mlp', 'time_to_elm_mlp']
     
     def __post_init__(self):
-        # super().__init__()
         super().__post_init__()
         self.save_hyperparameters()
 
@@ -98,6 +97,7 @@ class Lightning_Model(
         # `frontends` for regression, classification, and self-supervised learning
         self.frontends = torch.nn.ModuleDict()
         self.frontends_active = {}
+        # self.metrics = []
         for frontend_key in self._frontend_names:
             if getattr(self, frontend_key) is True:
                 self.frontends_active[frontend_key] = True
@@ -106,10 +106,14 @@ class Lightning_Model(
                     self.frontends.update({frontend_key: new_module})
                     if 'time_to_elm' in frontend_key:
                         setattr(self, f"{frontend_key}_mse_loss", torchmetrics.MeanSquaredError())
+                        # self.metrics.append(getattr(self, f"{frontend_key}_mse_loss"))
                         setattr(self, f"{frontend_key}_r2_score", torchmetrics.R2Score())
+                        # self.metrics.append(getattr(self, f"{frontend_key}_r2_score"))
                     elif 'classifier' in frontend_key:
                         setattr(self, f"{frontend_key}_bce_loss", BCEWithLogit())
+                        # self.metrics.append(getattr(self, f"{frontend_key}_bce_loss"))
                         setattr(self, f"{frontend_key}_f1_score", torchmetrics.F1Score(task='binary'))
+                        # self.metrics.append(getattr(self, f"{frontend_key}_f1_score"))
                     else:
                         raise KeyError
                 elif 'decoder' in frontend_key:
@@ -117,17 +121,12 @@ class Lightning_Model(
                     self.frontends.update({frontend_key: new_module})
                     if 'reconstruction' in frontend_key:
                         setattr(self, f"{frontend_key}_mse_loss", torchmetrics.MeanSquaredError())
+                        # self.metrics.append(getattr(self, f"{frontend_key}_mse_loss"))
                     else:
                         raise KeyError
                 else:
                     raise KeyError
             
-        # self.regression_mse_loss = torchmetrics.MeanSquaredError()
-        # self.regression_r2_score = torchmetrics.R2Score()
-        # self.reconstruction_mse_loss = torchmetrics.MeanSquaredError()
-        # self.classification_bce_loss = BCEWithLogit()
-        # self.classification_f1_score = torchmetrics.F1Score(task='binary')
-
         total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"Total parameters {total_parameters:,}")
         cnn_parameters = sum(p.numel() for p in self.cnn_encoder.parameters() if p.requires_grad)
@@ -152,163 +151,122 @@ class Lightning_Model(
                 results[key] = frontend(features)
         return results
 
-    def training_step(self, batch, batch_idx) -> torch.Tensor:
+    def update_step(self, batch, batch_idx) -> torch.Tensor:
         signals, labels, class_labels = batch
         results = self(signals)
-        sum_loss_metric = None
-        sum_loss_value = None
+        sum_loss = None
         for frontend_key, frontend_is_active in self.frontends_active.items():
             if frontend_is_active is False:
                 continue
             frontend_result = results[frontend_key]
-            loss_metric = None
-            loss_value = None
             if 'time_to_elm' in frontend_key:
-                for metric_suffix in ['mse_loss', 'r2_score']:
-                    metric_name = f"{frontend_key}_{metric_suffix}"
-                    metric: torchmetrics.Metric = getattr(self, metric_name) 
-                    metric_value = metric(frontend_result, labels)
-                    self.log(f"{metric_name}/train", metric)
-                    if 'loss' in metric_name:
-                        loss_metric = metric
-                        loss_value = metric_value
+                metric_suffices = ['mse_loss', 'r2_score']
             elif 'reconstruction' in frontend_key:
-                metric_name = f"{frontend_key}_mse_loss"
-                metric: torchmetrics.Metric = getattr(self, metric_name) 
-                metric_value = metric(frontend_result, signals)
-                self.log(f"{metric_name}/train", metric)
+                metric_suffices = ['mse_loss']
+            elif 'classifier' in frontend_key:
+                metric_suffices = ['bce_loss', 'f1_score']
+            else:
+                raise ValueError
+            for metric_suffix in metric_suffices:
+                metric_name = f"{frontend_key}_{metric_suffix}"
+                metric: torchmetrics.Metric = getattr(self, metric_name)
+                if 'time_to_elm' in metric_name:
+                    target = labels
+                elif 'reconstruction' in metric_name:
+                    target = signals
+                elif 'classifier' in metric_name:
+                    target = class_labels
+                else:
+                    raise ValueError
+                metric_value = metric(frontend_result, target)
                 if 'loss' in metric_name:
-                    loss_metric = metric
-                    loss_value = metric_value
-            elif 'classifier' in frontend_key:
-                for metric_suffix in ['bce_loss', 'f1_score']:
-                    metric_name = f"{frontend_key}_{metric_suffix}"
-                    metric: torchmetrics.Metric = getattr(self, metric_name) 
-                    metric_value = metric(frontend_result, class_labels)
-                    self.log(f"{metric_name}/train", metric)
-                    if 'loss' in metric_name:
-                        loss_metric = metric
-                        loss_value = metric_value
-            else:
-                raise ValueError
-            if 'loss' in metric_name:
-                sum_loss_metric = (
-                    loss_metric if sum_loss_metric is None
-                    else sum_loss_metric + loss_metric
-                )
-                sum_loss_value = (
-                    loss_value if sum_loss_value is None
-                    else sum_loss_value + loss_value
-                )
-        self.log("sum_loss/train", sum_loss_metric)
-        return sum_loss_value
-
-    def validation_step(self, batch, batch_idx) -> None:
-        signals, labels, class_labels = batch
-        results = self(signals)
-        for frontend_key in self._frontend_names:
-            if self.frontends_active[frontend_key] is False:
+                    sum_loss = (
+                        metric_value if sum_loss is None
+                        else sum_loss + metric_value
+                    )
+        return sum_loss
+    
+    def compute_log_reset(self, stage: str):
+        sum_loss = None
+        for frontend_key, frontend_is_active in self.frontends_active.items():
+            if frontend_is_active is False:
                 continue
-            frontend_result = results[frontend_key]
             if 'time_to_elm' in frontend_key:
-                for metric_suffix in ['mse_loss', 'r2_score']:
-                    metric_name = f"{frontend_key}_{metric_suffix}"
-                    metric: torchmetrics.Metric = getattr(self, metric_name) 
-                    metric.update(frontend_result, labels)
+                metric_suffices = ['mse_loss', 'r2_score']
             elif 'reconstruction' in frontend_key:
-                metric_name = f"{frontend_key}_mse_loss"
-                metric: torchmetrics.Metric = getattr(self, metric_name) 
-                metric.update(frontend_result, signals)
+                metric_suffices = ['mse_loss']
             elif 'classifier' in frontend_key:
-                for metric_suffix in ['bce_loss', 'f1_score']:
-                    metric_name = f"{frontend_key}_{metric_suffix}"
-                    metric: torchmetrics.Metric = getattr(self, metric_name) 
-                    metric.update(frontend_result, class_labels)
+                metric_suffices = ['bce_loss', 'f1_score']
             else:
                 raise ValueError
+            for metric_suffix in metric_suffices:
+                metric_name = f"{frontend_key}_{metric_suffix}"
+                metric: torchmetrics.Metric = getattr(self, metric_name)
+                metric_value = metric.compute()
+                self.log(f"{metric_name}/{stage}", metric_value)
+                if 'loss' in metric_name:
+                    sum_loss = (
+                        metric_value if sum_loss is None
+                        else sum_loss + metric_value
+                    )
+                metric.reset()
+        self.log(f"sum_loss/{stage}", sum_loss)
+
+    def on_fit_start(self) -> None:
+        self.t_fit_start = time.time()
+
+    def on_train_epoch_start(self):
+        self.t_train_epoch_start = time.time()
+        print(f"Epoch {self.current_epoch} start")
+
+    def training_step(self, batch, batch_idx) -> torch.Tensor:
+        return self.update_step(batch, batch_idx)
+
+    def on_train_batch_end(self, *args, **kwargs):
+        self.compute_log_reset(stage='train')
+
+    def on_train_epoch_end(self) -> None:
+        if self.global_rank == 0:
+            for name, param in self.named_parameters():
+                if 'weight' in name:
+                    values = param.data.detach()
+                    mean = torch.mean(values).item()
+                    std = torch.std(values).item()
+                    z_scores = (values-mean)/std
+                    skew = torch.mean(z_scores**3).item()
+                    kurt = torch.mean(z_scores**4).item()
+                    self.log(f"param_mean/{name}", mean, sync_dist=True)
+                    self.log(f"param_std/{name}", std, sync_dist=True)
+                    self.log(f"param_skew/{name}", skew, sync_dist=True)
+                    self.log(f"param_kurt/{name}", kurt, sync_dist=True)
+        print(f"Epoch {self.current_epoch} elapsed train time: {(time.time()-self.t_train_epoch_start)/60:0.1f} min")
 
     def on_validation_epoch_start(self) -> None:
         self.t_val_epoch_start = time.time()
 
+    def validation_step(self, batch, batch_idx) -> None:
+        self.update_step(batch, batch_idx)
+
     def on_validation_epoch_end(self) -> None:
-        sum_loss_value = None
-        for frontend_key, frontend_is_active in self.frontends_active.items():
-            if frontend_is_active is False:
-                continue
-            loss_value = None
-            if 'time_to_elm' in frontend_key:
-                for metric_suffix in ['mse_loss', 'r2_score']:
-                    metric_name = f"{frontend_key}_{metric_suffix}"
-                    metric: torchmetrics.Metric = getattr(self, metric_name) 
-                    metric_value = metric.compute()
-                    self.log(f"{metric_name}/val", metric, on_epoch=True, sync_dist=True)
-                    if 'loss' in metric_name:
-                        # loss_metric = metric
-                        loss_value = metric_value
-            elif 'reconstruction' in frontend_key:
-                metric_name = f"{frontend_key}_mse_loss"
-                metric: torchmetrics.Metric = getattr(self, metric_name) 
-                metric_value = metric.compute()
-                self.log(f"{metric_name}/val", metric, on_epoch=True, sync_dist=True)
-                if 'loss' in metric_name:
-                    # loss_metric = metric
-                    loss_value = metric_value
-            elif 'classifier' in frontend_key:
-                for metric_suffix in ['bce_loss', 'f1_score']:
-                    metric_name = f"{frontend_key}_{metric_suffix}"
-                    metric: torchmetrics.Metric = getattr(self, metric_name) 
-                    metric_value = metric.compute()
-                    self.log(f"{metric_name}/val", metric, on_epoch=True, sync_dist=True)
-                    if 'loss' in metric_name:
-                        # loss_metric = metric
-                        loss_value = metric_value
-            else:
-                raise ValueError
-            if 'loss' in metric_name:
-                # sum_loss_metric = (
-                #     loss_metric if sum_loss_metric is None
-                #     else sum_loss_metric + loss_metric
-                # )
-                sum_loss_value = (
-                    loss_value if sum_loss_value is None
-                    else sum_loss_value + loss_value
-                )
-        self.log("sum_loss/val", sum_loss_value, on_epoch=True, sync_dist=True)
+        self.compute_log_reset(stage='val')
         print(f"Epoch {self.current_epoch} elapsed valid. time: {(time.time()-self.t_val_epoch_start)/60:0.1f} min")
-        # self.log("loss/regression_mse/val", self.regression_mse_loss.compute())
-        # self.log("score/regression_r2/val", self.regression_r2_score.compute())
-        # self.log("loss/reconstruction_mse/val", self.reconstruction_mse_loss.compute())
-        # self.log("loss/classification_bce/val", self.classification_bce_loss.compute())
-        # self.log("score/classification_f1/val", self.classification_f1_score.compute())
-        # sum_metric = None
-        # for frontend_key, is_active in self.frontends_active.items():
-        #     if is_active is False:
-        #         continue
-        # self.log("loss/sum/val", sum_metric)
+
+    def on_fit_end(self) -> None:
+        print(f"Fit elapsed time {(time.time()-self.t_fit_start)/60:0.1f} min")
+
+    def on_test_start(self) -> None:
+        self.t_test_start = time.time()
 
     def test_step(self, batch, batch_idx) -> None:
-        signals, labels, class_labels = batch
-        results = self(signals)
-        for frontend_key in self._frontend_names:
-            if self.frontends_active[frontend_key] is False:
-                continue
-            frontend_result = results[frontend_key]
-            if 'time_to_elm' in frontend_key:
-                for metric_suffix in ['mse_loss', 'r2_score']:
-                    metric_name = f"{frontend_key}_{metric_suffix}"
-                    metric: torchmetrics.Metric = getattr(self, metric_name) 
-                    metric.update(frontend_result, labels)
-            elif 'reconstruction' in frontend_key:
-                metric_name = f"{frontend_key}_mse_loss"
-                metric: torchmetrics.Metric = getattr(self, metric_name) 
-                metric.update(frontend_result, signals)
-            elif 'classifier' in frontend_key:
-                for metric_suffix in ['bce_loss', 'f1_score']:
-                    metric_name = f"{frontend_key}_{metric_suffix}"
-                    metric: torchmetrics.Metric = getattr(self, metric_name) 
-                    metric.update(frontend_result, class_labels)
-            else:
-                raise ValueError
+        self.update_step(batch, batch_idx)
+
+    def on_test_epoch_end(self) -> None:
+        self.compute_log_reset(stage='test')
+        print(f"Test elapsed time {(time.time()-self.t_test_start)/60:0.1f} min")
+
+    def on_predict_start(self) -> None:
+        self.predict_outputs: list[list] = []
+        self.t_predict_start = time.time()
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0) -> None:
         signals, labels, class_labels = batch
@@ -324,81 +282,6 @@ class Lightning_Model(
         outputs.update(results)
         self.predict_outputs[-1].append(outputs)
     
-    def on_test_start(self) -> None:
-        self.t_test_start = time.time()
-
-    def on_test_end(self) -> None:
-        sum_loss = None
-        for frontend_key, frontend_is_active in self.frontends_active.items():
-            if frontend_is_active is False:
-                continue
-            if 'time_to_elm' in frontend_key:
-                for metric_suffix in ['mse_loss', 'r2_score']:
-                    metric_name = f"{frontend_key}_{metric_suffix}"
-                    metric: torchmetrics.Metric = getattr(self, metric_name) 
-                    self.log(f"{metric_name}/test", metric.compute())
-                    if 'loss' in metric_name:
-                        if sum_loss is None:
-                            sum_loss = metric.compute()
-                        else:
-                            sum_loss += metric.compute()
-            elif 'reconstruction' in frontend_key:
-                metric_name = f"{frontend_key}_mse_loss"
-                metric: torchmetrics.Metric = getattr(self, metric_name) 
-                self.log(f"{metric_name}/test", metric.compute())
-                if sum_loss is None:
-                    sum_loss = metric.compute()
-                else:
-                    sum_loss += metric.compute()
-            elif 'classifier' in frontend_key:
-                for metric_suffix in ['bce_loss', 'f1_score']:
-                    metric_name = f"{frontend_key}_{metric_suffix}"
-                    metric: torchmetrics.Metric = getattr(self, metric_name) 
-                    self.log(f"{metric_name}/test", metric.compute())
-                    if 'loss' in metric_name:
-                        if sum_loss is None:
-                            sum_loss = metric.compute()
-                        else:
-                            sum_loss += metric.compute()
-            else:
-                raise ValueError
-        self.log("sum_loss/val", sum_loss)
-        print(f"Test elapsed time {(time.time()-self.t_test_start)/60:0.1f} min")
-
-    def on_fit_start(self) -> None:
-        self.t_fit_start = time.time()
-
-    def on_fit_end(self) -> None:
-        print(f"Fit elapsed time {(time.time()-self.t_fit_start)/60:0.1f} min")
-
-    def on_train_epoch_start(self):
-        self.t_train_epoch_start = time.time()
-        if self.global_rank != 0:
-            return
-        print(f"Epoch {self.current_epoch} start")
-        for name, param in self.named_parameters():
-            if 'weight' in name:
-                values = param.data.detach()
-                mean = torch.mean(values).item()
-                std = torch.std(values).item()
-                z_scores = (values-mean)/std
-                skew = torch.mean(z_scores**3).item()
-                kurt = torch.mean(z_scores**4).item()
-                self.log(f"param_mean/{name}", mean, rank_zero_only=True, sync_dist=True)
-                self.log(f"param_std/{name}", std, rank_zero_only=True, sync_dist=True)
-                self.log(f"param_skew/{name}", skew, rank_zero_only=True, sync_dist=True)
-                self.log(f"param_kurt/{name}", kurt, rank_zero_only=True, sync_dist=True)
-
-    def on_train_epoch_end(self) -> None:
-        print(f"Epoch {self.current_epoch} elapsed train time: {(time.time()-self.t_train_epoch_start)/60:0.1f} min")
-
-    def on_predict_start(self) -> None:
-        self.predict_outputs: list[list] = []
-        self.t_predict_start = time.time()
-
-    def on_predict_end(self) -> None:
-        print(f"Predict elapsed time {(time.time()-self.t_predict_start)/60:0.1f} min")
-
     def on_predict_epoch_end(self) -> None:
         if self.global_rank != 0 or 'time_to_elm_regression' not in self.predict_outputs[0][0]:
             return
@@ -439,6 +322,9 @@ class Lightning_Model(
                         logger.log_image(key='inference', images=[filepath+'.png'])
                 i_page += 1
                 plt.close(fig)
+
+    def on_predict_end(self) -> None:
+        print(f"Predict elapsed time {(time.time()-self.t_predict_start)/60:0.1f} min")
 
     def configure_optimizers(self):
         self.optimizer = torch.optim.Adam(
