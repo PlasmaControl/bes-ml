@@ -7,11 +7,14 @@ import sys
 from typing import Iterable
 import inspect
 import dataclasses
+import time
 
 import numpy as np
+import scipy.signal
 import torch
 import torch.nn as nn
 import torchinfo
+import torchaudio
 import pywt
 from pytorch_wavelets.dwt.transform1d import DWT1DForward
 
@@ -22,7 +25,7 @@ except ImportError:
 
 
 @dataclasses.dataclass(eq=False)
-class _Base_Features_Dataclass:
+class Base_Features_Dataclass:
     signal_window_size: int = 64  # power of 2; ~16-512
     time_slice_interval: int = 1  # power of 2; time domain slice interval (i.e. time[::interval])
     spatial_pool_size: int = 1  # power of 2; spatial pooling size
@@ -36,7 +39,7 @@ class _Base_Features_Dataclass:
 
 
 @dataclasses.dataclass(eq=False)
-class _Base_Features(nn.Module, _Base_Features_Dataclass):
+class Base_Features(nn.Module, Base_Features_Dataclass):
 
     def __post_init__(self):
         super().__init__()  # nn.Module.__init__()
@@ -103,12 +106,12 @@ class _Base_Features(nn.Module, _Base_Features_Dataclass):
 
 
 @dataclasses.dataclass(eq=False)
-class _Dense_Features_Dataclass(_Base_Features_Dataclass):
+class Dense_Features_Dataclass(Base_Features_Dataclass):
     dense_num_kernels: int = 0
 
 
 @dataclasses.dataclass(eq=False)
-class Dense_Features(_Dense_Features_Dataclass, _Base_Features):
+class Dense_Features(Dense_Features_Dataclass, Base_Features):
 
     def __post_init__(self):
         super().__post_init__()
@@ -124,14 +127,19 @@ class Dense_Features(_Dense_Features_Dataclass, _Base_Features):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.debug:
+            assert torch.all(torch.isfinite(self.conv.bias))
+            assert torch.all(torch.isfinite(self.conv.weight))
         x = self._time_interval_and_pooling(x)
         x = self.conv(x)
         x = self._flatten_activation_dropout(x)
+        if self.debug:
+            assert torch.all(torch.isfinite(x))
         return x
 
 
 @dataclasses.dataclass(eq=False)
-class _CNN_Features_Dataclass(_Base_Features_Dataclass):
+class CNN_Features_Dataclass(Base_Features_Dataclass):
     cnn_layer1_num_kernels: int = 0
     cnn_layer1_kernel_time_size: int = 5  # must be odd
     cnn_layer1_kernel_spatial_size: int = 3
@@ -141,14 +149,49 @@ class _CNN_Features_Dataclass(_Base_Features_Dataclass):
     cnn_layer2_kernel_time_size: int = 5  # must be odd
     cnn_layer2_kernel_spatial_size: int = 3
     cnn_layer2_maxpool_time_size: int = 4  # must be power of 2
-    cnn_layer2_maxpool_spatial_size: int = 2  # must be power of 2
+    cnn_layer2_maxpool_spatial_size: int = 1  # must be power of 2
+    # FIR filter
+    cnn_fir_taps: int = None  # must be odd
+    cnn_fir_cutoffs: Iterable = ((0.06, 0.16),)  # in units of f_nyquist; must be shape (*, 2)
+    cnn_fir_width: float = 0.02  # in units of f_nyquist
+    cnn_fir_include_raw: bool = True  # add raw signal to FIR output
 
 
 @dataclasses.dataclass(eq=False)
-class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
+class CNN_Features(CNN_Features_Dataclass, Base_Features):
 
     def __post_init__(self):
         super().__post_init__()
+
+        if self.cnn_fir_taps:
+            assert self.cnn_fir_taps % 2 == 1, "FIR taps must be odd int"
+            self.cnn_fir_cutoffs = np.array(self.cnn_fir_cutoffs)
+            assert self.cnn_fir_cutoffs.shape[1] == 2, "FIR cutoffs must be shape (*,2)"
+            assert np.all(self.cnn_fir_cutoffs<1), "FIR cutoffs must be < f_nyquist"
+            self.n_bands = self.cnn_fir_cutoffs.shape[0]
+            self.b_coeffs = torch.nn.Parameter(
+                torch.tensor(
+                    np.array([
+                        scipy.signal.firwin(
+                            numtaps=self.cnn_fir_taps,
+                            cutoff=self.cnn_fir_cutoffs[i_band,:],
+                            pass_zero=False,
+                            width=self.cnn_fir_width,
+                        ) for i_band in np.arange(self.n_bands)
+                    ]),
+                    dtype=torch.float32,
+                ),
+                requires_grad=False,
+            )
+            self.a_coeffs = torch.nn.Parameter(torch.zeros_like(self.b_coeffs), requires_grad=False)
+            self.a_coeffs[:,0] = 1
+            self.in_channels = self.n_bands
+            if self.cnn_fir_include_raw:
+                self.in_channels += 1
+        else:
+            self.a_coeffs = None
+            self.b_coeffs = None
+            self.in_channels = 1
 
         assert (
             np.log2(self.cnn_layer1_maxpool_spatial_size).is_integer() and
@@ -169,13 +212,17 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
         self.logger.info("CNN transformation")
         data_shape = [1] + self._input_size_after_timeslice_pooling
         self.logger.info(f"  Input after pre-pooling, pre-slicing: {data_shape}")
+        data_shape[0] = self.in_channels
+        self.logger.info(f"  Input with FIR and/or raw: {data_shape}")
 
         def test_bad_shape(shape):
-            assert np.all(np.array(shape) >= 1), f"Bad shape: {shape}"
+            if np.all(np.array(shape) >= 1) is False:
+                self.logger.info(f"Bad shape: {shape}")
+                assert False, f"Bad shape: {shape}"
 
         # Conv #1
         self.layer1_conv = nn.Conv3d(
-            in_channels=1,
+            in_channels=self.in_channels,
             out_channels=self.cnn_layer1_num_kernels,
             kernel_size=(
                 self.cnn_layer1_kernel_time_size,
@@ -184,6 +231,8 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
             ),
             padding=((self.cnn_layer1_kernel_time_size-1)//2, 0, 0),  # pad time dimension
         )
+        if self.debug:
+            self.logger.info(f"  Conv1 kernel numel {self.layer1_conv.weight.numel()} size {self.layer1_conv.weight.shape}")
         data_shape = [
             self.cnn_layer1_num_kernels,
             data_shape[1],  # time dim unchanged due to padding
@@ -225,6 +274,8 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
             ),
             padding=((self.cnn_layer2_kernel_time_size-1)//2, 0, 0),
         )
+        if self.debug:
+            self.logger.info(f"  Conv2 kernel numel {self.layer2_conv.weight.numel()} size {self.layer2_conv.weight.shape}")
         data_shape = [
             self.cnn_layer2_num_kernels,
             data_shape[1],
@@ -259,6 +310,23 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self._time_interval_and_pooling(x)
+        if self.cnn_fir_taps:
+            # apply FIR filters
+            x_filtered = torchaudio.functional.lfilter(
+                waveform=x.movedim((-4,-3), (-2,-1)),
+                a_coeffs=self.a_coeffs,
+                b_coeffs=self.b_coeffs,
+                clamp=False,
+                batching=False,
+            ).squeeze(dim=-3).movedim((-2,-1), (-4,-3))
+            if self.debug:
+                assert x_filtered.shape[-4] == self.n_bands
+                assert np.array_equal(x.shape[-3:], x_filtered.shape[-3:]), "FIR filter malfunctioned"
+            if self.cnn_fir_include_raw:
+                x_filtered = torch.concat((x_filtered, x), dim=-4)
+                if self.debug:
+                    assert x_filtered.shape[-4] == self.n_bands + 1
+            x = x_filtered
         x = self.activation(self.dropout(self.layer1_conv(x)))
         x = self.layer1_maxpool(x)
         x = self.activation(self.dropout(self.layer2_conv(x)))
@@ -269,7 +337,64 @@ class CNN_Features(_CNN_Features_Dataclass, _Base_Features):
 
 
 @dataclasses.dataclass(eq=False)
-class _FFT_Features_Dataclass(_Base_Features_Dataclass):
+class FIR_Features_Dataclass(Base_Features_Dataclass):
+    fir_num_kernels: int = 0
+    fir_taps: int = 51  # must be odd
+    fir_cutoffs: Iterable = ((0.06, 0.16),)  # in units of f_nyquist; must be shape (*, 2)
+    fir_width: float = 0.02  # in units of f_nyquist
+    fir_layer1_num_kernels: int = 0
+    fir_layer1_kernel_time_size: int = 5  # must be odd
+    fir_layer1_kernel_spatial_size: int = 3
+    fir_layer1_maxpool_time_size: int = 4  # must be power of 2
+    fir_layer1_maxpool_spatial_size: int = 1  # must be power of 2
+    fir_layer2_num_kernels: int = 0
+    fir_layer2_kernel_time_size: int = 5  # must be odd
+    fir_layer2_kernel_spatial_size: int = 3
+    fir_layer2_maxpool_time_size: int = 4  # must be power of 2
+    fir_layer2_maxpool_spatial_size: int = 2  # must be power of 2
+
+
+@dataclasses.dataclass(eq=False)
+class FIR_Features(FIR_Features_Dataclass, Base_Features):
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        assert self.fir_taps % 2 == 1, "FIR taps must be odd int"
+        self.fir_cutoffs = np.array(self.fir_cutoffs)
+        assert self.fir_cutoffs.shape[1] == 2, "FIR cutoffs must be shape (*,2)"
+        assert np.all(self.fir_cutoffs<1), "FIR cutoffs must be < f_nyquist"
+        self.n_bands = self.fir_cutoffs.shape[0]
+        self.b_coeffs = torch.tensor([
+            scipy.signal.firwin(
+                numtaps=self.fir_taps,
+                cutoff=self.fir_cutoffs[i_band,:],
+                pass_zero=False,
+                width=self.fir_width,
+            ) for i_band in np.arange(self.n_bands)
+        ], dtype=torch.float32)
+        self.a_coeffs = torch.zeros_like(self.b_coeffs)
+        self.a_coeffs[:,0] = 1
+
+    def forward(self, x):
+        x = self._time_interval_and_pooling(x)  # shape [ <batch>, 1, <time>, <space>, <space> ]
+        # apply FIR filters
+        x_filtered = torchaudio.functional.lfilter(
+            waveform=x.movedim((-4,-3), (-2,-1)),
+            a_coeffs=self.a_coeffs,
+            b_coeffs=self.b_coeffs,
+            clamp=False,
+            batching=False,
+        ).squeeze().movedim((-2,-1), (-4,-3))
+        if self.debug:
+            assert x_filtered.shape[-4] == self.n_bands
+            assert np.array_equal(x.shape[-3:], x_filtered.shape[-3:]), "FIR filter malfunctioned"
+            assert torch.all(torch.isfinite(x))
+        return torch.zeros(x.shape[0], self.fir_num_kernels)
+
+
+@dataclasses.dataclass(eq=False)
+class FFT_Features_Dataclass(Base_Features_Dataclass):
     fft_num_kernels: int = 0
     fft_nbins: int = 2
     fft_subwindows: int = 1
@@ -283,7 +408,7 @@ class _FFT_Features_Dataclass(_Base_Features_Dataclass):
 
 
 @dataclasses.dataclass(eq=False)
-class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
+class FFT_Features(FFT_Features_Dataclass, Base_Features):
 
     def __post_init__(self):
         super().__post_init__()
@@ -311,6 +436,11 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
         self.reset_histogram()
         self.fft_calc_histogram = False
 
+        def test_bad_shape(shape):
+            if np.all(np.array(shape) >= 1) is False:
+                self.logger.info(f"Bad shape: {shape}")
+                assert False, f"Bad shape: {shape}"
+
         self.logger.info("FFT transformation")
 
         # data_shape = tuple([1]+list(self._input_size_after_timeslice_pooling))
@@ -328,6 +458,7 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
             data_shape[5],
         ]
         self.logger.info(f"  After bin-averaged FFT: {data_shape}")
+        test_bad_shape(data_shape)
 
         self.conv = nn.Conv3d(
             in_channels=self.fft_subwindows,
@@ -348,6 +479,7 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
             data_shape[5] - (self.fft_kernel_spatial_size-1),
         ]
         self.logger.info(f"  After conv: {data_shape}")
+        test_bad_shape(data_shape)
 
         # maxpool
         self.fft_maxpool = nn.MaxPool3d(
@@ -366,6 +498,7 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
             data_shape[5] // self.fft_maxpool_spatial_size,
         ]
         self.logger.info(f"  After maxpool: {data_shape}")
+        test_bad_shape(data_shape)
 
         self.features = np.prod(data_shape, dtype=int)
         self.logger.info(f"  Total FFT features {self.features}")
@@ -431,13 +564,13 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
 
 
 @dataclasses.dataclass(eq=False)
-class _DCT_Features_Dataclass(_Base_Features_Dataclass):
+class DCT_Features_Dataclass(Base_Features_Dataclass):
     dct_num_kernels: int = 0
     dct_nbins: int = 2
 
 
 @dataclasses.dataclass(eq=False)
-class DCT_Features(_DCT_Features_Dataclass, _Base_Features):
+class DCT_Features(DCT_Features_Dataclass, Base_Features):
 
     def __post_init__(self):
         super().__post_init__()
@@ -498,14 +631,14 @@ class DCT_Features(_DCT_Features_Dataclass, _Base_Features):
 
 
 @dataclasses.dataclass(eq=False)
-class _DWT_Features_Dataclass(_Base_Features_Dataclass):
+class DWT_Features_Dataclass(Base_Features_Dataclass):
     dwt_num_kernels: int = 0
     dwt_wavelet: str = 'db4'
     dwt_level: int = -1
 
 
 @dataclasses.dataclass(eq=False)
-class DWT_Features(_DWT_Features_Dataclass, _Base_Features):
+class DWT_Features(DWT_Features_Dataclass, Base_Features):
 
     def __post_init__(self):
         super().__post_init__()
@@ -593,11 +726,12 @@ class DWT_Features(_DWT_Features_Dataclass, _Base_Features):
 
 @dataclasses.dataclass(eq=False)
 class Multi_Features_Model_Dataclass(
-    _Dense_Features_Dataclass,
-    _CNN_Features_Dataclass,
-    _FFT_Features_Dataclass,
-    _DCT_Features_Dataclass,
-    _DWT_Features_Dataclass,
+    Dense_Features_Dataclass,
+    CNN_Features_Dataclass,
+    FFT_Features_Dataclass,
+    FIR_Features_Dataclass,
+    DCT_Features_Dataclass,
+    DWT_Features_Dataclass,
 ):
     mlp_hidden_layers: Iterable = (32, 16)  # size and number of MLP hidden layers
     mlp_output_size: int = 1
@@ -617,8 +751,9 @@ class Multi_Features_Model(
             self.fft_num_kernels == 0 and
             self.dct_num_kernels == 0 and
             self.dwt_num_kernels == 0 and
-            (self.cnn_layer1_num_kernels == 0 and self.cnn_layer2_num_kernels == 0)
-        ) is False, "All features are inactive"
+            (self.cnn_layer1_num_kernels == 0 and self.cnn_layer2_num_kernels == 0) and
+            self.fir_num_kernels == 0
+        ) is False, "No active features"
 
         if self.logger is None:
             self.logger = logging.getLogger(__name__)
@@ -656,6 +791,10 @@ class Multi_Features_Model(
             feature_kwargs = get_feature_class_parameters(CNN_Features)
             self.cnn_features = CNN_Features(**feature_kwargs)
             self.features.append(self.cnn_features)
+        if self.fir_num_kernels > 0:
+            feature_kwargs = get_feature_class_parameters(FIR_Features)
+            self.fir_features = FIR_Features(**feature_kwargs)
+            self.features.append(self.fir_features)
         assert len(self.features) > 0
 
         self.feature_count = {}
@@ -669,20 +808,21 @@ class Multi_Features_Model(
         self.feature_count['total'] = total_features
         self.logger.info(f"  Total features: {total_features}")
 
+        self.logger.info("MLP")
         hidden_layers = []
         in_features = total_features
         for i_layer, layer_size in enumerate(self.mlp_hidden_layers):
             layer = nn.Linear(in_features=in_features, out_features=layer_size)
             hidden_layers.append(layer)
             in_features = layer_size
-            self.logger.info(f"MLP layer {i_layer+1} size: {layer_size}")
+            self.logger.info(f"  MLP layer {i_layer+1} numel {layer.weight.numel()} shape {layer.weight.shape}")
         self.hidden_layers = nn.ModuleList(hidden_layers)
 
         self.output_layer = nn.Linear(
             in_features=in_features, 
             out_features=self.mlp_output_size, 
         )
-        self.logger.info(f"MLP output size: {self.mlp_output_size}")
+        self.logger.info(f"  MLP output size: {self.mlp_output_size}")
 
         self.activation_function = getattr(nn, self.activation_name)
         if self.activation_name == 'LeakyReLu':
@@ -740,17 +880,28 @@ class Multi_Features_Model(
         input_data = torch.rand(*data_shape)
 
         # capture torchinfo.summary() output
-        tmp_io = io.StringIO()
-        sys.stdout = tmp_io
-        torchinfo.summary(self, input_data=input_data, device=torch.device('cpu'))
-        sys.stdout = sys.__stdout__
-        self.logger.info('\n'+tmp_io.getvalue())
+        # stdout_save = sys.stdout
+        # try:
+        #     tmp_io = io.StringIO()
+        #     sys.stdout = tmp_io
+        #     self.logger.info("MODEL SUMMARY 2")
+        #     torchinfo.summary(self, input_data=input_data, device=torch.device('cpu'))
+        #     self.logger.info("MODEL SUMMARY 3")
+        #     time.sleep(1)
+        # except:
+        #     sys.stdout = stdout_save
+        #     raise RuntimeError("torchinfo.summary() failed")
+        # else:
+        #     sys.stdout = stdout_save
+        # finally:
+        #     tmp_io.close()
+        # self.logger.info('\n'+tmp_io.getvalue())
         # print model summary
         total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
         self.logger.info(f"Model contains {total_parameters} trainable parameters")
-        self.logger.info(f'Single input size: {input_data.shape}')
-        output = self(input_data)
-        self.logger.info(f"Single output size: {output.shape}")
+        # self.logger.info(f'Single input size: {input_data.shape}')
+        # output = self(input_data)
+        # self.logger.info(f"Single output size: {output.shape}")
 
         self.trainable_parameters = {}
         self.logger.info("Trainable parameters")

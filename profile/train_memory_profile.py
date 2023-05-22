@@ -2,7 +2,7 @@ from memory_profiler import LineProfiler, memory_usage, show_results
 
 from bes_ml.elm_regression import Trainer
 from bes_ml.base.train_base import Trainer_Base
-from bes_ml.base.models import Multi_Features_Model, Dense_Features, _Base_Features
+from bes_ml.base.models import Multi_Features_Model, Dense_Features, Base_Features
 
 
 def profile_func():
@@ -32,8 +32,8 @@ if __name__=='__main__':
         Trainer._make_datasets,
         Multi_Features_Model.forward,
         Dense_Features.forward,
-        _Base_Features._flatten_activation_dropout,
-        _Base_Features._time_interval_and_pooling,
+        Base_Features._flatten_activation_dropout,
+        Base_Features._time_interval_and_pooling,
     ]
 
     lp = LineProfiler()
