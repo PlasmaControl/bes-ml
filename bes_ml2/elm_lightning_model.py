@@ -12,7 +12,7 @@ import torch
 import torch.nn
 import torch.utils.data
 
-from lightning.pytorch import LightningModule, loggers
+from lightning.pytorch import loggers
 import torchmetrics
 
 try:
@@ -44,21 +44,6 @@ class BCEWithLogit(torchmetrics.Metric):
     def compute(self):
         return self.bce / self.counts
 
-
-class SumLoss(torchmetrics.Metric):
-    is_differentiable: bool = True
-    higher_is_better: bool = False
-    full_state_update: bool = True
-
-    def __init__(self, classification_bce=True, regression_mse=True, reconstruction_mse=True):
-        super().__init__()
-        self.add_state("counts", default=torch.tensor(0), dist_reduce_fx="sum")
-        if classification_bce:
-            self.add_state("classification_bce", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        if regression_mse:
-            self.add_state("regression_mse", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        if reconstruction_mse:
-            self.add_state("reconstruction_mse", default=torch.tensor(0.0), dist_reduce_fx="sum")
 
 @dataclasses.dataclass(eq=False)
 class Lightning_Model(
@@ -97,7 +82,6 @@ class Lightning_Model(
         # `frontends` for regression, classification, and self-supervised learning
         self.frontends = torch.nn.ModuleDict()
         self.frontends_active = {}
-        # self.metrics = []
         for frontend_key in self._frontend_names:
             if getattr(self, frontend_key) is True:
                 self.frontends_active[frontend_key] = True
@@ -106,14 +90,10 @@ class Lightning_Model(
                     self.frontends.update({frontend_key: new_module})
                     if 'time_to_elm' in frontend_key:
                         setattr(self, f"{frontend_key}_mse_loss", torchmetrics.MeanSquaredError())
-                        # self.metrics.append(getattr(self, f"{frontend_key}_mse_loss"))
                         setattr(self, f"{frontend_key}_r2_score", torchmetrics.R2Score())
-                        # self.metrics.append(getattr(self, f"{frontend_key}_r2_score"))
                     elif 'classifier' in frontend_key:
                         setattr(self, f"{frontend_key}_bce_loss", BCEWithLogit())
-                        # self.metrics.append(getattr(self, f"{frontend_key}_bce_loss"))
                         setattr(self, f"{frontend_key}_f1_score", torchmetrics.F1Score(task='binary'))
-                        # self.metrics.append(getattr(self, f"{frontend_key}_f1_score"))
                     else:
                         raise KeyError
                 elif 'decoder' in frontend_key:
@@ -121,7 +101,6 @@ class Lightning_Model(
                     self.frontends.update({frontend_key: new_module})
                     if 'reconstruction' in frontend_key:
                         setattr(self, f"{frontend_key}_mse_loss", torchmetrics.MeanSquaredError())
-                        # self.metrics.append(getattr(self, f"{frontend_key}_mse_loss"))
                     else:
                         raise KeyError
                 else:
@@ -143,12 +122,33 @@ class Lightning_Model(
 
         self.initialize_layers()
 
+    def configure_optimizers(self):
+        self.optimizer = torch.optim.Adam(
+            self.parameters(), 
+            lr=self.lr,
+            weight_decay=self.weight_decay,
+        )
+        self.lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer=self.optimizer,
+            factor=0.5,
+            patience=self.lr_scheduler_patience,
+            threshold=self.lr_scheduler_threshold,
+            min_lr=2e-5,
+            mode='min' if 'loss' in self.monitor_metric else 'max',
+            verbose=True,
+        )
+        return {
+            'optimizer': self.optimizer,
+            'lr_scheduler': self.lr_scheduler,
+            'monitor': self.monitor_metric,
+        }
+
     def forward(self, signals: torch.Tensor) -> dict[str, torch.Tensor]:
         results = {}
         features = self.cnn_encoder(signals)
-        for key, frontend in self.frontends.items():
-            if self.frontends_active[key]:
-                results[key] = frontend(features)
+        for frontend_key, frontend in self.frontends.items():
+            if self.frontends_active[frontend_key]:
+                results[frontend_key] = frontend(features)
         return results
 
     def update_step(self, batch, batch_idx) -> torch.Tensor:
@@ -180,10 +180,7 @@ class Lightning_Model(
                     raise ValueError
                 metric_value = metric(frontend_result, target)
                 if 'loss' in metric_name:
-                    sum_loss = (
-                        metric_value if sum_loss is None
-                        else sum_loss + metric_value
-                    )
+                    sum_loss = metric_value if sum_loss is None else sum_loss + metric_value
         return sum_loss
     
     def compute_log_reset(self, stage: str):
@@ -203,14 +200,11 @@ class Lightning_Model(
                 metric_name = f"{frontend_key}_{metric_suffix}"
                 metric: torchmetrics.Metric = getattr(self, metric_name)
                 metric_value = metric.compute()
-                self.log(f"{metric_name}/{stage}", metric_value)
+                self.log(f"{metric_name}/{stage}", metric_value, sync_dist=True)
                 if 'loss' in metric_name:
-                    sum_loss = (
-                        metric_value if sum_loss is None
-                        else sum_loss + metric_value
-                    )
+                    sum_loss = metric_value if sum_loss is None else sum_loss + metric_value
                 metric.reset()
-        self.log(f"sum_loss/{stage}", sum_loss)
+        self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True)
 
     def on_fit_start(self) -> None:
         self.t_fit_start = time.time()
@@ -226,19 +220,19 @@ class Lightning_Model(
         self.compute_log_reset(stage='train')
 
     def on_train_epoch_end(self) -> None:
-        if self.global_rank == 0:
-            for name, param in self.named_parameters():
-                if 'weight' in name:
-                    values = param.data.detach()
-                    mean = torch.mean(values).item()
-                    std = torch.std(values).item()
-                    z_scores = (values-mean)/std
-                    skew = torch.mean(z_scores**3).item()
-                    kurt = torch.mean(z_scores**4).item()
-                    self.log(f"param_mean/{name}", mean, sync_dist=True)
-                    self.log(f"param_std/{name}", std, sync_dist=True)
-                    self.log(f"param_skew/{name}", skew, sync_dist=True)
-                    self.log(f"param_kurt/{name}", kurt, sync_dist=True)
+        for name, param in self.named_parameters():
+            if 'weight' not in name:
+                continue
+            values = param.data.detach()
+            mean = torch.mean(values).item()
+            std = torch.std(values).item()
+            z_scores = (values-mean)/std
+            skew = torch.mean(z_scores**3).item()
+            kurt = torch.mean(z_scores**4).item()
+            self.log(f"param_mean/{name}", mean, sync_dist=True)
+            self.log(f"param_std/{name}", std, sync_dist=True)
+            self.log(f"param_skew/{name}", skew, sync_dist=True)
+            self.log(f"param_kurt/{name}", kurt, sync_dist=True)
         print(f"Epoch {self.current_epoch} elapsed train time: {(time.time()-self.t_train_epoch_start)/60:0.1f} min")
 
     def on_validation_epoch_start(self) -> None:
@@ -274,13 +268,13 @@ class Lightning_Model(
         if batch_idx == 0:
             self.predict_outputs.append([])
             assert dataloader_idx == len(self.predict_outputs)-1
-        outputs = {
+        prediction_outputs = {
             'labels': labels,
             'signals': signals,
             'class_labels': class_labels,
         }
-        outputs.update(results)
-        self.predict_outputs[-1].append(outputs)
+        prediction_outputs.update(results)
+        self.predict_outputs[-1].append(prediction_outputs)
     
     def on_predict_epoch_end(self) -> None:
         if self.global_rank != 0 or 'time_to_elm_regression' not in self.predict_outputs[0][0]:
@@ -325,24 +319,3 @@ class Lightning_Model(
 
     def on_predict_end(self) -> None:
         print(f"Predict elapsed time {(time.time()-self.t_predict_start)/60:0.1f} min")
-
-    def configure_optimizers(self):
-        self.optimizer = torch.optim.Adam(
-            self.parameters(), 
-            lr=self.lr,
-            weight_decay=self.weight_decay,
-        )
-        self.lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer=self.optimizer,
-            factor=0.5,
-            patience=self.lr_scheduler_patience,
-            threshold=self.lr_scheduler_threshold,
-            min_lr=2e-5,
-            mode='min' if 'loss' in self.monitor_metric else 'max',
-            verbose=True,
-        )
-        return {
-            'optimizer': self.optimizer,
-            'lr_scheduler': self.lr_scheduler,
-            'monitor': self.monitor_metric,
-        }
