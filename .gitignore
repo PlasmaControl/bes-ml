@@ -44,9 +44,10 @@ bes_ml/confinement_classification/ddp_*
 bes_ml/confinement_classification/*.out
 bes_ml/confinement_classification/*.sh
 bes_ml/confinement_classification/new_train.py
-# bes_ml/confinement_classification/ddp_train_0.py
+bes_ml/confinement_classification/ddp_train_0.py
 bes_ml/confinement_classification/diagnostic.py
 bes_ml/confinement_classification/dim_red.py
 bes_ml/confinement_classification/dim_red1.py
 bes_ml/confinement_classification/tests/
+profile/train_memory_profile.py
 
