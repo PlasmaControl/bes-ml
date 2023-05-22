@@ -339,6 +339,7 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
             ),
             groups=self.fft_subwindows,
         )
+
         data_shape = [
             data_shape[0],
             self.fft_num_kernels,
@@ -423,7 +424,10 @@ class FFT_Features(_FFT_Features_Dataclass, _Base_Features):
             self.cummulative_hist += hist
             self.bin_edges = bin_edges
         fft_sw_features = self.conv(fft_subwindows)
+        bn = nn.BatchNorm3d(num_features=self.fft_num_kernels).to(x.device)
+        fft_sw_features = bn(fft_sw_features)
         output_features = self.activation(self.dropout(fft_sw_features))
+        # output_features = self.bn(output_features)
         output_features = self.fft_maxpool(output_features)
         if self.debug:
             assert torch.all(torch.isfinite(output_features))
