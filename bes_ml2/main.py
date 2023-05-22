@@ -157,7 +157,6 @@ class BES_Trainer:
 if __name__=='__main__':
 
     checkpoint = None
-    # checkpoint = '/global/u2/d/drsmith/ml/bes-ml/bes_ml2/experiment_default/r2023-05-15_12-26-21/checkpoints/last.ckpt'
 
     if checkpoint:
         # load data and model from checkpoint
@@ -176,18 +175,16 @@ if __name__=='__main__':
             signal_window_size=lightning_model.signal_window_size,
             # max_elms=5,
             batch_size=16,
-            # fraction_test=0,
-            # fraction_validation=0.2,
         )
 
     trainer = BES_Trainer(
         lightning_model=lightning_model,
         datamodule=datamodule,
-        wandb_log=True,
+        # wandb_log=True,
     )
 
     trainer.run_all(
-        max_epochs=6,
+        max_epochs=2,
         # skip_test=True,
-        skip_predict=True,
+        # skip_predict=True,
     )
