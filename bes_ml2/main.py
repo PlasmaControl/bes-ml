@@ -116,6 +116,9 @@ class BES_Trainer:
             ),
         ]
 
+        frontends_active = [value for value in self.lightning_model.frontends_active.values()]
+        some_unused = False in frontends_active
+
         trainer = Trainer(
             max_epochs=max_epochs,
             gradient_clip_val=gradient_clip_value,
@@ -126,7 +129,7 @@ class BES_Trainer:
             log_every_n_steps=self.log_freq,
             num_nodes=int(os.getenv('SLURM_NNODES', default=1)),
             precision=float_precision,
-            strategy=DDPStrategy(find_unused_parameters=True)
+            strategy=DDPStrategy(find_unused_parameters=some_unused)
         )
         self.datamodule.is_global_zero = trainer.is_global_zero
         if trainer.is_global_zero:
@@ -166,14 +169,14 @@ if __name__=='__main__':
         # initiate new data and model
         lightning_model = elm_lightning_model.Lightning_Model(
             signal_window_size=64,
-            cnn_nlayers=6,
+            cnn_nlayers=3,
             cnn_num_kernels=4,
             cnn_kernel_time_size=2,
-            cnn_padding=[[0,1,1]]*3 + [0]*3,
+            cnn_padding=[0]*3,
         )
         datamodule = elm_datamodule.ELM_Datamodule(
             signal_window_size=lightning_model.signal_window_size,
-            # max_elms=5,
+            max_elms=5,
             batch_size=16,
         )
 
@@ -184,7 +187,7 @@ if __name__=='__main__':
     )
 
     trainer.run_all(
-        max_epochs=2,
-        # skip_test=True,
-        # skip_predict=True,
+        max_epochs=1,
+        skip_test=True,
+        skip_predict=True,
     )

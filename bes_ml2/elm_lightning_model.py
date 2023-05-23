@@ -356,7 +356,15 @@ class Lightning_Model(
                 metric_value = metric(frontend_result, target)
                 if 'loss' in metric_name:
                     sum_loss = metric_value if sum_loss is None else sum_loss + metric_value
+                    print(type(sum_loss.grad), type(metric_value.grad), sum_loss.requires_grad, metric_value.requires_grad)
+                    sum_loss.backward()
+                    metric_value.backward()
+                    same_grad = torch.equal(sum_loss.grad, metric_value.grad)
+                    print(f"Sum_loss.grad ?= f{metric_name}.grad: {same_grad}")
         return sum_loss
+    
+    def on_before_backward(self, loss: torch.Tensor):
+        loss.backward()
     
     def compute_log_reset(self, stage: str):
         sum_loss = None
