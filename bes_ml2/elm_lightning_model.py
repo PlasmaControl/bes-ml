@@ -2,39 +2,15 @@ from __future__ import annotations
 import dataclasses
 import os
 import time
-from typing import Iterable
+from typing import Iterable, Callable
 
 import numpy as np
 import matplotlib.pyplot as plt
+import sklearn.metrics
 
 import torch
 import torch.nn
 from lightning.pytorch import LightningModule, loggers
-import torchmetrics
-
-
-class BCEWithLogit(torchmetrics.Metric):
-    is_differentiable: bool = True
-    higher_is_better: bool = False
-    full_state_update: bool = True
-    bce: torch.Tensor
-    counts: torch.Tensor
-
-    def __init__(self):
-        super().__init__()
-        self.add_state("bce", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("counts", default=torch.tensor(0), dist_reduce_fx="sum")
-
-    def update(self, input: torch.Tensor, target: torch.Tensor):
-        self.bce += torch.nn.functional.binary_cross_entropy_with_logits(
-            input=input, 
-            target=target.type_as(input),
-            reduction='sum',
-        )
-        self.counts += target.numel()
-
-    def compute(self):
-        return self.bce / self.counts
 
 
 @dataclasses.dataclass(eq=False)
@@ -44,7 +20,10 @@ class Torch_Base(LightningModule):
 
     def __post_init__(self):
         super().__init__()
+        assert np.log2(self.signal_window_size).is_integer(), 'Signal window must be power of 2'
 
+
+    def print_fields(self):
         print(f'Initiating {self.__class__.__name__}')
         class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
         for field_name in dataclasses.asdict(self):
@@ -54,8 +33,6 @@ class Torch_Base(LightningModule):
             if value != default_value:
                 field_str += f" (default {default_value})"
             print(field_str)
-
-        assert np.log2(self.signal_window_size).is_integer(), 'Signal window must be power of 2'
 
     def initialize_layers(self):
         # initialize trainable parameters
@@ -241,15 +218,7 @@ class Lightning_Model(
         super().__post_init__()
         self.save_hyperparameters()
 
-        print(f'Initiating {self.__class__.__name__}')
-        class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
-        for field_name in dataclasses.asdict(self):
-            value = getattr(self, field_name)
-            field_str = f"  {field_name}: {value}"
-            default_value = class_fields_dict[field_name].default
-            if value != default_value:
-                field_str += f" (default {default_value})"
-            print(field_str)
+        self.print_fields()
 
         # CNN encoder `backend` to featurize input data
         self.cnn_encoder, cnn_features, cnn_output_shape = self.make_cnn_encoder()
@@ -264,18 +233,18 @@ class Lightning_Model(
                     new_module = self.make_mlp(mlp_in_features=cnn_features)
                     self.frontends.update({frontend_key: new_module})
                     if 'time_to_elm' in frontend_key:
-                        setattr(self, f"{frontend_key}_mse_loss", torchmetrics.MeanSquaredError())
-                        setattr(self, f"{frontend_key}_r2_score", torchmetrics.R2Score())
+                        setattr(self, f"{frontend_key}_mse_loss", torch.nn.MSELoss())
+                        setattr(self, f"{frontend_key}_r2_score", sklearn.metrics.r2_score)
                     elif 'classifier' in frontend_key:
-                        setattr(self, f"{frontend_key}_bce_loss", BCEWithLogit())
-                        setattr(self, f"{frontend_key}_f1_score", torchmetrics.F1Score(task='binary'))
+                        setattr(self, f"{frontend_key}_bce_loss", torch.nn.BCEWithLogitsLoss())
+                        setattr(self, f"{frontend_key}_f1_score", sklearn.metrics.f1_score)
                     else:
                         raise KeyError
                 elif 'decoder' in frontend_key:
                     new_module = self.make_cnn_decoder(input_data_shape=cnn_output_shape)
                     self.frontends.update({frontend_key: new_module})
                     if 'reconstruction' in frontend_key:
-                        setattr(self, f"{frontend_key}_mse_loss", torchmetrics.MeanSquaredError())
+                        setattr(self, f"{frontend_key}_mse_loss", torch.nn.MSELoss())
                     else:
                         raise KeyError
                 else:
@@ -326,7 +295,7 @@ class Lightning_Model(
                 results[frontend_key] = frontend(features)
         return results
 
-    def update_step(self, batch, batch_idx) -> torch.Tensor:
+    def update_step(self, batch, batch_idx, stage: str) -> torch.Tensor:
         signals, labels, class_labels = batch
         results = self(signals)
         sum_loss = None
@@ -344,7 +313,7 @@ class Lightning_Model(
                 raise ValueError
             for metric_suffix in metric_suffices:
                 metric_name = f"{frontend_key}_{metric_suffix}"
-                metric: torchmetrics.Metric = getattr(self, metric_name)
+                metric: Callable = getattr(self, metric_name)
                 if 'time_to_elm' in metric_name:
                     target = labels
                 elif 'reconstruction' in metric_name:
@@ -353,34 +322,28 @@ class Lightning_Model(
                     target = class_labels
                 else:
                     raise ValueError
-                metric_value = metric(frontend_result, target)
                 if 'loss' in metric_name:
-                    sum_loss = metric_value if sum_loss is None else sum_loss + metric_value
-        return sum_loss
-    
-    def compute_log_reset(self, stage: str):
-        sum_loss = None
-        for frontend_key, frontend_is_active in self.frontends_active.items():
-            if frontend_is_active is False:
-                continue
-            if 'time_to_elm' in frontend_key:
-                metric_suffices = ['mse_loss', 'r2_score']
-            elif 'reconstruction' in frontend_key:
-                metric_suffices = ['mse_loss']
-            elif 'classifier' in frontend_key:
-                metric_suffices = ['bce_loss', 'f1_score']
-            else:
-                raise ValueError
-            for metric_suffix in metric_suffices:
-                metric_name = f"{frontend_key}_{metric_suffix}"
-                metric: torchmetrics.Metric = getattr(self, metric_name)
-                metric_value = metric.compute()
+                    metric_value = metric(
+                        input=frontend_result, 
+                        target=target.type_as(frontend_result),
+                    )
+                elif 'score' in metric_name:
+                    if 'f1' in metric_name:
+                        modified_predictions = (frontend_result > 0.5).type(torch.int)
+                    else:
+                        modified_predictions = frontend_result
+                    metric_value = metric(
+                        y_pred=modified_predictions.detach().cpu(), 
+                        y_true=target.detach().cpu(),
+                    )
+                else:
+                    raise ValueError
                 self.log(f"{metric_name}/{stage}", metric_value, sync_dist=True)
                 if 'loss' in metric_name:
                     sum_loss = metric_value if sum_loss is None else sum_loss + metric_value
-                metric.reset()
         self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True)
-
+        return sum_loss
+    
     def on_fit_start(self) -> None:
         self.t_fit_start = time.time()
 
@@ -389,10 +352,7 @@ class Lightning_Model(
         print(f"Epoch {self.current_epoch} start")
 
     def training_step(self, batch, batch_idx) -> torch.Tensor:
-        return self.update_step(batch, batch_idx)
-
-    def on_train_batch_end(self, *args, **kwargs):
-        self.compute_log_reset(stage='train')
+        return self.update_step(batch, batch_idx, stage='train')
 
     def on_train_epoch_end(self) -> None:
         for name, param in self.named_parameters():
@@ -414,10 +374,9 @@ class Lightning_Model(
         self.t_val_epoch_start = time.time()
 
     def validation_step(self, batch, batch_idx) -> None:
-        self.update_step(batch, batch_idx)
+        self.update_step(batch, batch_idx, stage='val')
 
     def on_validation_epoch_end(self) -> None:
-        self.compute_log_reset(stage='val')
         print(f"Epoch {self.current_epoch} elapsed valid. time: {(time.time()-self.t_val_epoch_start)/60:0.1f} min")
 
     def on_fit_end(self) -> None:
@@ -427,10 +386,9 @@ class Lightning_Model(
         self.t_test_start = time.time()
 
     def test_step(self, batch, batch_idx) -> None:
-        self.update_step(batch, batch_idx)
+        self.update_step(batch, batch_idx, stage='test')
 
     def on_test_epoch_end(self) -> None:
-        self.compute_log_reset(stage='test')
         print(f"Test elapsed time {(time.time()-self.t_test_start)/60:0.1f} min")
 
     def on_predict_start(self) -> None:
