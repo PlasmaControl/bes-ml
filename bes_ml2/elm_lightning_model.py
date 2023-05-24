@@ -20,7 +20,10 @@ class Torch_Base(LightningModule):
 
     def __post_init__(self):
         super().__init__()
+        assert np.log2(self.signal_window_size).is_integer(), 'Signal window must be power of 2'
 
+
+    def print_fields(self):
         print(f'Initiating {self.__class__.__name__}')
         class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
         for field_name in dataclasses.asdict(self):
@@ -30,8 +33,6 @@ class Torch_Base(LightningModule):
             if value != default_value:
                 field_str += f" (default {default_value})"
             print(field_str)
-
-        assert np.log2(self.signal_window_size).is_integer(), 'Signal window must be power of 2'
 
     def initialize_layers(self):
         # initialize trainable parameters
@@ -217,15 +218,7 @@ class Lightning_Model(
         super().__post_init__()
         self.save_hyperparameters()
 
-        print(f'Initiating {self.__class__.__name__}')
-        class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
-        for field_name in dataclasses.asdict(self):
-            value = getattr(self, field_name)
-            field_str = f"  {field_name}: {value}"
-            default_value = class_fields_dict[field_name].default
-            if value != default_value:
-                field_str += f" (default {default_value})"
-            print(field_str)
+        self.print_fields()
 
         # CNN encoder `backend` to featurize input data
         self.cnn_encoder, cnn_features, cnn_output_shape = self.make_cnn_encoder()

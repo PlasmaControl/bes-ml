@@ -35,6 +35,8 @@ class BES_Trainer:
         print(f'Initiating {self.__class__.__name__}')
         class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
         for field_name in dataclasses.asdict(self):
+            if field_name in ['lightning_model','datamodule']:
+                continue
             value = getattr(self, field_name)
             field_str = f"  {field_name}: {value}"
             default_value = class_fields_dict[field_name].default
