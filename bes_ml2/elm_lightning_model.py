@@ -323,23 +323,24 @@ class Lightning_Model(
                 else:
                     raise ValueError
                 if 'loss' in metric_name:
-                    metric_value = metric(input=frontend_result, target=target.type_as(frontend_result))
+                    metric_value = metric(
+                        input=frontend_result, 
+                        target=target.type_as(frontend_result),
+                    )
                 elif 'score' in metric_name:
                     if 'f1' in metric_name:
                         modified_predictions = (frontend_result > 0.5).type(torch.int)
                     else:
                         modified_predictions = frontend_result
-                    metric_value = metric(y_pred=modified_predictions.detach(), y_true=target)
+                    metric_value = metric(
+                        y_pred=modified_predictions.detach().cpu(), 
+                        y_true=target.detach().cpu(),
+                    )
                 else:
                     raise ValueError
                 self.log(f"{metric_name}/{stage}", metric_value, sync_dist=True)
                 if 'loss' in metric_name:
                     sum_loss = metric_value if sum_loss is None else sum_loss + metric_value
-                    # print(type(sum_loss.grad), type(metric_value.grad), sum_loss.requires_grad, metric_value.requires_grad)
-                    # sum_loss.backward()
-                    # metric_value.backward()
-                    # same_grad = torch.equal(sum_loss.grad, metric_value.grad)
-                    # print(f"Sum_loss.grad ?= f{metric_name}.grad: {same_grad}")
         self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True)
         return sum_loss
     
