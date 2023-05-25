@@ -131,7 +131,7 @@ class BES_Trainer:
             log_every_n_steps=self.log_freq,
             num_nodes=int(os.getenv('SLURM_NNODES', default=1)),
             precision=float_precision,
-            strategy=DDPStrategy(find_unused_parameters=some_unused)
+            strategy=DDPStrategy(find_unused_parameters=some_unused),
         )
         self.datamodule.is_global_zero = trainer.is_global_zero
         if trainer.is_global_zero:
