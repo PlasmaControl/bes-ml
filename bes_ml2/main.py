@@ -68,6 +68,19 @@ class BES_Trainer:
         print(f"Trial directory: {self.trial_dir}")
         self.loggers = [tb_logger]
 
+        print("Model Summary:")
+        print(ModelSummary(self.lightning_model, max_depth=-1))
+
+    def run_all(
+        self,
+        max_epochs: int = 2,
+        skip_test: bool = False,
+        skip_predict: bool = False,
+        early_stopping_min_delta: float = 1e-3,
+        early_stopping_patience: int = 50,
+        gradient_clip_value: int = None,
+        float_precision: str|int = '16-mixed' if torch.cuda.is_available() else 32,
+    ):
         if self.wandb_log:
             wandb.login()
             wandb_logger = WandbLogger(
@@ -82,19 +95,6 @@ class BES_Trainer:
             )
             self.loggers.append(wandb_logger)
 
-        print("Model Summary:")
-        print(ModelSummary(self.lightning_model, max_depth=-1))
-
-    def run_all(
-        self,
-        max_epochs: int = 2,
-        skip_test: bool = False,
-        skip_predict: bool = False,
-        early_stopping_min_delta: float = 1e-3,
-        early_stopping_patience: int = 50,
-        gradient_clip_value: int = None,
-        float_precision: str|int = '16-mixed' if torch.cuda.is_available() else 32,
-    ):
         self.lightning_model.log_dir = self.datamodule.log_dir = self.trial_dir
         monitor_metric = self.lightning_model.monitor_metric
         metric_mode = 'min' if 'loss' in monitor_metric else 'max'
@@ -147,6 +147,9 @@ class BES_Trainer:
 
         if skip_predict is False:
             trainer.predict(datamodule=self.datamodule, ckpt_path='best')
+
+        if self.wandb_log:
+            wandb.finish()
 
         self.last_model_path = Path(trainer.checkpoint_callback.last_model_path).absolute()
         print(f"Last model path: {self.last_model_path}")

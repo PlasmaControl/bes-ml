@@ -341,6 +341,9 @@ class Lightning_Model(
                 self.log(f"{metric_name}/{stage}", metric_value, sync_dist=True)
                 if 'loss' in metric_name:
                     sum_loss = metric_value if sum_loss is None else sum_loss + metric_value
+        if stage=='val' and self.current_epoch < 6:
+            # manually increase validation loss for initial epochs
+            sum_loss = sum_loss * 2
         self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True)
         return sum_loss
     
