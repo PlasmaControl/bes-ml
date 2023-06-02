@@ -67,11 +67,13 @@ class ELM_Predict_Dataset(torch.utils.data.Dataset):
             signal_window_size: int,
             shot: int,
             elm_index: int,
+            t0: float,
             # prediction_horizon: int = 0,  # =0 for time-to-ELM regression; >=0 for classification prediction
             pre_elm_only: bool = False,
     ) -> None:
         self.shot = shot
         self.elm_index = elm_index
+        self.t0 = t0
         self.signals = torch.from_numpy(signals[np.newaxis, ...])
         assert (
             self.signals.ndim == 4 and
@@ -117,7 +119,7 @@ class ELM_Predict_Dataset(torch.utils.data.Dataset):
         label_index = i_t0 + self.signal_window_size - 1
         label = self.labels[ label_index : label_index + 1 ]
         label_class = torch.tensor([0]) if label >= 0 else torch.tensor([1])
-        return signal_window, label, label_class, self.shot, self.elm_index
+        return signal_window, label, label_class, self.shot, self.elm_index, self.t0
 
 
 @dataclasses.dataclass(eq=False)
@@ -251,6 +253,7 @@ class ELM_Datamodule(LightningDataModule):
                         'valid_t0': valid_t0,
                         'elm_index': elm_index,
                         'shot': elm_event.attrs['shot'],
+                        'time_t0': elm_event['time'][0],
                         'pre_elm_size': pre_elm_size,
                         'pre_elm_maxabs_by_channel': pre_elm_maxabs_by_channel,
                         'pre_elm_maxcount_by_channel': pre_elm_maxcount_by_channel,
@@ -340,9 +343,12 @@ class ELM_Datamodule(LightningDataModule):
                 [elm['elm_index'] for elm in elm_data],
                 dtype=int,
             )
-            packeged_shot = np.array(
+            packaged_shot = np.array(
                 [elm['shot'] for elm in elm_data],
                 dtype=int,
+            )
+            packaged_t0 = np.array(
+                [elm['time_t0'] for elm in elm_data]
             )
             # valid t0 indices
             packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
@@ -430,16 +436,13 @@ class ELM_Datamodule(LightningDataModule):
                         idx_stop = packaged_labels.size - 1
                     else:
                         idx_stop = packaged_window_start[i_elm+1]-1
-                    signals = packaged_signals[idx_start:idx_stop, ...]
-                    labels = packaged_labels[idx_start:idx_stop]
-                    shot = packeged_shot[i_elm]
-                    elm_index = packeged_elm_index[i_elm]
                     dataset = ELM_Predict_Dataset(
-                        signals=signals,
-                        labels=labels,
+                        signals=packaged_signals[idx_start:idx_stop, ...],
+                        labels=packaged_labels[idx_start:idx_stop],
                         signal_window_size=self.signal_window_size,
-                        shot=shot,
-                        elm_index=elm_index,
+                        shot=packaged_shot[i_elm],
+                        elm_index=packeged_elm_index[i_elm],
+                        t0=packaged_t0[i_elm],
                         pre_elm_only=True if self.fraction_test==1 else False,
                     )
                     predict_datasets.append(dataset)

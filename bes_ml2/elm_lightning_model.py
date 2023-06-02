@@ -341,9 +341,9 @@ class Lightning_Model(
                 self.log(f"{metric_name}/{stage}", metric_value, sync_dist=True)
                 if 'loss' in metric_name:
                     sum_loss = metric_value if sum_loss is None else sum_loss + metric_value
-        if stage=='val' and self.current_epoch < 6:
-            # manually increase validation loss for initial epochs
-            sum_loss = sum_loss * 2
+        # if stage=='val' and self.current_epoch < 6:
+        #     # manually increase validation loss for initial epochs
+        #     sum_loss = sum_loss * 2
         self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True)
         return sum_loss
     
@@ -399,7 +399,7 @@ class Lightning_Model(
         self.t_predict_start = time.time()
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0) -> None:
-        signals, labels, class_labels, shot, elm_index = batch
+        signals, labels, class_labels, shot, elm_index, t0 = batch
         results = self(signals)
         if batch_idx == 0:
             self.predict_outputs.append([])
@@ -410,6 +410,7 @@ class Lightning_Model(
             'class_labels': class_labels,
             'shot': shot,
             'elm_index': elm_index,
+            't0': t0,
         }
         prediction_outputs.update(results)
         self.predict_outputs[-1].append(prediction_outputs)
@@ -460,9 +461,11 @@ class Lightning_Model(
                     plt.close('all')
 
         if 'reconstruction_decoder' in self.predict_outputs[0][0]:
+            plt.set_cmap('seismic')
             for i_elm, result in enumerate(self.predict_outputs):
-                shot = result[0]['shot']
-                elm_index = result[0]['elm_index']
+                shot = result[0]['shot'][0]
+                elm_index = result[0]['elm_index'][0]
+                t0 = result[0]['t0'][0]
                 class_labels: torch.Tensor = torch.concat([batch['class_labels'] for batch in result]).squeeze().numpy(force=True)
                 reconstruction: torch.Tensor = torch.concat([batch['reconstruction_decoder'] for batch in result]).squeeze().numpy(force=True)
                 signals: torch.Tensor = torch.concat([batch['signals'] for batch in result]).squeeze().numpy(force=True)
@@ -478,7 +481,7 @@ class Lightning_Model(
                     sharex='col',
                     sharey='row',
                 )
-                plt.suptitle(f"Autoencoder reconstructions | shot {shot} | ELM index {elm_index}")
+                plt.suptitle(f"Autoencoder reconstructions | ELM index {elm_index} | shot {shot} @ {t0:.1f} ms")
                 i_radial_row = 3
                 i_poloidal_column = 5
                 for i, t0 in enumerate(t0_array):
@@ -486,7 +489,7 @@ class Lightning_Model(
                     plt.imshow(
                         signals[t0, :, i_radial_row, :].T,
                         origin='lower',
-                        aspect='auto',
+                        aspect='auto', vmin=-4, vmax=4,
                     )
                     plt.title(f'Signal | t={t0}')
                     if i==0:
@@ -495,7 +498,7 @@ class Lightning_Model(
                     plt.imshow(
                         reconstruction[t0, :, i_radial_row, :].T,
                         origin='lower',
-                        aspect='auto',
+                        aspect='auto', vmin=-4, vmax=4,
                     )
                     plt.title(f'Reconstruction | t={t0}')
                     if i==0:
@@ -503,7 +506,7 @@ class Lightning_Model(
                     plt.sca(axes.flat[i+8])
                     plt.imshow(
                         signals[t0, :, :, i_poloidal_column].T,
-                        aspect='auto',
+                        aspect='auto', vmin=-4, vmax=4,
                     )
                     plt.title(f'Signal | t={t0}')
                     if i==0:
@@ -511,14 +514,23 @@ class Lightning_Model(
                     plt.sca(axes.flat[i+12])
                     plt.imshow(
                         reconstruction[t0, :, :, i_poloidal_column].T,
-                        aspect='auto',
+                        aspect='auto', vmin=-4, vmax=4,
                     )
                     plt.title(f'Reconstruction | t={t0}')
                     if i==0:
                         plt.ylabel(f'Poloidal column {i_poloidal_column+1}')
                     plt.xlabel('Time (mu-s)')
                 plt.tight_layout()
-                plt.show(block=True)
+                filename = f'reconstruction_{elm_index:04d}'
+                filepath = os.path.join(self.log_dir, filename)
+                print(f"Saving figures {filepath}{{.pdf,.png}}")
+                plt.savefig(filepath+'.pdf', format='pdf', transparent=True)
+                plt.savefig(filepath+'.png', format='png', transparent=True)
+                for logger in self.loggers:
+                    if isinstance(logger, loggers.TensorBoardLogger):
+                        logger.experiment.add_figure(f"inference/{filename}", fig, close=False)
+                    elif isinstance(logger, loggers.WandbLogger):
+                        logger.log_image(key='inference', images=[filepath+'.png'])
                 plt.close()
 
     def on_predict_end(self) -> None:
