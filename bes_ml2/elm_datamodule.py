@@ -117,7 +117,7 @@ class ELM_Predict_Dataset(torch.utils.data.Dataset):
         label_index = i_t0 + self.signal_window_size - 1
         label = self.labels[ label_index : label_index + 1 ]
         label_class = torch.tensor([0]) if label >= 0 else torch.tensor([1])
-        return signal_window, label, label_class
+        return signal_window, label, label_class, self.shot, self.elm_index
 
 
 @dataclasses.dataclass(eq=False)
@@ -228,7 +228,7 @@ class ELM_Datamodule(LightningDataModule):
                         print(f"  Reading ELM event {i_elm:04d}/{indices.size:04d}")
                     elm_event = h5_file[f"{elm_index:05d}"]
                     signals = np.array(elm_event["signals"], dtype=np.float32)  # (64, <time>)
-                    signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (<time>, 8, 8)
+                    signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (time, pol, rad)
                     labels = np.array(elm_event["labels"], dtype=int)
                     pre_elm_size = np.flatnonzero(labels == 1)[0]  # pre-ELM size = index of first active ELM
                     assert labels[pre_elm_size-1]==0 and labels[pre_elm_size]==1
@@ -271,7 +271,7 @@ class ELM_Datamodule(LightningDataModule):
             exkurt_all_data = np.sum(cummulative_hist * ((bin_center - mean_all_data)/stdev_all_data) ** 4) / np.sum(cummulative_hist) - 3
 
             if self.plot_data_stats and self.is_global_zero:
-                _, axes = plt.subplots(ncols=3, nrows=2, figsize=(9, 4.5))
+                fig, axes = plt.subplots(ncols=3, nrows=2, figsize=(9, 4.5))
                 axes = axes.flatten()
                 bins = 25
                 plt.suptitle(f"Pre-ELM statistics | `{dataset_stage}` dataset with {len(elm_data)} ELMs")
@@ -321,7 +321,7 @@ class ELM_Datamodule(LightningDataModule):
                 filepath = os.path.join(self.log_dir, f'{dataset_stage}_dataset_stats.pdf')
                 print(f"  Saving figure {filepath}")
                 plt.savefig(filepath, format='pdf', transparent=True)
-                plt.show(block=False)
+                plt.close()
 
             packaged_labels = np.concatenate([elm['labels'] for elm in elm_data], axis=0)
             packaged_signals = np.concatenate([elm['signals'] for elm in elm_data], axis=0)

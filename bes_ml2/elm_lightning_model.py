@@ -399,7 +399,7 @@ class Lightning_Model(
         self.t_predict_start = time.time()
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0) -> None:
-        signals, labels, class_labels = batch
+        signals, labels, class_labels, shot, elm_index = batch
         results = self(signals)
         if batch_idx == 0:
             self.predict_outputs.append([])
@@ -408,50 +408,118 @@ class Lightning_Model(
             'labels': labels,
             'signals': signals,
             'class_labels': class_labels,
+            'shot': shot,
+            'elm_index': elm_index,
         }
         prediction_outputs.update(results)
         self.predict_outputs[-1].append(prediction_outputs)
     
     def on_predict_epoch_end(self) -> None:
-        if self.global_rank != 0 or 'time_to_elm_regression' not in self.predict_outputs[0][0]:
+        if self.global_rank != 0:
             return
-        i_page = 1
-        for i_elm, result in enumerate(self.predict_outputs):
-            labels: torch.Tensor = torch.concat([batch['labels'] for batch in result]).squeeze().numpy(force=True)
-            predictions: torch.Tensor = torch.concat([batch['time_to_elm_regression'] for batch in result]).squeeze().numpy(force=True)
-            signals: torch.Tensor = torch.concat([batch['signals'] for batch in result]).squeeze().numpy(force=True)
-            assert labels.shape[0] == predictions.shape[0] and labels.shape[0] == signals.shape[0]
-            signal = signals[:, -1, 2, 3].squeeze()
-            pre_elm_size = np.count_nonzero(np.isfinite(labels))
-            time = (np.arange(len(labels)) - pre_elm_size) / 1e3
-            if i_elm % 6 == 0:
-                plt.close('all')
-                fig, axes = plt.subplots(ncols=3, nrows=2, figsize=(12, 6))
-                plt.suptitle(f"Inference on ELMs in test dataset (page {i_page})")
-            plt.sca(axes.flat[i_elm%6])
-            plt.plot(time, labels, label='Label')
-            plt.plot(time, predictions, label='Prediction')
-            plt.ylabel("Label | Prediction")
-            plt.xlabel('Time to ELM (ms)')
-            plt.legend(fontsize='small', loc='upper right')
-            twinx = axes.flat[i_elm%6].twinx()
-            twinx.plot(time, signal, label='Signal', color='C2')
-            twinx.set_ylabel('Scaled signal')
-            twinx.legend(fontsize='small', loc='lower right')
-            if i_elm % 6 == 5 or i_elm == len(self.predict_outputs)-1:
+        if 'time_to_elm_regression' in self.predict_outputs[0][0]:
+            i_page = 1
+            for i_elm, result in enumerate(self.predict_outputs):
+                shot = result[0]['shot']
+                elm_index = result[0]['elm_index']
+                labels: torch.Tensor = torch.concat([batch['labels'] for batch in result]).squeeze().numpy(force=True)
+                predictions: torch.Tensor = torch.concat([batch['time_to_elm_regression'] for batch in result]).squeeze().numpy(force=True)
+                signals: torch.Tensor = torch.concat([batch['signals'] for batch in result]).squeeze().numpy(force=True)
+                assert labels.shape[0] == predictions.shape[0] and labels.shape[0] == signals.shape[0]
+                if i_elm % 6 == 0:
+                    plt.close('all')
+                    fig, axes = plt.subplots(ncols=3, nrows=2, figsize=(12, 6))
+                    plt.suptitle(f"Inference on ELMs in test dataset (page {i_page})")
+                signal = signals[:, -1, 2, 3].squeeze()
+                pre_elm_size = np.count_nonzero(np.isfinite(labels))
+                time = (np.arange(len(labels)) - pre_elm_size) / 1e3
+                plt.sca(axes.flat[i_elm%6])
+                plt.plot(time, labels, label='Label')
+                plt.plot(time, predictions, label='Prediction')
+                plt.ylabel("Label | Prediction")
+                plt.xlabel('Time to ELM (ms)')
+                plt.title(f'Shot {shot} | ELM index {elm_index}')
+                plt.legend(fontsize='small', loc='upper right')
+                twinx = axes.flat[i_elm%6].twinx()
+                twinx.plot(time, signal, label='Signal', color='C2')
+                twinx.set_ylabel('Scaled signal')
+                twinx.legend(fontsize='small', loc='lower right')
+                if i_elm % 6 == 5 or i_elm == len(self.predict_outputs)-1:
+                    plt.tight_layout()
+                    filename = f'inference_{i_page:02d}'
+                    filepath = os.path.join(self.log_dir, filename)
+                    print(f"Saving figures {filepath}{{.pdf,.png}}")
+                    plt.savefig(filepath+'.pdf', format='pdf', transparent=True)
+                    plt.savefig(filepath+'.png', format='png', transparent=True)
+                    for logger in self.loggers:
+                        if isinstance(logger, loggers.TensorBoardLogger):
+                            logger.experiment.add_figure(f"inference/{filename}", fig, close=False)
+                        elif isinstance(logger, loggers.WandbLogger):
+                            logger.log_image(key='inference', images=[filepath+'.png'])
+                    i_page += 1
+                    plt.close('all')
+
+        if 'reconstruction_decoder' in self.predict_outputs[0][0]:
+            for i_elm, result in enumerate(self.predict_outputs):
+                shot = result[0]['shot']
+                elm_index = result[0]['elm_index']
+                class_labels: torch.Tensor = torch.concat([batch['class_labels'] for batch in result]).squeeze().numpy(force=True)
+                reconstruction: torch.Tensor = torch.concat([batch['reconstruction_decoder'] for batch in result]).squeeze().numpy(force=True)
+                signals: torch.Tensor = torch.concat([batch['signals'] for batch in result]).squeeze().numpy(force=True)
+                assert class_labels.shape[0] == reconstruction.shape[0] and class_labels.shape[0] == signals.shape[0]
+                assert np.array_equiv(tuple(reconstruction.shape), tuple(signals.shape))
+                pre_elm_size = np.flatnonzero(class_labels == 1)[0]  # length of pre-ELM phase
+                pre_elm_t0 = pre_elm_size - self.signal_window_size
+                t0_array = [0, pre_elm_t0//3, 2*pre_elm_t0//3, pre_elm_t0]
+                fig, axes = plt.subplots(
+                    ncols=4, 
+                    nrows=4, 
+                    figsize=(12, 8),
+                    sharex='col',
+                    sharey='row',
+                )
+                plt.suptitle(f"Autoencoder reconstructions | shot {shot} | ELM index {elm_index}")
+                i_radial_row = 3
+                i_poloidal_column = 5
+                for i, t0 in enumerate(t0_array):
+                    plt.sca(axes.flat[i])
+                    plt.imshow(
+                        signals[t0, :, i_radial_row, :].T,
+                        origin='lower',
+                        aspect='auto',
+                    )
+                    plt.title(f'Signal | t={t0}')
+                    if i==0:
+                        plt.ylabel(f'Radial row {i_radial_row+1}')
+                    plt.sca(axes.flat[i+4])
+                    plt.imshow(
+                        reconstruction[t0, :, i_radial_row, :].T,
+                        origin='lower',
+                        aspect='auto',
+                    )
+                    plt.title(f'Reconstruction | t={t0}')
+                    if i==0:
+                        plt.ylabel(f'Radial row {i_radial_row+1}')
+                    plt.sca(axes.flat[i+8])
+                    plt.imshow(
+                        signals[t0, :, :, i_poloidal_column].T,
+                        aspect='auto',
+                    )
+                    plt.title(f'Signal | t={t0}')
+                    if i==0:
+                        plt.ylabel(f'Poloidal column {i_poloidal_column+1}')
+                    plt.sca(axes.flat[i+12])
+                    plt.imshow(
+                        reconstruction[t0, :, :, i_poloidal_column].T,
+                        aspect='auto',
+                    )
+                    plt.title(f'Reconstruction | t={t0}')
+                    if i==0:
+                        plt.ylabel(f'Poloidal column {i_poloidal_column+1}')
+                    plt.xlabel('Time (mu-s)')
                 plt.tight_layout()
-                filename = f'inference_{i_page:02d}'
-                filepath = os.path.join(self.log_dir, filename)
-                print(f"Saving figures {filepath}{{.pdf,.png}}")
-                plt.savefig(filepath+'.pdf', format='pdf', transparent=True)
-                plt.savefig(filepath+'.png', format='png', transparent=True)
-                for logger in self.loggers:
-                    if isinstance(logger, loggers.TensorBoardLogger):
-                        logger.experiment.add_figure(f"inference/{filename}", fig, close=False)
-                    elif isinstance(logger, loggers.WandbLogger):
-                        logger.log_image(key='inference', images=[filepath+'.png'])
-                i_page += 1
-                plt.close(fig)
+                plt.show(block=True)
+                plt.close()
 
     def on_predict_end(self) -> None:
         print(f"Predict elapsed time {(time.time()-self.t_predict_start)/60:0.1f} min")
