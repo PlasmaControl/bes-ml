@@ -104,6 +104,7 @@ class Torch_CNN_Mixin(Torch_Base):
     cnn_padding: Iterable|int|str = 0
     cnn_input_channels: int = 1
     cnn_dropout: float = 0.1
+    cnn_batchnorm: bool = True
 
     def make_cnn_encoder(self) -> tuple[torch.nn.Module,int,tuple]:
         for attr_name in [
@@ -121,6 +122,10 @@ class Torch_CNN_Mixin(Torch_Base):
 
         for time_dim in self.cnn_kernel_time_size:
             assert np.log2(time_dim).is_integer(), 'Kernel time dims must be power of 2'
+
+        if self.cnn_batchnorm:
+            print(f"  Batchnorm is active, so setting cnn_dropout=0")
+            self.cnn_dropout = 0.0
 
         print("Constructing CNN layers")
 
@@ -142,7 +147,7 @@ class Torch_CNN_Mixin(Torch_Base):
             print(f"    Stride {stride}")
             print(f"    Padding {self.cnn_padding[i]}")
             conv3d = torch.nn.Conv3d(
-                in_channels=self.cnn_num_kernels[i-1] if i!=0 else self.cnn_input_channels,
+                in_channels=self.cnn_num_kernels[i-1] if i>0 else self.cnn_input_channels,
                 out_channels=self.cnn_num_kernels[i],
                 kernel_size=kernel,
                 stride=stride,
@@ -152,11 +157,13 @@ class Torch_CNN_Mixin(Torch_Base):
             data_shape = tuple(conv3d(torch.zeros(size=data_shape)).size())
             print(f"    Output data shape: {data_shape}  (size {np.prod(data_shape)})")
             assert np.all(np.array(data_shape) >= 1), f"Bad data shape {data_shape} after CNN layer {i}"
-            cnn.extend([
-                torch.nn.Dropout(p=self.cnn_dropout),
-                conv3d,
-                torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope),
-            ])
+            if i>0:
+                if self.cnn_dropout:
+                    cnn.append(torch.nn.Dropout(p=self.cnn_dropout))
+                if self.cnn_batchnorm:
+                    cnn.append(torch.nn.BatchNorm3d(num_features=self.cnn_num_kernels[i-1]))
+            cnn.append(conv3d)
+            cnn.append(torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope))
 
         num_features = np.prod(data_shape)
         print(f"  CNN output features: {num_features}")
@@ -179,7 +186,7 @@ class Torch_CNN_Mixin(Torch_Base):
             print(f"    Padding {self.cnn_padding[i]}")
             conv3d = torch.nn.ConvTranspose3d(
                 in_channels=self.cnn_num_kernels[i],
-                out_channels=self.cnn_num_kernels[i-1] if i!=0 else self.cnn_input_channels,
+                out_channels=self.cnn_num_kernels[i-1] if i>0 else self.cnn_input_channels,
                 kernel_size=kernel,
                 stride=stride,
                 padding=self.cnn_padding[i],
@@ -187,10 +194,10 @@ class Torch_CNN_Mixin(Torch_Base):
             data_shape = tuple(conv3d(torch.zeros(size=data_shape)).size())
             print(f"    Output data shape: {data_shape}  (size {np.prod(data_shape)})")
             assert np.all(np.array(data_shape) >= 1), f"Bad data shape {data_shape} after Decoder layer {i}"
-            decoder.extend([
-                conv3d,
-                torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope) if i!=0 else torch.nn.Identity(),
-            ])
+            if self.cnn_batchnorm:
+                decoder.append(torch.nn.BatchNorm3d(num_features=self.cnn_num_kernels[i]))
+            decoder.append(conv3d)
+            decoder.append(torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope))
     
         assert np.array_equal(self.input_data_shape, data_shape)
     
@@ -423,6 +430,7 @@ class Lightning_Model(
             for i_elm, result in enumerate(self.predict_outputs):
                 shot = result[0]['shot']
                 elm_index = result[0]['elm_index']
+                t0 = result[0]['t0'][0]
                 labels: torch.Tensor = torch.concat([batch['labels'] for batch in result]).squeeze().numpy(force=True)
                 predictions: torch.Tensor = torch.concat([batch['time_to_elm_regression'] for batch in result]).squeeze().numpy(force=True)
                 signals: torch.Tensor = torch.concat([batch['signals'] for batch in result]).squeeze().numpy(force=True)
@@ -439,7 +447,7 @@ class Lightning_Model(
                 plt.plot(time, predictions, label='Prediction')
                 plt.ylabel("Label | Prediction")
                 plt.xlabel('Time to ELM (ms)')
-                plt.title(f'Shot {shot} | ELM index {elm_index}')
+                plt.title(f'ELM index {elm_index} | Shot {shot} @ {t0:.1f} ms')
                 plt.legend(fontsize='small', loc='upper right')
                 twinx = axes.flat[i_elm%6].twinx()
                 twinx.plot(time, signal, label='Signal', color='C2')

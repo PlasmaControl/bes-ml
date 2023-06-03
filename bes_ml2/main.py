@@ -184,10 +184,10 @@ if __name__=='__main__':
         )
         datamodule = elm_datamodule.ELM_Datamodule(
             signal_window_size=lightning_model.signal_window_size,
-            # max_elms=5,
+            max_elms=5,
             batch_size=16,
-            fraction_test=0.4,
-            fraction_validation=0.1,
+            fraction_test=0.2,
+            fraction_validation=0.2,
         )
 
     trainer = BES_Trainer(
@@ -199,5 +199,5 @@ if __name__=='__main__':
     trainer.run_all(
         max_epochs=1,
         skip_test=True,
-        # skip_predict=True,
+        skip_predict=True,
     )
