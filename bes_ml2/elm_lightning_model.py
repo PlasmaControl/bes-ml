@@ -53,6 +53,7 @@ class Torch_Base(LightningModule):
 class Torch_MLP_Mixin(Torch_Base):
     mlp_layers: tuple = (64, 32)
     mlp_dropout: float = 0.1
+    mlp_batchnorm: bool = True
 
     def make_mlp(
             self, 
@@ -60,6 +61,11 @@ class Torch_MLP_Mixin(Torch_Base):
             mlp_out_features: int = 1,
             with_sigmoid: bool = False,
     ) -> torch.nn.Module:
+
+        if self.mlp_batchnorm:
+            print(f"  Batchnorm is active, so setting mlp_dropout=0")
+            self.mlp_dropout = 0.0
+
         # MLP layers
         print("Constructing MLP layers")
         mlp_layers = torch.nn.Sequential(torch.nn.Flatten())
@@ -67,14 +73,16 @@ class Torch_MLP_Mixin(Torch_Base):
         for i, layer_size in enumerate(self.mlp_layers):
             in_features = mlp_in_features if i==0 else self.mlp_layers[i-1]
             print(f"  MLP layer {i} with in/out features: {in_features}/{layer_size} (LeakyReLU activ.)")
-            mlp_layers.extend([
-                torch.nn.Dropout(p=self.mlp_dropout) if i!=n_layers-1 else torch.nn.Identity(),
-                torch.nn.Linear(
-                    in_features=in_features,
-                    out_features=layer_size,
-                ),
-                torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope) if i!=n_layers-1 else torch.nn.Identity(),
-            ])
+            if i>0:
+                if self.mlp_dropout and i != n_layers-1:
+                    mlp_layers.append(torch.nn.Dropout(p=self.mlp_dropout))
+                if self.mlp_batchnorm:
+                    mlp_layers.append(torch.nn.BatchNorm1d(num_features=in_features))
+            mlp_layers.append(torch.nn.Linear(
+                in_features=in_features,
+                out_features=layer_size,
+            ))
+            mlp_layers.append(torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope))
 
         # output layer
         print(f"  MLP output layer with in/out features {self.mlp_layers[-1]}/{mlp_out_features} (no activ.)")
@@ -90,7 +98,7 @@ class Torch_MLP_Mixin(Torch_Base):
             print(f"  Applying sigmoid at MLP output for probability with range [0,1]")
             mlp_layers.append(torch.nn.Sigmoid())
         else:
-            print(f"  Logit output (log odds, log(p/(1-p))) with range [-inf,inf]")
+            print(f"  Logit output (log odds, log(p/(1-p))) with range [-inf,inf]; use sigmoid to get prob.")
 
         return mlp_layers
 
@@ -425,14 +433,14 @@ class Lightning_Model(
     def on_predict_epoch_end(self) -> None:
         if self.global_rank != 0:
             return
-        if 'time_to_elm_regression' in self.predict_outputs[0][0]:
+        if 'time_to_elm_mlp' in self.predict_outputs[0][0]:
             i_page = 1
             for i_elm, result in enumerate(self.predict_outputs):
                 shot = result[0]['shot']
                 elm_index = result[0]['elm_index']
                 t0 = result[0]['t0'][0]
                 labels: torch.Tensor = torch.concat([batch['labels'] for batch in result]).squeeze().numpy(force=True)
-                predictions: torch.Tensor = torch.concat([batch['time_to_elm_regression'] for batch in result]).squeeze().numpy(force=True)
+                predictions: torch.Tensor = torch.concat([batch['time_to_elm_mlp'] for batch in result]).squeeze().numpy(force=True)
                 signals: torch.Tensor = torch.concat([batch['signals'] for batch in result]).squeeze().numpy(force=True)
                 assert labels.shape[0] == predictions.shape[0] and labels.shape[0] == signals.shape[0]
                 if i_elm % 6 == 0:
