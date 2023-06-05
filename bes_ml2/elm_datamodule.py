@@ -416,8 +416,12 @@ class ELM_Datamodule(LightningDataModule):
             print(f"  Normalizing labels (min=-1 and median~0) with median {self.label_median:.3f}")
             packaged_labels = (packaged_labels - self.label_median) / (self.label_median-1)
             label_min = np.nanmin(packaged_labels)
-            label_median = np.median(packaged_labels[packaged_valid_t0_indices+self.signal_window_size])
-            print(f"    Label min {label_min:.3f} median {label_median:.3f}")
+            quantiles = np.quantile(
+                packaged_labels[packaged_valid_t0_indices+self.signal_window_size],
+                [0.25, 0.5, 0.75],
+            )
+            label_25, label_50, label_75 = quantiles[0], quantiles[1], quantiles[2]
+            print(f"    Label min {label_min:.3f} 25p {label_25:.3f} 50p {label_50:.3f} 75p {label_75:.3f}")
             assert label_min == -1
             if dataset_stage in ['train', 'validation', 'test']:
                 self.datasets[dataset_stage] = ELM_TrainValTest_Dataset(
