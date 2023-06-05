@@ -118,8 +118,8 @@ class BES_Trainer:
             ),
         ]
 
-        frontends_active = [value for value in self.lightning_model.frontends_active.values()]
-        some_unused = False in frontends_active
+        # frontends_active = [value for value in self.lightning_model.frontends_active.values()]
+        # some_unused = False in frontends_active
 
         trainer = Trainer(
             max_epochs=max_epochs,
@@ -131,7 +131,7 @@ class BES_Trainer:
             log_every_n_steps=self.log_freq,
             num_nodes=int(os.getenv('SLURM_NNODES', default=1)),
             precision=float_precision,
-            strategy=DDPStrategy(find_unused_parameters=some_unused),
+            strategy=DDPStrategy(find_unused_parameters=True),
         )
         self.datamodule.is_global_zero = trainer.is_global_zero
         if trainer.is_global_zero:
@@ -179,12 +179,10 @@ if __name__=='__main__':
             cnn_num_kernels=8,
             cnn_kernel_time_size=2,
             cnn_padding=[0]*3,
-            # classifier_mlp=False,
-            # time_to_elm_mlp=False,
         )
         datamodule = elm_datamodule.ELM_Datamodule(
             signal_window_size=lightning_model.signal_window_size,
-            max_elms=5,
+            # max_elms=5,
             batch_size=128,
             fraction_test=0.2,
             fraction_validation=0.2,
@@ -196,8 +194,9 @@ if __name__=='__main__':
         # wandb_log=True,
     )
 
+    lightning_model.unfreeze_epoch['time_to_elm_mlp'] = 2
     trainer.run_all(
-        max_epochs=1,
+        max_epochs=4,
         # skip_test=True,
         # skip_predict=True,
     )

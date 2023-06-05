@@ -2,7 +2,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import time
-from typing import Iterable, Callable
+from typing import Iterable, Callable, Mapping
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -47,7 +47,16 @@ class Torch_Base(LightningModule):
                 print(f"  {name}: initialized to uniform +- {sqrt_k:.1e} (numel {param.data.numel()})")
                 param.data.uniform_(-sqrt_k, sqrt_k)
                 print(f"    n_in*var: {n_in*torch.var(param.data):.3f}")
-       
+
+
+class LitWrapper(LightningModule):
+    def __init__(self, torch_model):
+        super().__init__()
+        self.torch_model = torch_model
+    
+    def forward(self, inputs):
+        return self.torch_model(inputs)
+
 
 @dataclasses.dataclass(eq=False)
 class Torch_MLP_Mixin(Torch_Base):
@@ -73,11 +82,10 @@ class Torch_MLP_Mixin(Torch_Base):
         for i, layer_size in enumerate(self.mlp_layers):
             in_features = mlp_in_features if i==0 else self.mlp_layers[i-1]
             print(f"  MLP layer {i} with in/out features: {in_features}/{layer_size} (LeakyReLU activ.)")
-            if i>0:
-                if self.mlp_dropout and i != n_layers-1:
-                    mlp_layers.append(torch.nn.Dropout(p=self.mlp_dropout))
-                if self.mlp_batchnorm:
-                    mlp_layers.append(torch.nn.BatchNorm1d(num_features=in_features))
+            if self.mlp_batchnorm:
+                mlp_layers.append(torch.nn.BatchNorm1d(num_features=in_features))
+            elif self.mlp_dropout and i != n_layers-1:
+                mlp_layers.append(torch.nn.Dropout(p=self.mlp_dropout))
             mlp_layers.append(torch.nn.Linear(
                 in_features=in_features,
                 out_features=layer_size,
@@ -100,7 +108,7 @@ class Torch_MLP_Mixin(Torch_Base):
         else:
             print(f"  Logit output (log odds, log(p/(1-p))) with range [-inf,inf]; use sigmoid to get prob.")
 
-        return mlp_layers
+        return LitWrapper(mlp_layers)
 
 
 @dataclasses.dataclass(eq=False)
@@ -166,17 +174,17 @@ class Torch_CNN_Mixin(Torch_Base):
             print(f"    Output data shape: {data_shape}  (size {np.prod(data_shape)})")
             assert np.all(np.array(data_shape) >= 1), f"Bad data shape {data_shape} after CNN layer {i}"
             if i>0:
-                if self.cnn_dropout:
-                    cnn.append(torch.nn.Dropout(p=self.cnn_dropout))
                 if self.cnn_batchnorm:
                     cnn.append(torch.nn.BatchNorm3d(num_features=self.cnn_num_kernels[i-1]))
+                elif self.cnn_dropout:
+                    cnn.append(torch.nn.Dropout(p=self.cnn_dropout))
             cnn.append(conv3d)
             cnn.append(torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope))
 
         num_features = np.prod(data_shape)
         print(f"  CNN output features: {num_features}")
 
-        return cnn, num_features, data_shape
+        return LitWrapper(cnn), num_features, data_shape
 
     def make_cnn_decoder(self, input_data_shape: Iterable) -> torch.nn.Module:
         decoder = torch.nn.Sequential()
@@ -202,14 +210,15 @@ class Torch_CNN_Mixin(Torch_Base):
             data_shape = tuple(conv3d(torch.zeros(size=data_shape)).size())
             print(f"    Output data shape: {data_shape}  (size {np.prod(data_shape)})")
             assert np.all(np.array(data_shape) >= 1), f"Bad data shape {data_shape} after Decoder layer {i}"
-            if self.cnn_batchnorm:
+            if self.cnn_batchnorm and i>0:
                 decoder.append(torch.nn.BatchNorm3d(num_features=self.cnn_num_kernels[i]))
             decoder.append(conv3d)
-            decoder.append(torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope))
+            if i > 0:
+                decoder.append(torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope))
     
         assert np.array_equal(self.input_data_shape, data_shape)
     
-        return decoder
+        return LitWrapper(decoder)
 
 
 @dataclasses.dataclass(eq=False)
@@ -225,9 +234,12 @@ class Lightning_Model(
     log_dir: str = dataclasses.field(default='.', init=False)
     # the following must be listed in `_frontend_names`
     reconstruction_decoder: bool = True
-    classifier_mlp: bool = True
     time_to_elm_mlp: bool = True
-    _frontend_names = ['reconstruction_decoder', 'classifier_mlp', 'time_to_elm_mlp']
+    classifier_25_mlp: bool = True
+    classifier_50_mlp: bool = True
+    classifier_75_mlp: bool = True
+    _frontend_names = ['reconstruction_decoder', 'time_to_elm_mlp', 
+                       'classifier_25_mlp', 'classifier_50_mlp', 'classifier_75_mlp']
     
     def __post_init__(self):
         super().__post_init__()
@@ -239,31 +251,28 @@ class Lightning_Model(
         self.cnn_encoder, cnn_features, cnn_output_shape = self.make_cnn_encoder()
 
         # `frontends` for regression, classification, and self-supervised learning
-        self.frontends = torch.nn.ModuleDict()
-        self.frontends_active = {}
+        self.frontends: Mapping[str, LightningModule] = torch.nn.ModuleDict()
+        self.losses_and_scores: Mapping[str, Callable] = {}
+        self.unfreeze_epoch: Mapping[str, int] = {}
+        
         for frontend_key in self._frontend_names:
-            if getattr(self, frontend_key) is True:
-                self.frontends_active[frontend_key] = True
-                if 'mlp' in frontend_key:
-                    new_module = self.make_mlp(mlp_in_features=cnn_features)
-                    self.frontends.update({frontend_key: new_module})
-                    if 'time_to_elm' in frontend_key:
-                        setattr(self, f"{frontend_key}_mse_loss", torch.nn.MSELoss())
-                        setattr(self, f"{frontend_key}_r2_score", sklearn.metrics.r2_score)
-                    elif 'classifier' in frontend_key:
-                        setattr(self, f"{frontend_key}_bce_loss", torch.nn.BCEWithLogitsLoss())
-                        setattr(self, f"{frontend_key}_f1_score", sklearn.metrics.f1_score)
-                    else:
-                        raise KeyError
-                elif 'decoder' in frontend_key:
-                    new_module = self.make_cnn_decoder(input_data_shape=cnn_output_shape)
-                    self.frontends.update({frontend_key: new_module})
-                    if 'reconstruction' in frontend_key:
-                        setattr(self, f"{frontend_key}_mse_loss", torch.nn.MSELoss())
-                    else:
-                        raise KeyError
-                else:
-                    raise KeyError
+            assert hasattr(self, frontend_key)
+            if not getattr(self, frontend_key):
+                continue
+            self.unfreeze_epoch[frontend_key] = 0
+            if frontend_key == 'reconstruction_decoder':
+                self.frontends[frontend_key] = self.make_cnn_decoder(input_data_shape=cnn_output_shape)
+                self.losses_and_scores[f"{frontend_key}_mse_loss"] = torch.nn.functional.mse_loss
+            elif frontend_key == 'time_to_elm_mlp':
+                self.frontends[frontend_key] = self.make_mlp(mlp_in_features=cnn_features)
+                self.losses_and_scores[f"{frontend_key}_mse_loss"] = torch.nn.functional.mse_loss
+                self.losses_and_scores[f"{frontend_key}_r2_score"] = sklearn.metrics.r2_score
+            elif 'classifier' in frontend_key:
+                self.frontends[frontend_key] = self.make_mlp(mlp_in_features=cnn_features)
+                self.losses_and_scores[f"{frontend_key}_bce_loss"] = torch.nn.functional.binary_cross_entropy_with_logits
+                self.losses_and_scores[f"{frontend_key}_f1_score"] = sklearn.metrics.f1_score
+            else:
+                raise KeyError
             
         total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"Total parameters {total_parameters:,}")
@@ -306,68 +315,56 @@ class Lightning_Model(
         results = {}
         features = self.cnn_encoder(signals)
         for frontend_key, frontend in self.frontends.items():
-            if self.frontends_active[frontend_key]:
-                results[frontend_key] = frontend(features)
+            results[frontend_key] = frontend(features)
         return results
 
     def update_step(self, batch, batch_idx, stage: str) -> torch.Tensor:
         signals, labels, class_labels = batch
         results = self(signals)
         sum_loss = None
-        for frontend_key, frontend_is_active in self.frontends_active.items():
-            if frontend_is_active is False:
-                continue
+        for frontend_key in self.frontends.keys():
             frontend_result = results[frontend_key]
             if 'time_to_elm' in frontend_key:
-                metric_suffices = ['mse_loss', 'r2_score']
+                target = labels
             elif 'reconstruction' in frontend_key:
-                metric_suffices = ['mse_loss']
+                target = signals
             elif 'classifier' in frontend_key:
-                metric_suffices = ['bce_loss', 'f1_score']
-            else:
-                raise ValueError
-            for metric_suffix in metric_suffices:
-                metric_name = f"{frontend_key}_{metric_suffix}"
-                metric: Callable = getattr(self, metric_name)
-                if 'time_to_elm' in metric_name:
-                    target = labels
-                elif 'reconstruction' in metric_name:
-                    target = signals
-                elif 'classifier' in metric_name:
-                    target = class_labels
-                else:
-                    raise ValueError
-                if 'loss' in metric_name:
-                    metric_value = metric(
-                        input=frontend_result, 
+                target = class_labels
+            for loss_or_score_name, func in self.losses_and_scores.items():
+                if frontend_key not in loss_or_score_name:
+                    continue
+                if 'loss' in loss_or_score_name:
+                    metric_value = func(
+                        input=frontend_result,
                         target=target.type_as(frontend_result),
                     )
-                elif 'score' in metric_name:
-                    if 'f1' in metric_name:
+                    sum_loss = metric_value if sum_loss is None else sum_loss + metric_value
+                elif 'score' in loss_or_score_name:
+                    if 'f1' in loss_or_score_name:
                         modified_predictions = (frontend_result > 0.5).type(torch.int)
                     else:
                         modified_predictions = frontend_result
-                    metric_value = metric(
+                    metric_value = func(
                         y_pred=modified_predictions.detach().cpu(), 
                         y_true=target.detach().cpu(),
                     )
-                else:
-                    raise ValueError
-                self.log(f"{metric_name}/{stage}", metric_value, sync_dist=True)
-                if 'loss' in metric_name:
-                    sum_loss = metric_value if sum_loss is None else sum_loss + metric_value
-        # if stage=='val' and self.current_epoch < 6:
-        #     # manually increase validation loss for initial epochs
-        #     sum_loss = sum_loss * 2
+                self.log(f"{loss_or_score_name}/{stage}", metric_value, sync_dist=True)
         self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True)
         return sum_loss
-    
+
     def on_fit_start(self) -> None:
         self.t_fit_start = time.time()
 
     def on_train_epoch_start(self):
         self.t_train_epoch_start = time.time()
         print(f"Epoch {self.current_epoch} start")
+        for frontend_key, frontend in self.frontends.items():
+            if self.current_epoch < self.unfreeze_epoch[frontend_key]:
+                print(f'  Frontend `{frontend_key}` is frozen')
+                frontend.freeze()
+            else:
+                print(f'  Frontend `{frontend_key}` is not frozen')
+                frontend.unfreeze()
 
     def training_step(self, batch, batch_idx) -> torch.Tensor:
         return self.update_step(batch, batch_idx, stage='train')
