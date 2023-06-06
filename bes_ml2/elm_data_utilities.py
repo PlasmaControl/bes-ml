@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import time
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -28,6 +29,8 @@ def plot_stats(
     bad_elm_indices: list = None,
     skip_elm_plots: bool = False,
 ):
+    t_start = time.time()
+
     datamodule = elm_datamodule.ELM_Datamodule(
         data_file=data_file,
         max_elms=max_elms,
@@ -191,6 +194,8 @@ def plot_stats(
         for pdf_file in inputs:
             pdf_file.unlink(missing_ok=True)
 
+    print(f"Elapsed time {time.time()-t_start:.1f} s")
+
     return
 
 
@@ -233,7 +238,7 @@ if __name__=='__main__':
     # )
     plot_stats(
         data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
-        # mask_sigma_outliers=6,
+        mask_sigma_outliers=0.0,
         # max_std=5.,
         # max_channels_above_sigma=18,
         # max_elms=200,

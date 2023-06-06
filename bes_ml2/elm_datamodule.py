@@ -315,9 +315,12 @@ class ELM_Datamodule(LightningDataModule):
                     bins=bins,
                 )
                 plt.xlabel('Channel-wise log10(kurt)')
-                for axis in axes:
+                for i_axis, axis in enumerate(axes):
                     plt.sca(axis)
-                    plt.ylabel('Counts')
+                    if i_axis==0:
+                        plt.ylabel('ELM counts')
+                    else:
+                        plt.ylabel('Channel counts')
                     plt.yscale('log')
                     plt.ylim(bottom=0.8)
                 plt.tight_layout()
