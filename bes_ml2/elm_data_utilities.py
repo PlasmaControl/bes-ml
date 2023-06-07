@@ -237,7 +237,7 @@ if __name__=='__main__':
     #     elm_indices=[77, 217, 219, 221, 223, 239, 247, 262, 315, 319],
     # )
     plot_stats(
-        data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
+        # data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
         mask_sigma_outliers=0.0,
         # max_std=5.,
         # max_channels_above_sigma=18,

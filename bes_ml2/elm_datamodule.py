@@ -219,9 +219,6 @@ class ELM_Datamodule(LightningDataModule):
             # package ELM events into pytorch dataset
             print(f"Reading ELM events for dataset `{dataset_stage}`")
             elm_data = []
-            all_data_pre_elm_size = 0
-            n_bins = 201
-            cummulative_hist = np.zeros(n_bins, dtype=int)
             with h5py.File(self.data_file, 'r') as h5_file:
                 if indices.size >= 5:
                     print(f"  Initial indices: {indices[:5]}")
@@ -234,7 +231,6 @@ class ELM_Datamodule(LightningDataModule):
                     labels = np.array(elm_event["labels"], dtype=int)
                     pre_elm_size = np.flatnonzero(labels == 1)[0]  # pre-ELM size = index of first active ELM
                     assert labels[pre_elm_size-1]==0 and labels[pre_elm_size]==1
-                    all_data_pre_elm_size += pre_elm_size
                     pre_elm_maxabs_by_channel = np.amax(np.abs(signals[:pre_elm_size,:,:]), axis=0)
                     min_max_mask = (
                         np.isclose(signals[:pre_elm_size,:4,:], 10.375800) |
@@ -261,20 +257,9 @@ class ELM_Datamodule(LightningDataModule):
                         'pre_elm_std_by_channel': pre_elm_std_by_channel,
                         'pre_elm_kurt_by_channel': pre_elm_kurt_by_channel,
                     })
-                    hist, bin_edges = np.histogram(
-                        signals[:pre_elm_size:50, :, :],
-                        bins=n_bins,
-                        range=[-10.4, 10.4],
-                    )
-                    cummulative_hist += hist
-
-            bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
-            mean_all_data = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
-            stdev_all_data = np.sqrt(np.sum(cummulative_hist * (bin_center - mean_all_data) ** 2) / np.sum(cummulative_hist))
-            exkurt_all_data = np.sum(cummulative_hist * ((bin_center - mean_all_data)/stdev_all_data) ** 4) / np.sum(cummulative_hist) - 3
 
             if self.plot_data_stats and self.is_global_zero:
-                fig, axes = plt.subplots(ncols=3, nrows=2, figsize=(9, 4.5))
+                _, axes = plt.subplots(ncols=3, nrows=2, figsize=(9, 4.5))
                 axes = axes.flatten()
                 bins = 25
                 plt.suptitle(f"Pre-ELM statistics | `{dataset_stage}` dataset with {len(elm_data)} ELMs")
@@ -293,10 +278,10 @@ class ELM_Datamodule(LightningDataModule):
                 plt.sca(axes[2])
                 plt.hist(
                     np.concatenate([elm['pre_elm_maxcount_by_channel'] for elm in elm_data], axis=None), 
-                    bins=20,
-                    range=(0,20),
+                    bins=[1,2,4,8,16,32,64],
                 )
                 plt.xlabel('Channel-wise saturated points')
+                plt.xscale('log')
                 plt.sca(axes[3])
                 plt.hist(
                     np.concatenate([elm['pre_elm_mean_by_channel'] for elm in elm_data], axis=None), 
