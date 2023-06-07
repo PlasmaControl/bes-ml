@@ -219,6 +219,7 @@ class ELM_Datamodule(LightningDataModule):
             # package ELM events into pytorch dataset
             print(f"Reading ELM events for dataset `{dataset_stage}`")
             elm_data = []
+            # indices = indices[::5]
             with h5py.File(self.data_file, 'r') as h5_file:
                 if indices.size >= 5:
                     print(f"  Initial indices: {indices[:5]}")
@@ -232,6 +233,7 @@ class ELM_Datamodule(LightningDataModule):
                     pre_elm_size = np.flatnonzero(labels == 1)[0]  # pre-ELM size = index of first active ELM
                     assert labels[pre_elm_size-1]==0 and labels[pre_elm_size]==1
                     pre_elm_maxabs_by_channel = np.amax(np.abs(signals[:pre_elm_size,:,:]), axis=0)
+                    pre_elm_minabs_by_channel = np.amin(np.abs(signals[:pre_elm_size,:,:]), axis=0)
                     min_max_mask = (
                         np.isclose(signals[:pre_elm_size,:4,:], 10.375800) |
                         np.isclose(signals[:pre_elm_size,:4,:], -10.376433) |
@@ -252,6 +254,7 @@ class ELM_Datamodule(LightningDataModule):
                         'time_t0': elm_event['time'][0],
                         'pre_elm_size': pre_elm_size,
                         'pre_elm_maxabs_by_channel': pre_elm_maxabs_by_channel,
+                        'pre_elm_minabs_by_channel': pre_elm_minabs_by_channel,
                         'pre_elm_maxcount_by_channel': pre_elm_maxcount_by_channel,
                         'pre_elm_mean_by_channel': pre_elm_mean_by_channel,
                         'pre_elm_std_by_channel': pre_elm_std_by_channel,
@@ -259,10 +262,10 @@ class ELM_Datamodule(LightningDataModule):
                     })
 
             if self.plot_data_stats and self.is_global_zero:
-                _, axes = plt.subplots(ncols=3, nrows=2, figsize=(9, 4.5))
+                _, axes = plt.subplots(ncols=3, nrows=3, figsize=(9, 7))
                 axes = axes.flatten()
                 bins = 25
-                plt.suptitle(f"Pre-ELM statistics | `{dataset_stage}` dataset with {len(elm_data)} ELMs")
+                plt.suptitle(f"Pre-ELM statistics (raw signals) | `{dataset_stage}` dataset with {len(elm_data)} ELMs")
                 plt.sca(axes[0])
                 plt.hist(
                     np.array([elm['pre_elm_size'] for elm in elm_data])/1e3, 
@@ -271,45 +274,64 @@ class ELM_Datamodule(LightningDataModule):
                 plt.xlabel('Pre-ELM size (ms)')
                 plt.sca(axes[1])
                 plt.hist(
+                    np.concatenate([elm['pre_elm_mean_by_channel'] for elm in elm_data], axis=None), 
+                    bins=bins,
+                )
+                plt.xlabel('Channel-wise mean')
+                plt.sca(axes[2])
+                plt.hist(
+                    np.log10(np.concatenate([elm['pre_elm_kurt_by_channel'] for elm in elm_data], axis=None)),
+                    bins=bins,
+                )
+                plt.xlabel('Channel-wise log10(kurt)')
+                plt.sca(axes[3])
+                plt.hist(
                     np.concatenate([elm['pre_elm_maxabs_by_channel'] for elm in elm_data], axis=None), 
                     bins=bins,
                 )
                 plt.xlabel('Channel-wise max(abs())')
-                plt.sca(axes[2])
+                plt.sca(axes[4])
                 plt.hist(
                     np.concatenate([elm['pre_elm_maxcount_by_channel'] for elm in elm_data], axis=None), 
                     bins=[1,2,4,8,16,32,64],
                 )
                 plt.xlabel('Channel-wise saturated points')
                 plt.xscale('log')
-                plt.sca(axes[3])
-                plt.hist(
-                    np.concatenate([elm['pre_elm_mean_by_channel'] for elm in elm_data], axis=None), 
-                    bins=bins,
-                )
-                plt.xlabel('Channel-wise mean')
-                plt.sca(axes[4])
+                plt.sca(axes[5])
                 plt.hist(
                     np.concatenate([elm['pre_elm_std_by_channel'] for elm in elm_data], axis=None), 
                     bins=bins,
                 )
                 plt.xlabel('Channel-wise std. dev.')
-                plt.sca(axes[5])
+                plt.sca(axes[6])
                 plt.hist(
-                    np.log10(np.concatenate([elm['pre_elm_kurt_by_channel'] for elm in elm_data], axis=None)),
+                    np.concatenate([elm['pre_elm_maxabs_by_channel'].max() for elm in elm_data], axis=None), 
                     bins=bins,
                 )
-                plt.xlabel('Channel-wise log10(kurt)')
+                plt.xlabel('ELM-wise max(abs())')
+                plt.sca(axes[7])
+                plt.hist(
+                    np.concatenate([elm['pre_elm_maxcount_by_channel'].sum() for elm in elm_data], axis=None), 
+                    bins=[1,2,4,8,16,32,64],
+                )
+                plt.xlabel('ELM-wise saturated points')
+                plt.xscale('log')
+                plt.sca(axes[8])
+                plt.hist(
+                    np.concatenate([elm['pre_elm_std_by_channel'].max() for elm in elm_data], axis=None), 
+                    bins=bins,
+                )
+                plt.xlabel('ELM-wise std. dev.')
                 for i_axis, axis in enumerate(axes):
                     plt.sca(axis)
-                    if i_axis==0:
+                    if i_axis in [0,6,7,8]:
                         plt.ylabel('ELM counts')
                     else:
                         plt.ylabel('Channel counts')
                     plt.yscale('log')
                     plt.ylim(bottom=0.8)
                 plt.tight_layout()
-                filepath = os.path.join(self.log_dir, f'{dataset_stage}_dataset_stats.pdf')
+                filepath = os.path.join(self.log_dir, f'{dataset_stage}_raw_dataset_stats.pdf')
                 print(f"  Saving figure {filepath}")
                 plt.savefig(filepath, format='pdf', transparent=True)
                 plt.close()

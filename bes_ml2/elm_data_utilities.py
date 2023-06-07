@@ -88,9 +88,15 @@ def plot_stats(
                 ax.clear()
         plt.sca(axes[i_elm_on_page + 5*(i_elm_on_page//5)])
         for key in channel_wise_stats:
-            plt.plot(np.arange(1,65), channel_wise_stats[key].flatten(), label=key)
-        plt.axhline(0, linestyle='--', color='k', linewidth=0.5)
-        plt.axhline(datamodule.max_abs_valid_signal, linestyle='--', color='k', linewidth=0.5)
+            plt.plot(np.arange(1,65), np.abs(channel_wise_stats[key].flatten()), label=key)
+            if key == 'std':
+                plt.annotate(
+                    f"max std {channel_wise_stats[key].max():.1f}",
+                    xy=[0.65, 0.85],
+                    xycoords='axes fraction')
+                plt.axhline(channel_wise_stats[key].max(), linestyle='--', color='C2', linewidth=0.75)
+        # plt.axhline(0, linestyle='--', color='k', linewidth=0.5)
+        plt.axhline(datamodule.max_abs_valid_signal, linestyle='--', color='k', linewidth=0.75)
         plt.title(
             f"ELM index {elm_index} Shot {shot}", 
             fontsize='medium',
@@ -100,14 +106,16 @@ def plot_stats(
         plt.xlabel('Channel', fontsize='medium')
         plt.xticks(fontsize='medium')
         plt.yticks(fontsize='medium')
-        plt.ylim(-1,1.3*datamodule.max_abs_valid_signal)
+        plt.yscale('log')
+        plt.ylim(0.03, 1.4*datamodule.max_abs_valid_signal)
+        # plt.ylim(-1,1.3*datamodule.max_abs_valid_signal)
         if i_elm_on_page==0:
             plt.legend(loc='lower right', fontsize='small')
         # plot time-series signals
         plt.sca(axes[i_elm_on_page + 5*(i_elm_on_page//5) + 5])
         max_abs_channel = np.unravel_index(np.argmax(channel_wise_stats['maxabs']), channel_wise_stats['maxabs'].shape)
         max_std_channel = np.unravel_index(np.argmax(channel_wise_stats['std']), channel_wise_stats['std'].shape)
-        interval = np.amax([pre_elm_size//500,1])
+        interval = np.amax([pre_elm_size//1000,1])
         time_axis = (np.arange(-pre_elm_size,0)/1e3)[::interval]
         plt.plot(
             time_axis, 
@@ -151,7 +159,7 @@ def plot_stats(
     print(f"Rejected ELMs: {count_rejected_elms}")
 
     _, axes = plt.subplots(nrows=2, ncols=2)
-    plt.suptitle('Distribution of maximum channel-wise stats during pre_ELM phase')
+    plt.suptitle('Pre-ELM channel-wise stats (processed signals)')
     axes = axes.flatten()
     for i_axis, key in enumerate(all_channel_stats):
         plt.sca(axes[i_axis])
@@ -164,7 +172,7 @@ def plot_stats(
         plt.xlabel(key)
     plt.tight_layout()
     if save:
-        filepath = os.path.join(figure_dir, f'elm_stats_summary.pdf')
+        filepath = os.path.join(figure_dir, f'elm_processed_stats_summary.pdf')
         print(f"Saving figure {filepath}")
         plt.savefig(filepath, format='pdf', transparent=True)
     plt.show(block=block_show)
@@ -194,7 +202,7 @@ def plot_stats(
         for pdf_file in inputs:
             pdf_file.unlink(missing_ok=True)
 
-    print(f"Elapsed time {time.time()-t_start:.1f} s")
+    print(f"Elapsed time {(time.time()-t_start)/60:.1f} m")
 
     return
 
@@ -237,15 +245,15 @@ if __name__=='__main__':
     #     elm_indices=[77, 217, 219, 221, 223, 239, 247, 262, 315, 319],
     # )
     plot_stats(
-        # data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
+        data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
+        bad_elm_indices_csv=False,
+        block_show=False,
         mask_sigma_outliers=0.0,
         # max_std=5.,
         # max_channels_above_sigma=18,
         # max_elms=200,
-        bad_elm_indices_csv=False,
         # skip_elm_plots=True,
         # save=False,
         # merge=False,
-        block_show=False,
     )
     
