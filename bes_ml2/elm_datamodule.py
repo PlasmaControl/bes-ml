@@ -132,8 +132,10 @@ class ELM_Datamodule(LightningDataModule):
     fraction_test: float = 0.2  # fraction of dataset for testing
     seed: int = 0  # RNG seed for deterministic, reproducible shuffling of ELM events
     max_elms: int = None
-    max_predict_elms: int = 24
-    mask_sigma_outliers: float = 8.0  # remove signal windows with abs(standardized_signals) > n_sigma
+    max_predict_elms: int = None
+    mask_sigma_outliers: float = None  # remove signal windows with abs(standardized_signals) > n_sigma
+    limit_preelm_max_abs: float = None
+    limit_preelm_max_stdev: float = None
     bad_elm_indices: list = None  # iterable of ELM indices to skip when reading data
     bad_elm_indices_csv: str | bool = True  # CSV file to read bad ELM indices
     log_time: bool = False  # if True, use label = log(time_to_elm_onset)
@@ -220,6 +222,8 @@ class ELM_Datamodule(LightningDataModule):
             print(f"Reading ELM events for dataset `{dataset_stage}`")
             elm_data = []
             # indices = indices[::5]
+            skipped_elms_max = 0
+            skipped_elms_std = 0
             with h5py.File(self.data_file, 'r') as h5_file:
                 if indices.size >= 5:
                     print(f"  Initial indices: {indices[:5]}")
@@ -233,16 +237,23 @@ class ELM_Datamodule(LightningDataModule):
                     pre_elm_size = np.flatnonzero(labels == 1)[0]  # pre-ELM size = index of first active ELM
                     assert labels[pre_elm_size-1]==0 and labels[pre_elm_size]==1
                     pre_elm_maxabs_by_channel = np.amax(np.abs(signals[:pre_elm_size,:,:]), axis=0)
-                    pre_elm_minabs_by_channel = np.amin(np.abs(signals[:pre_elm_size,:,:]), axis=0)
+                    if self.limit_preelm_max_abs and pre_elm_maxabs_by_channel.max()>=self.limit_preelm_max_abs:
+                        # print(f"  Skipping i_elm {i_elm} with elm index {elm_index} due to max abs limit")
+                        skipped_elms_max += 1
+                        continue
                     min_max_mask = (
                         np.isclose(signals[:pre_elm_size,:4,:], 10.375800) |
-                        np.isclose(signals[:pre_elm_size,:4,:], -10.376433) |
-                        np.isclose(signals[:pre_elm_size,4:,:], 5.186306) |
-                        np.isclose(signals[:pre_elm_size,4:,:], -5.405264)
+                        np.isclose(signals[:pre_elm_size,:4,:], -10.376433)
+                        # np.isclose(signals[:pre_elm_size,4:,:], 5.186306) |
+                        # np.isclose(signals[:pre_elm_size,4:,:], -5.405264)
                     )
                     pre_elm_maxcount_by_channel = np.count_nonzero(min_max_mask, axis=0)
                     pre_elm_mean_by_channel = np.mean(signals[:pre_elm_size,:,:], axis=0)
                     pre_elm_std_by_channel = np.std(signals[:pre_elm_size,:,:], axis=0)
+                    if self.limit_preelm_max_stdev and pre_elm_std_by_channel.max()>=self.limit_preelm_max_stdev:
+                        # print(f"  Skipping i_elm {i_elm} with elm index {elm_index} due to max std limit")
+                        skipped_elms_std += 1
+                        continue
                     pre_elm_kurt_by_channel = scipy.stats.kurtosis(signals[:pre_elm_size,:,:], axis=0, fisher=False)
                     labels, signals, valid_t0 = self._get_valid_indices(labels, signals)
                     elm_data.append({
@@ -254,7 +265,6 @@ class ELM_Datamodule(LightningDataModule):
                         'time_t0': elm_event['time'][0],
                         'pre_elm_size': pre_elm_size,
                         'pre_elm_maxabs_by_channel': pre_elm_maxabs_by_channel,
-                        'pre_elm_minabs_by_channel': pre_elm_minabs_by_channel,
                         'pre_elm_maxcount_by_channel': pre_elm_maxcount_by_channel,
                         'pre_elm_mean_by_channel': pre_elm_mean_by_channel,
                         'pre_elm_std_by_channel': pre_elm_std_by_channel,
@@ -280,10 +290,10 @@ class ELM_Datamodule(LightningDataModule):
                 plt.xlabel('Channel-wise mean')
                 plt.sca(axes[2])
                 plt.hist(
-                    np.log10(np.concatenate([elm['pre_elm_kurt_by_channel'] for elm in elm_data], axis=None)),
+                    np.log10(np.concatenate([elm['pre_elm_kurt_by_channel'].max() for elm in elm_data], axis=None)),
                     bins=bins,
                 )
-                plt.xlabel('Channel-wise log10(kurt)')
+                plt.xlabel('ELM-wise max ch log10(kurt)')
                 plt.sca(axes[3])
                 plt.hist(
                     np.concatenate([elm['pre_elm_maxabs_by_channel'] for elm in elm_data], axis=None), 
@@ -314,14 +324,14 @@ class ELM_Datamodule(LightningDataModule):
                     np.concatenate([elm['pre_elm_maxcount_by_channel'].sum() for elm in elm_data], axis=None), 
                     bins=[1,2,4,8,16,32,64],
                 )
-                plt.xlabel('ELM-wise saturated points')
+                plt.xlabel('ELM-wise total saturated points')
                 plt.xscale('log')
                 plt.sca(axes[8])
                 plt.hist(
                     np.concatenate([elm['pre_elm_std_by_channel'].max() for elm in elm_data], axis=None), 
                     bins=bins,
                 )
-                plt.xlabel('ELM-wise std. dev.')
+                plt.xlabel('ELM-wise max ch. std. dev.')
                 for i_axis, axis in enumerate(axes):
                     plt.sca(axis)
                     if i_axis in [0,6,7,8]:
@@ -335,6 +345,10 @@ class ELM_Datamodule(LightningDataModule):
                 print(f"  Saving figure {filepath}")
                 plt.savefig(filepath, format='pdf', transparent=True)
                 plt.close()
+
+            print(f"  Valid ELMs: {len(elm_data)}")
+            print(f"  Skipped ELMs for pre-ELM max abs >= {self.limit_preelm_max_abs}: {skipped_elms_max}")
+            print(f"  Skipped ELMs for pre-ELM max std >= {self.limit_preelm_max_stdev}: {skipped_elms_std}")
 
             packaged_labels = np.concatenate([elm['labels'] for elm in elm_data], axis=0)
             packaged_signals = np.concatenate([elm['signals'] for elm in elm_data], axis=0)
