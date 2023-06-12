@@ -186,6 +186,7 @@ if __name__=='__main__':
             batch_size=128,
             fraction_validation=0.2,
             fraction_test=0.2,
+            fir_hp_filter=5,  # highpass filter with f_cuton in kHz
         )
 
     trainer = BES_Trainer(

@@ -7,11 +7,13 @@ import time
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.stats
+import scipy.signal
 import h5py
 
 import torch
 import torch.nn
 import torch.utils.data
+import torchaudio.functional
 
 from lightning.pytorch import LightningDataModule
 
@@ -147,6 +149,7 @@ class ELM_Datamodule(LightningDataModule):
     log_time: bool = False  # if True, use label = log(time_to_elm_onset)
     prepare_data_per_node: bool = None  # hack to avoid error between dataclass and LightningDataModule
     plot_data_stats: bool = True
+    fir_hp_filter: float = None
     is_global_zero: bool = dataclasses.field(default=True, init=False)
     log_dir: str = dataclasses.field(default='.', init=False)
 
@@ -179,6 +182,18 @@ class ELM_Datamodule(LightningDataModule):
         self.test_elm_indices = None
         self.train_elm_indices = None
         self.validation_elm_indices = None
+        
+        self.b_coeffs = self.a_coeffs = None
+        if self.fir_hp_filter:
+            self.b_coeffs = scipy.signal.firwin(
+                numtaps=51,  # must be odd
+                cutoff=self.fir_hp_filter,  # transition width in kHz
+                pass_zero='highpass',
+                width=10,  # transition width in kHz
+                nyq=500,  # f_Nyquist in kHz
+            )
+            self.a_coeffs = np.zeros_like(self.b_coeffs)
+            self.a_coeffs[0] = 1
 
         print(f'Initiating {self.__class__.__name__}')
         class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
@@ -241,6 +256,15 @@ class ELM_Datamodule(LightningDataModule):
                         print(f"  Reading ELM event {i_elm:04d}/{indices.size:04d}")
                     elm_event = h5_file[f"{elm_index:05d}"]
                     signals = np.array(elm_event["signals"], dtype=np.float32)  # (64, <time>)
+                    if self.b_coeffs is not None:
+                        signals = np.array(
+                            scipy.signal.lfilter(
+                                x=signals,
+                                a=self.a_coeffs,
+                                b=self.b_coeffs,
+                            ),
+                            dtype=np.float32,
+                        )
                     signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (time, pol, rad)
                     labels = np.array(elm_event["labels"], dtype=int)
                     pre_elm_size = np.flatnonzero(labels == 1)[0]  # pre-ELM size = index of first active ELM
