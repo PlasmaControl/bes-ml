@@ -290,6 +290,12 @@ class Lightning_Model(
 
         self.initialize_layers()
 
+    def setup(self, stage=None):
+        datamodule = self.trainer.datamodule
+        for label_percentile in ['label_scaled_25p', 'label_scaled_50p', 'label_scaled_75p']:
+            assert hasattr(datamodule, label_percentile)
+            setattr(self, label_percentile, getattr(datamodule, label_percentile))
+
     def configure_optimizers(self):
         self.optimizer = torch.optim.Adam(
             self.parameters(), 
@@ -319,7 +325,7 @@ class Lightning_Model(
         return results
 
     def update_step(self, batch, batch_idx, stage: str) -> torch.Tensor:
-        signals, labels, class_labels = batch
+        signals, labels, class_labels_50p, class_labels_25p, class_labels_75p = batch
         results = self(signals)
         sum_loss = None
         for frontend_key in self.frontends.keys():
@@ -328,8 +334,14 @@ class Lightning_Model(
                 target = labels
             elif 'reconstruction' in frontend_key:
                 target = signals
-            elif 'classifier' in frontend_key:
-                target = class_labels
+            elif frontend_key == 'classifier_25_mlp':
+                target = class_labels_25p
+            elif frontend_key == 'classifier_50_mlp':
+                target = class_labels_50p
+            elif frontend_key == 'classifier_75_mlp':
+                target = class_labels_75p
+            else:
+                raise KeyError
             for loss_or_score_name, func in self.losses_and_scores.items():
                 if frontend_key not in loss_or_score_name:
                     continue

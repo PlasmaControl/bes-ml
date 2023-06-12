@@ -182,10 +182,10 @@ if __name__=='__main__':
         )
         datamodule = elm_datamodule.ELM_Datamodule(
             signal_window_size=lightning_model.signal_window_size,
-            # max_elms=5,
+            max_elms=5,
             batch_size=128,
-            fraction_test=0.2,
             fraction_validation=0.2,
+            fraction_test=0.2,
         )
 
     trainer = BES_Trainer(
@@ -194,9 +194,8 @@ if __name__=='__main__':
         # wandb_log=True,
     )
 
-    lightning_model.unfreeze_epoch['time_to_elm_mlp'] = 2
     trainer.run_all(
-        max_epochs=4,
-        # skip_test=True,
-        # skip_predict=True,
+        max_epochs=2,
+        skip_test=True,
+        skip_predict=True,
     )
