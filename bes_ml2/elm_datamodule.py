@@ -3,6 +3,7 @@ import dataclasses
 from pathlib import Path
 import os
 import time
+from typing import Any
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -150,6 +151,7 @@ class ELM_Datamodule(LightningDataModule):
     prepare_data_per_node: bool = None  # hack to avoid error between dataclass and LightningDataModule
     plot_data_stats: bool = True
     fir_hp_filter: float = None
+    post_elm_size: int = None
     is_global_zero: bool = dataclasses.field(default=True, init=False)
     log_dir: str = dataclasses.field(default='.', init=False)
 
@@ -172,6 +174,7 @@ class ELM_Datamodule(LightningDataModule):
             'label_scaled_25p',
             'label_scaled_50p',
             'label_scaled_75p',
+            'max_label_post_elm',
         ]
         for item in self.state_items:
             if not hasattr(self, item):
@@ -186,14 +189,22 @@ class ELM_Datamodule(LightningDataModule):
         self.b_coeffs = self.a_coeffs = None
         if self.fir_hp_filter:
             self.b_coeffs = scipy.signal.firwin(
-                numtaps=51,  # must be odd
+                numtaps=301,  # must be odd
                 cutoff=self.fir_hp_filter,  # transition width in kHz
                 pass_zero='highpass',
-                width=10,  # transition width in kHz
-                nyq=500,  # f_Nyquist in kHz
+                # width=5,  # transition width in kHz
+                fs=1e3,  # f_sample in kHz
             )
             self.a_coeffs = np.zeros_like(self.b_coeffs)
             self.a_coeffs[0] = 1
+            w, h = scipy.signal.freqz(self.b_coeffs, self.a_coeffs, worN=np.logspace(-1, np.log10(500), 1000), fs=1e3)
+            plt.figure()
+            plt.semilogx(w, 10 * np.log10(abs(h)))
+            plt.title('FIR filter response')
+            plt.xlabel('Frequency (kHz)')
+            plt.ylabel('Transmission [dB]')
+            plt.ylim([-30, None])
+            plt.show(block=True)
 
         print(f'Initiating {self.__class__.__name__}')
         class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
@@ -267,8 +278,13 @@ class ELM_Datamodule(LightningDataModule):
                         )
                     signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (time, pol, rad)
                     labels = np.array(elm_event["labels"], dtype=int)
-                    pre_elm_size = np.flatnonzero(labels == 1)[0]  # pre-ELM size = index of first active ELM
+                    active_elm_indices = np.flatnonzero(labels == 1)
+                    pre_elm_size = active_elm_indices[0]  # pre-ELM size = index of first active ELM
                     assert labels[pre_elm_size-1]==0 and labels[pre_elm_size]==1
+                    post_elm_size = labels.size - (active_elm_indices[-1] + 1)
+                    post_elm_start_index = active_elm_indices[-1] + 1
+                    assert labels[post_elm_start_index-1]==1 and labels[post_elm_start_index]==0
+                    assert pre_elm_size + active_elm_indices.size + post_elm_size == labels.size
                     pre_elm_maxabs_by_channel = np.amax(np.abs(signals[:pre_elm_size,:,:]), axis=0)
                     if self.limit_preelm_max_abs and pre_elm_maxabs_by_channel.max()>=self.limit_preelm_max_abs:
                         # print(f"  Skipping i_elm {i_elm} with elm index {elm_index} due to max abs limit")
@@ -277,22 +293,29 @@ class ELM_Datamodule(LightningDataModule):
                     min_max_mask = (
                         np.isclose(signals[:pre_elm_size,:4,:], 10.375800) |
                         np.isclose(signals[:pre_elm_size,:4,:], -10.376433)
-                        # np.isclose(signals[:pre_elm_size,4:,:], 5.186306) |
-                        # np.isclose(signals[:pre_elm_size,4:,:], -5.405264)
                     )
                     pre_elm_maxcount_by_channel = np.count_nonzero(min_max_mask, axis=0)
                     pre_elm_mean_by_channel = np.mean(signals[:pre_elm_size,:,:], axis=0)
                     pre_elm_std_by_channel = np.std(signals[:pre_elm_size,:,:], axis=0)
                     if self.limit_preelm_max_stdev and pre_elm_std_by_channel.max()>=self.limit_preelm_max_stdev:
-                        # print(f"  Skipping i_elm {i_elm} with elm index {elm_index} due to max std limit")
                         skipped_elms_std += 1
                         continue
                     pre_elm_kurt_by_channel = scipy.stats.kurtosis(signals[:pre_elm_size,:,:], axis=0, fisher=False)
-                    labels, signals, valid_t0 = self._get_valid_indices(labels, signals)
+                    labels, signals, post_elm_valid_t0 = self._get_valid_indices(labels, signals)
+
+                    # post-ELM signals?
+                    labels_post_elm = signals_post_elm = valid_t0_post_elm = None
+                    if self.post_elm_size and self.post_elm_size + 500 + self.signal_window_size <= post_elm_size:
+                        labels_post_elm, signals_post_elm, valid_t0_post_elm = \
+                            self._get_valid_indices(labels, signals, self.post_elm_size)
+
                     elm_data.append({
                         'signals': signals, 
                         'labels': labels, 
-                        'valid_t0': valid_t0,
+                        'valid_t0': post_elm_valid_t0,
+                        'signals_post_elm': signals_post_elm, 
+                        'labels_post_elm': labels_post_elm, 
+                        'valid_t0_post_elm': valid_t0_post_elm,
                         'elm_index': elm_index,
                         'shot': elm_event.attrs['shot'],
                         'time_t0': elm_event['time'][0],
@@ -383,12 +406,36 @@ class ELM_Datamodule(LightningDataModule):
             print(f"  Skipped ELMs for pre-ELM max abs >= {self.limit_preelm_max_abs}: {skipped_elms_max}")
             print(f"  Skipped ELMs for pre-ELM max std >= {self.limit_preelm_max_stdev}: {skipped_elms_std}")
 
-            packaged_labels = np.concatenate([elm['labels'] for elm in elm_data], axis=0)
-            packaged_signals = np.concatenate([elm['signals'] for elm in elm_data], axis=0)
-            print(f"  Global min/max raw signal, ch 1-32: {np.amin(packaged_signals[:,:4,:]):.6f}, {np.amax(packaged_signals[:,:4,:]):.6f}")
-            print(f"  Global min/max raw signal, ch 33-64: {np.amin(packaged_signals[:,4:,:]):.6f}, {np.amax(packaged_signals[:,4:,:]):.6f}")
-            packaged_valid_t0 = np.concatenate([elm['valid_t0'] for elm in elm_data], axis=0)
-            assert packaged_labels.size == packaged_valid_t0.size
+            packaged_labels = np.concatenate(
+                (
+                    [elm['labels'] for elm in elm_data] +
+                    [elm['labels_post_elm'] for elm in elm_data if elm['labels_post_elm'] is not None]
+                ),
+                axis=0,
+            )
+            packaged_signals = np.concatenate(
+                (
+                    [elm['signals'] for elm in elm_data] +
+                    [elm['signals_post_elm'] for elm in elm_data if elm['signals_post_elm'] is not None]
+                ), 
+                axis=0,
+            )
+            packaged_valid_t0 = np.concatenate(
+                (
+                    [elm['valid_t0'] for elm in elm_data] +
+                    [elm['valid_t0_post_elm'] for elm in elm_data if elm['valid_t0_post_elm'] is not None]
+                ),
+                axis=0,
+            )
+            assert packaged_labels.size == packaged_valid_t0.size and packaged_labels.size == packaged_signals.shape[0]
+            assert np.nanmin(packaged_labels) == 1
+
+            # valid t0 indices
+            packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
+            packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
+            assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices]))
+            assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices + self.signal_window_size]))
+
             # start indices for each ELM event in concatenated dataset
             packaged_window_start = []
             index = 0
@@ -407,16 +454,16 @@ class ELM_Datamodule(LightningDataModule):
             packaged_t0 = np.array(
                 [elm['time_t0'] for elm in elm_data]
             )
-            # valid t0 indices
-            packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
-            packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
-            assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices]))
-            assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices + self.signal_window_size]))
-            print("  Raw data stats")
+
+            # raw signal stats
+            print(f"  Global min/max raw signal, ch 1-32: {np.amin(packaged_signals[:,:4,:]):.6f}, {np.amax(packaged_signals[:,:4,:]):.6f}")
+            print(f"  Global min/max raw signal, ch 33-64: {np.amin(packaged_signals[:,4:,:]):.6f}, {np.amax(packaged_signals[:,4:,:]):.6f}")
+            print(f"  Raw data stats")
             stats = self._get_statistics(
                 sample_indices=packaged_valid_t0_indices,
                 signals=packaged_signals,
             )
+
             # mask outlier signals
             if self.mask_sigma_outliers:
                 if None in [self.mask_lb, self.mask_ub]:
@@ -468,6 +515,9 @@ class ELM_Datamodule(LightningDataModule):
             if self.label_raw_median is None:
                 # assert dataset_stage == 'train' or not self.train_elm_indices, f"Dataset_stage: {dataset_stage}"
                 print(f"  Calculating median label from {dataset_stage} labels")
+                assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices]))
+                assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices+self.signal_window_size]))
+                assert np.nanmin(packaged_labels) == 1
                 self.label_raw_median = np.median(packaged_labels[packaged_valid_t0_indices+self.signal_window_size])
                 self.save_hyperparameters({'label_raw_median': self.label_raw_median.item()})
             print(f"  Normalizing labels (min=-1 and median=0) with median time-to-elm {self.label_raw_median:.1f} mu-s")
@@ -494,6 +544,22 @@ class ELM_Datamodule(LightningDataModule):
                     'label_scaled_50p': self.label_scaled_50p,
                     'label_scaled_75p': self.label_scaled_75p,
                 })
+            
+            # add post-ELM data
+            if self.post_elm_size and np.any(packaged_valid_t0 == 2):
+                if self.max_label_post_elm is None:
+                    self.max_label_post_elm = np.nanmax(packaged_labels)
+                    self.save_hyperparameters({'max_label_post_elm': self.max_label_post_elm.item()})
+                post_elm_valid_t0 = packaged_valid_t0 == 2
+                print(f"  Adding {np.count_nonzero(post_elm_valid_t0)} post-ELM signal windows with label = {self.max_label_post_elm:.3f}")
+                packaged_valid_t0[post_elm_valid_t0] = 1
+                packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
+                packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
+                for idx in packaged_valid_t0_indices:
+                    packaged_labels[idx:idx+self.signal_window_size+1] = self.max_label_post_elm
+                assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices]))
+                assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices]))
+
             if dataset_stage in ['train', 'validation', 'test']:
                 self.datasets[dataset_stage] = ELM_TrainValTest_Dataset(
                     signals=packaged_signals,
@@ -504,6 +570,7 @@ class ELM_Datamodule(LightningDataModule):
                     label_scaled_25p=self.label_scaled_25p,
                     label_scaled_75p=self.label_scaled_75p,
                 )
+
             if dataset_stage in ['test', 'predict']:
                 predict_datasets = []
                 for i_elm, idx_start in enumerate(packaged_window_start):
@@ -525,6 +592,56 @@ class ELM_Datamodule(LightningDataModule):
                     predict_datasets.append(dataset)
                 self.datasets['predict'] = predict_datasets
             print(f"  Data stage `{dataset_stage}` elapsed time {(time.time()-t0)/60:.1f} min")
+
+    def _get_valid_indices(
+        self,
+        labels: np.ndarray = None,
+        signals: np.ndarray = None,
+        post_elm_size: int = None,
+    ) -> tuple[np.ndarray|Any, np.ndarray, np.ndarray]:
+        # determine valid t0 indices (start of signal windows) for each ELM event
+        # input labels are binary active/inactive ELM labels
+        active_elm_indices = np.flatnonzero(labels == 1)
+        valid_t0 = np.zeros(signals.shape[0], dtype=int)  # size = n_pre_elm_phase
+        if not post_elm_size:
+            active_elm_start_index = active_elm_indices[0]  # first active ELM index
+            assert labels[active_elm_start_index-1] == 0  # last pre-ELM label
+            assert labels[active_elm_start_index] == 1  # first active ELM label
+            last_signal_window_start_index = active_elm_start_index - self.signal_window_size - 1
+            assert labels[last_signal_window_start_index+self.signal_window_size] == 0
+            assert labels[last_signal_window_start_index+self.signal_window_size+1] == 1
+            valid_t0[:last_signal_window_start_index+1] = 1
+            assert valid_t0[last_signal_window_start_index] == 1  # last signal window start with pre-ELM label
+            assert valid_t0[last_signal_window_start_index+1] == 0  # first invalid signal window start with active ELM label
+            # transform labels to time-to-ELM
+            labels = np.zeros(valid_t0.size, dtype=np.float32) * np.nan
+            labels[:active_elm_start_index] = np.arange(active_elm_start_index, 0, -1)
+            assert np.nanmin(labels) == 1
+            assert np.nanmax(labels) == active_elm_start_index
+            assert np.all(labels[np.isfinite(labels)]>0)
+            valid_t0_indices = np.arange(valid_t0.size, dtype=int)
+            valid_t0_indices = valid_t0_indices[valid_t0 == 1]
+            assert np.all(np.isfinite(labels[valid_t0_indices]))
+            assert np.all(np.isfinite(labels[valid_t0_indices + self.signal_window_size]))
+        else:
+            first_signal_window_start_index = active_elm_indices[-1]+1+500
+            last_signal_window_start_index = first_signal_window_start_index + post_elm_size
+            if last_signal_window_start_index > valid_t0.size-1 - self.signal_window_size:
+                last_signal_window_start_index = valid_t0.size-1 - self.signal_window_size
+            valid_t0[first_signal_window_start_index:last_signal_window_start_index+1] = 2
+            assert valid_t0[first_signal_window_start_index-1] == 0  # last signal window start with pre-ELM label
+            assert valid_t0[first_signal_window_start_index] == 2  # first invalid signal window start with active ELM label
+            assert valid_t0[last_signal_window_start_index] == 2  # last signal window start with pre-ELM label
+            assert valid_t0[last_signal_window_start_index+1] == 0  # first invalid signal window start with active ELM label
+            labels = np.zeros(valid_t0.size, dtype=np.float32) * np.nan
+            valid_t0_indices = np.arange(valid_t0.size, dtype=int)
+            valid_t0_indices = valid_t0_indices[valid_t0 == 2]
+            assert valid_t0_indices[0] >= active_elm_indices[-1]+1
+            assert valid_t0_indices[-1] + self.signal_window_size < valid_t0.size
+        assert signals.shape[0] == labels.size and signals.shape[0] == valid_t0.size
+        if self.log_time:
+            labels = np.log10(labels)
+        return labels, signals, valid_t0
 
     def _get_elm_indices_and_split(self):
         if self.all_elm_indices is not None:
@@ -573,40 +690,6 @@ class ELM_Datamodule(LightningDataModule):
         print(f"  Train  {self.train_elm_indices.size}  ({self.train_elm_indices.size/self.all_elm_indices.size*100:.1f}%)")
         print(f"  Validation  {self.validation_elm_indices.size}  ({self.validation_elm_indices.size/self.all_elm_indices.size*100:.1f}%)")
         print(f"  Test  {self.test_elm_indices.size}  ({self.test_elm_indices.size/self.all_elm_indices.size*100:.1f}%)")
-
-    def _get_valid_indices(
-        self,
-        labels: np.ndarray = None,
-        signals: np.ndarray = None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        # determine valid t0 indices (start of signal windows) for each ELM event
-        # input labels are binary active/inactive ELM labels
-        active_elm_indices = np.nonzero(labels == 1)[0]
-        active_elm_start_index = active_elm_indices[0]  # first active ELM index
-        assert labels[active_elm_start_index-1] == 0  # last pre-ELM label
-        assert labels[active_elm_start_index] == 1  # first active ELM label
-        valid_t0 = np.zeros(labels.size, dtype=int)  # size = n_pre_elm_phase
-        last_signal_window_start_index = active_elm_start_index - self.signal_window_size - 1
-        assert labels[last_signal_window_start_index+self.signal_window_size] == 0
-        assert labels[last_signal_window_start_index+self.signal_window_size+1] == 1
-        valid_t0[:last_signal_window_start_index+1] = 1
-        assert valid_t0[last_signal_window_start_index] == 1  # last signal window start with pre-ELM label
-        assert valid_t0[last_signal_window_start_index+1] == 0  # first invalid signal window start with active ELM label
-        # transform labels to time-to-ELM
-        labels = np.zeros(labels.size, dtype=np.float32)
-        labels[0:active_elm_start_index] = np.arange(active_elm_start_index, 0, -1)
-        labels[active_elm_start_index:] = np.nan
-        assert np.nanmin(labels) == 1
-        assert np.nanmax(labels) == active_elm_start_index
-        assert np.all(labels[np.isfinite(labels)]>0)
-        valid_labels = labels[valid_t0==1]
-        assert np.all(np.isfinite(valid_labels))
-        assert np.all(valid_labels>0)
-        assert signals.shape[0] == labels.size
-        assert signals.shape[0] == valid_t0.size
-        if self.log_time:
-            labels = np.log10(labels)
-        return labels, signals, valid_t0
 
     def _get_statistics(
             self, 
@@ -677,3 +760,14 @@ class ELM_Datamodule(LightningDataModule):
                 persistent_workers=True,
             ) for dataset in self.datasets['predict']
         ]
+
+
+if __name__ == '__main__':
+    datamodule = ELM_Datamodule(
+        # max_elms=5,
+        fraction_validation=0.,
+        fraction_test=1.,
+        # post_elm_size=100,
+        fir_hp_filter=10,
+    )    
+    # datamodule.setup(stage='predict')
