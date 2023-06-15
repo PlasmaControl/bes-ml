@@ -14,7 +14,7 @@ import h5py
 import torch
 import torch.nn
 import torch.utils.data
-import torchaudio.functional
+# import torchaudio.functional
 
 from lightning.pytorch import LightningDataModule
 
@@ -187,24 +187,6 @@ class ELM_Datamodule(LightningDataModule):
         self.validation_elm_indices = None
         
         self.b_coeffs = self.a_coeffs = None
-        if self.fir_hp_filter:
-            self.b_coeffs = scipy.signal.firwin(
-                numtaps=301,  # must be odd
-                cutoff=self.fir_hp_filter,  # transition width in kHz
-                pass_zero='highpass',
-                # width=5,  # transition width in kHz
-                fs=1e3,  # f_sample in kHz
-            )
-            self.a_coeffs = np.zeros_like(self.b_coeffs)
-            self.a_coeffs[0] = 1
-            w, h = scipy.signal.freqz(self.b_coeffs, self.a_coeffs, worN=np.logspace(-1, np.log10(500), 1000), fs=1e3)
-            plt.figure()
-            plt.semilogx(w, 10 * np.log10(abs(h)))
-            plt.title('FIR filter response')
-            plt.xlabel('Frequency (kHz)')
-            plt.ylabel('Transmission [dB]')
-            plt.ylim([-30, None])
-            plt.show(block=True)
 
         print(f'Initiating {self.__class__.__name__}')
         class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
@@ -246,6 +228,28 @@ class ELM_Datamodule(LightningDataModule):
             dataset_elm_indices = {
                 stage: self.test_elm_indices,
             }
+
+        if self.fir_hp_filter and self.b_coeffs is None:
+            self.b_coeffs = scipy.signal.firwin(
+                numtaps=401,  # must be odd
+                cutoff=self.fir_hp_filter,  # transition width in kHz
+                pass_zero='highpass',
+                # width=5,  # transition width in kHz
+                fs=1e3,  # f_sample in kHz
+            )
+            self.a_coeffs = np.zeros_like(self.b_coeffs)
+            self.a_coeffs[0] = 1
+            w, h = scipy.signal.freqz(self.b_coeffs, self.a_coeffs, worN=np.logspace(-1, np.log10(500), 1000), fs=1e3)
+            plt.figure()
+            plt.semilogx(w, 10 * np.log10(abs(h)))
+            plt.title('FIR filter response')
+            plt.xlabel('Frequency (kHz)')
+            plt.ylabel('Transmission [dB]')
+            plt.ylim([-30, None])
+            filepath = os.path.join(self.log_dir, f'fir_hp_filter.pdf')
+            print(f"  Saving figure {filepath}")
+            plt.savefig(filepath, format='pdf', transparent=True)
+            plt.close()
 
         for dataset_stage, indices in dataset_elm_indices.items():
             t0 = time.time()

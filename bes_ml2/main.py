@@ -182,7 +182,7 @@ if __name__=='__main__':
         )
         datamodule = elm_datamodule.ELM_Datamodule(
             signal_window_size=lightning_model.signal_window_size,
-            max_elms=5,
+            # max_elms=5,
             batch_size=128,
             fraction_validation=0.2,
             fraction_test=0.2,
