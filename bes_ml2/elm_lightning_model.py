@@ -326,6 +326,7 @@ class Lightning_Model(
 
     def update_step(self, batch, batch_idx, stage: str) -> torch.Tensor:
         signals, labels, class_labels_50p, class_labels_25p, class_labels_75p = batch
+        print(f"  min {labels.min()}, max {labels.max()} (stage {stage} batch {batch_idx})")
         results = self(signals)
         sum_loss = None
         for frontend_key in self.frontends.keys():
@@ -352,13 +353,16 @@ class Lightning_Model(
                     )
                     sum_loss = metric_value if sum_loss is None else sum_loss + metric_value
                 elif 'score' in loss_or_score_name:
+                    kwargs = {}
                     if 'f1' in loss_or_score_name:
                         modified_predictions = (frontend_result > 0.5).type(torch.int)
+                        kwargs['zero_division'] = 0
                     else:
                         modified_predictions = frontend_result
                     metric_value = func(
                         y_pred=modified_predictions.detach().cpu(), 
                         y_true=target.detach().cpu(),
+                        **kwargs,
                     )
                 self.log(f"{loss_or_score_name}/{stage}", metric_value, sync_dist=True)
         self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True)
@@ -422,7 +426,7 @@ class Lightning_Model(
         self.predict_outputs: list[list] = []
         self.t_predict_start = time.time()
 
-    def predict_step(self, batch, batch_idx, dataloader_idx=0) -> None:
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
         signals, labels, class_labels, shot, elm_index, t0 = batch
         results = self(signals)
         if batch_idx == 0:
@@ -438,6 +442,7 @@ class Lightning_Model(
         }
         prediction_outputs.update(results)
         self.predict_outputs[-1].append(prediction_outputs)
+        return True
     
     def on_predict_epoch_end(self) -> None:
         if self.global_rank != 0:
@@ -445,8 +450,8 @@ class Lightning_Model(
         if 'time_to_elm_mlp' in self.predict_outputs[0][0]:
             i_page = 1
             for i_elm, result in enumerate(self.predict_outputs):
-                shot = result[0]['shot']
-                elm_index = result[0]['elm_index']
+                shot = result[0]['shot'][0]
+                elm_index = result[0]['elm_index'][0]
                 t0 = result[0]['t0'][0]
                 labels: torch.Tensor = torch.concat([batch['labels'] for batch in result]).squeeze().numpy(force=True)
                 predictions: torch.Tensor = torch.concat([batch['time_to_elm_mlp'] for batch in result]).squeeze().numpy(force=True)
@@ -470,6 +475,7 @@ class Lightning_Model(
                 twinx.plot(time, signal, label='Signal', color='C2')
                 twinx.set_ylabel('Scaled signal')
                 twinx.legend(fontsize='small', loc='lower right')
+                print(f"  min {np.nanmin(labels)}, max {np.nanmax(labels)}")
                 if i_elm % 6 == 5 or i_elm == len(self.predict_outputs)-1:
                     plt.tight_layout()
                     filename = f'inference_{i_page:02d}'

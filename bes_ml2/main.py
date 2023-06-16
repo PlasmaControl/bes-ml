@@ -80,6 +80,7 @@ class BES_Trainer:
         early_stopping_patience: int = 50,
         gradient_clip_value: int = None,
         float_precision: str|int = '16-mixed' if torch.cuda.is_available() else 32,
+        find_unused_parameters: bool = False,
     ):
         if self.wandb_log:
             wandb.login()
@@ -131,7 +132,7 @@ class BES_Trainer:
             log_every_n_steps=self.log_freq,
             num_nodes=int(os.getenv('SLURM_NNODES', default=1)),
             precision=float_precision,
-            strategy=DDPStrategy(find_unused_parameters=True),
+            strategy=DDPStrategy(find_unused_parameters=find_unused_parameters),
         )
         self.datamodule.is_global_zero = trainer.is_global_zero
         if trainer.is_global_zero:
@@ -179,15 +180,20 @@ if __name__=='__main__':
             cnn_num_kernels=8,
             cnn_kernel_time_size=2,
             cnn_padding=[0]*3,
+            reconstruction_decoder=False,
+            classifier_25_mlp=False,
+            classifier_75_mlp=False,
         )
         datamodule = elm_datamodule.ELM_Datamodule(
+            data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
             signal_window_size=lightning_model.signal_window_size,
-            # max_elms=5,
-            batch_size=128,
+            max_elms=20,
+            batch_size=256,
             fraction_validation=0.2,
             fraction_test=0.2,
             fir_hp_filter=10,  # highpass filter with f_pass in kHz
-            post_elm_size=100,
+            post_elm_size=200,
+            # post_elm_delay=500,
         )
 
     trainer = BES_Trainer(
@@ -197,7 +203,7 @@ if __name__=='__main__':
     )
 
     trainer.run_all(
-        max_epochs=2,
-        skip_test=True,
-        skip_predict=True,
+        max_epochs=1,
+        # skip_test=True,
+        # skip_predict=True,
     )
