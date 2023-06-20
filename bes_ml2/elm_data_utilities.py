@@ -221,8 +221,8 @@ if __name__=='__main__':
         max_elms=50,
         bad_elm_indices_csv=False,
         block_show=False,
-        # mask_sigma_outliers=8,
-        # limit_preelm_max_stdev=0.25,
-        skip_elm_plots=True,
+        mask_sigma_outliers=4,
+        limit_preelm_max_stdev=0.7,
+        # skip_elm_plots=True,
     )
     

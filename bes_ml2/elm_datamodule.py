@@ -14,7 +14,6 @@ import h5py
 import torch
 import torch.nn
 import torch.utils.data
-# import torchaudio.functional
 
 from lightning.pytorch import LightningDataModule
 
@@ -188,7 +187,6 @@ class ELM_Datamodule(LightningDataModule):
         self.test_elm_indices = None
         self.train_elm_indices = None
         self.validation_elm_indices = None
-        
         self.b_coeffs = self.a_coeffs = None
 
         print(f'Initiating {self.__class__.__name__}')
@@ -237,7 +235,6 @@ class ELM_Datamodule(LightningDataModule):
                 numtaps=401,  # must be odd
                 cutoff=self.fir_hp_filter,  # transition width in kHz
                 pass_zero='highpass',
-                # width=5,  # transition width in kHz
                 fs=1e3,  # f_sample in kHz
             )
             self.a_coeffs = np.zeros_like(self.b_coeffs)
@@ -458,8 +455,6 @@ class ELM_Datamodule(LightningDataModule):
                 stop_index = start_index + elm['labels'].size-1
                 packaged_window_stop_idx.append(stop_index)
                 start_index = stop_index + 1
-                if elm['labels_post_elm'] is not None:
-                    start_index += elm['labels_post_elm'].size
             packaged_window_start_idx = np.array(packaged_window_start_idx, dtype=int)
             packaged_window_stop_idx = np.array(packaged_window_stop_idx, dtype=int)
             packeged_elm_index = np.array(
@@ -473,6 +468,30 @@ class ELM_Datamodule(LightningDataModule):
             packaged_t0 = np.array(
                 [elm['time_t0'] for elm in elm_data]
             )
+
+            # add post-ELM data
+            if self.post_elm_size and np.any(packaged_valid_t0 == 2):
+                if self.max_label_post_elm is None:
+                    self.max_label_post_elm = np.nanmax(packaged_labels)
+                    self.save_hyperparameters({'max_label_post_elm': self.max_label_post_elm.item()})
+                post_elm_valid_t0 = packaged_valid_t0 == 2
+                print(f"  Adding {np.count_nonzero(post_elm_valid_t0)} post-ELM signal windows with label = {self.max_label_post_elm:.3f}")
+
+                post_elm_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
+                post_elm_valid_t0_indices = post_elm_valid_t0_indices[post_elm_valid_t0]
+                for idx in post_elm_valid_t0_indices:
+                    packaged_labels[idx:idx+self.signal_window_size+1] = self.max_label_post_elm
+
+                packaged_valid_t0[post_elm_valid_t0] = 1
+                packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
+                packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
+                assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices]))
+                assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices]))
+                print(f"  Labels including post-ELM data: " +
+                      f"size {packaged_valid_t0_indices.size} " +
+                      f"nanmin {np.nanmin(packaged_labels):.1f} " +
+                      f"nanmean {np.nanmean(packaged_labels):.1f} " +
+                      f"nanmax {np.nanmax(packaged_labels):.1f}")
 
             # raw signal stats
             print(f"  Global min/max raw signal, ch 1-32: {np.amin(packaged_signals[:,:4,:]):.6f}, {np.amax(packaged_signals[:,:4,:]):.6f}")
@@ -511,7 +530,7 @@ class ELM_Datamodule(LightningDataModule):
                 )
             # standardize signals based on training data
             if None in [self.signal_mean, self.signal_stdev]:
-                assert dataset_stage == 'train' or not self.train_elm_indices, f"Dataset_stage: {dataset_stage}"
+                # assert dataset_stage == 'train' or not self.train_elm_indices, f"Dataset_stage: {dataset_stage}"
                 print(f"  Calculating signal mean and std from {dataset_stage} data")
                 self.signal_mean = stats['mean']
                 self.signal_stdev = stats['stdev']
@@ -533,14 +552,22 @@ class ELM_Datamodule(LightningDataModule):
             # normalize labels with min=-1 and median=0
             if self.label_raw_median is None:
                 # assert dataset_stage == 'train' or not self.train_elm_indices, f"Dataset_stage: {dataset_stage}"
-                print(f"  Calculating median label from {dataset_stage} labels")
+                print(f"  Calculating mean/median label from {dataset_stage} labels")
                 assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices]))
                 assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices+self.signal_window_size]))
                 assert np.nanmin(packaged_labels) == 1
                 self.label_raw_median = np.median(packaged_labels[packaged_valid_t0_indices+self.signal_window_size])
-                self.save_hyperparameters({'label_raw_median': self.label_raw_median.item()})
-            print(f"  Normalizing labels (min=-1 and median=0) with median time-to-elm {self.label_raw_median:.1f} mu-s")
-            packaged_labels = (packaged_labels - self.label_raw_median) / (self.label_raw_median-1)
+                self.label_raw_mean = np.mean(packaged_labels[packaged_valid_t0_indices+self.signal_window_size])
+                print(f"  Raw time-to-ELM labels (mu-s): min {np.nanmin(packaged_labels):.1f}"+
+                    f" med {self.label_raw_median:.1f}"+
+                    f" mean {self.label_raw_mean:.1f}"+
+                    f" max {np.nanmax(packaged_labels):.1f}")
+                self.save_hyperparameters({
+                    'label_raw_median': self.label_raw_median.item(),
+                    'label_raw_mean': self.label_raw_mean.item(),
+                })
+            print(f"  Normalizing time-to-ELM labels with min=-1 and mean=0 using mean={self.label_raw_mean.item():.1f} mu-s")
+            packaged_labels = (packaged_labels - self.label_raw_mean) / (self.label_raw_mean-1)
             label_min = np.nanmin(packaged_labels)
             label_max = np.nanmax(packaged_labels)
             assert label_min == -1
@@ -557,38 +584,15 @@ class ELM_Datamodule(LightningDataModule):
                     'label_scaled_75p': self.label_scaled_75p,
                 })
             print(
-                f"    Label size {packaged_valid_t0_indices.size} "+
-                f"nanmin {label_min:.3f} "+
-                f"25p {quantiles[0]:.3f} "+
-                f"50p {quantiles[1]:.3f} "+
-                f"75p {quantiles[2]:.3f} "+
-                f"nanmax {label_max:.3f}"
+                f"    Label count {packaged_valid_t0_indices.size} "+
+                f"min {label_min:.2f} "+
+                f"25p {quantiles[0]:.2f} "+
+                f"50p {quantiles[1]:.2f} "+
+                f"mean {np.mean(packaged_labels[packaged_valid_t0_indices+self.signal_window_size]):.2f}"
+                f"75p {quantiles[2]:.2f} "+
+                f"max {label_max:.2f}"
             )
             
-            # add post-ELM data
-            if self.post_elm_size and np.any(packaged_valid_t0 == 2):
-                if self.max_label_post_elm is None:
-                    self.max_label_post_elm = np.nanmax(packaged_labels)
-                    self.save_hyperparameters({'max_label_post_elm': self.max_label_post_elm.item()})
-                post_elm_valid_t0 = packaged_valid_t0 == 2
-                print(f"  Adding {np.count_nonzero(post_elm_valid_t0)} post-ELM signal windows with label = {self.max_label_post_elm:.3f}")
-
-                post_elm_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
-                post_elm_valid_t0_indices = post_elm_valid_t0_indices[post_elm_valid_t0]
-                for idx in post_elm_valid_t0_indices:
-                    packaged_labels[idx:idx+self.signal_window_size+1] = self.max_label_post_elm
-
-                packaged_valid_t0[post_elm_valid_t0] = 1
-                packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
-                packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
-                assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices]))
-                assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices]))
-                print(f"  Labels including post-ELM data: " +
-                      f"size {packaged_valid_t0_indices.size} " +
-                      f"nanmin {np.nanmin(packaged_labels)} " +
-                      f"nanmean {np.nanmean(packaged_labels)} " +
-                      f"nanmax {np.nanmax(packaged_labels)}")
-
             if dataset_stage in ['train', 'validation', 'test']:
                 self.datasets[dataset_stage] = ELM_TrainValTest_Dataset(
                     signals=packaged_signals,
@@ -597,20 +601,13 @@ class ELM_Datamodule(LightningDataModule):
                     signal_window_size=self.signal_window_size,
                     label_scaled_25p=self.label_scaled_25p,
                     label_scaled_75p=self.label_scaled_75p,
-                    # window_start_indices=packaged_window_start_idx,
-                    # window_stop_indices=packaged_window_stop_idx,
                 )
 
             if dataset_stage in ['test', 'predict']:
                 predict_datasets = []
-                for i_elm, idx_start in enumerate(packaged_window_start_idx):
+                for i_elm, (idx_start, idx_stop) in enumerate(zip(packaged_window_start_idx,packaged_window_stop_idx)):
                     if self.max_predict_elms and i_elm == self.max_predict_elms:
                         break
-                    idx_stop = packaged_window_stop_idx[i_elm]
-                    # if i_elm == packaged_window_start_idx.size - 1:
-                    #     idx_stop = packaged_labels.size - 1
-                    # else:
-                    #     idx_stop = packaged_window_start_idx[i_elm+1]-1
                     dataset = ELM_Predict_Dataset(
                         signals=packaged_signals[idx_start:idx_stop+1, ...],
                         labels=packaged_labels[idx_start:idx_stop+1],
@@ -655,20 +652,34 @@ class ELM_Datamodule(LightningDataModule):
             assert np.all(np.isfinite(labels[valid_t0_indices]))
             assert np.all(np.isfinite(labels[valid_t0_indices + self.signal_window_size]))
         else:
+            # set signal window
             first_signal_window_start_index = active_elm_indices[-1]+1 + self.post_elm_delay
             last_signal_window_start_index = first_signal_window_start_index + post_elm_size
             if last_signal_window_start_index > valid_t0.size-1 - self.signal_window_size:
                 last_signal_window_start_index = valid_t0.size-1 - self.signal_window_size
+            end_data_window_index = last_signal_window_start_index + self.signal_window_size + 10
+            if end_data_window_index >= valid_t0.size:
+                end_data_window_index = valid_t0.size-1
             valid_t0[first_signal_window_start_index:last_signal_window_start_index] = 2
+            # validate valid t0 elements
             assert valid_t0[first_signal_window_start_index-1] == 0  # last signal window start with pre-ELM label
             assert valid_t0[first_signal_window_start_index] == 2  # first invalid signal window start with active ELM label
             assert valid_t0[last_signal_window_start_index-1] == 2  # last signal window start with pre-ELM label
             assert valid_t0[last_signal_window_start_index] == 0  # first invalid signal window start with active ELM label
             labels = np.zeros(valid_t0.size, dtype=np.float32) * np.nan
+            # validate valid indices
             valid_t0_indices = np.arange(valid_t0.size, dtype=int)
             valid_t0_indices = valid_t0_indices[valid_t0 == 2]
             assert valid_t0_indices[0] >= active_elm_indices[-1]+1
             assert valid_t0_indices[-1] + self.signal_window_size < valid_t0.size
+            # remove unused excess data
+            start_data_window_index = first_signal_window_start_index - 10
+            end_data_window_index = last_signal_window_start_index + self.signal_window_size + 10
+            if end_data_window_index >= valid_t0.size:
+                end_data_window_index = valid_t0.size-1
+            signals = signals[start_data_window_index:end_data_window_index, ...]
+            labels = labels[start_data_window_index:end_data_window_index]
+            valid_t0 = valid_t0[start_data_window_index:end_data_window_index]
         assert signals.shape[0] == labels.size and signals.shape[0] == valid_t0.size
         if self.log_time:
             labels = np.log10(labels)
@@ -748,7 +759,7 @@ class ELM_Datamodule(LightningDataModule):
         mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
         stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
         exkurt = np.sum(cummulative_hist * ((bin_center - mean)/stdev) ** 4) / np.sum(cummulative_hist) - 3
-        print(f"    Stats: count {sample_indices.size:,} min {signal_min:.3f} max {signal_max:.3f} mean {mean:.3f} stdev {stdev:.3f} exkurt {exkurt:.3f} n_samples {n_samples:,}")
+        print(f"    Stats: count {sample_indices.size:,} min {signal_min:.2f} max {signal_max:.2f} mean {mean:.2f} stdev {stdev:.2f} exkurt {exkurt:.2f} n_samples {n_samples:,}")
         return {
             'count': sample_indices.size,
             'min': signal_min,
@@ -795,10 +806,10 @@ class ELM_Datamodule(LightningDataModule):
 
 if __name__ == '__main__':
     datamodule = ELM_Datamodule(
-        # max_elms=5,
         fraction_validation=0.,
         fraction_test=1.,
-        # post_elm_size=100,
+        post_elm_size=100,
         fir_hp_filter=10,
-    )    
-    # datamodule.setup(stage='predict')
+    )
+    datamodule.setup(stage='test')
+    datamodule.setup(stage='predict')

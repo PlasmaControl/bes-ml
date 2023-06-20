@@ -119,9 +119,6 @@ class BES_Trainer:
             ),
         ]
 
-        # frontends_active = [value for value in self.lightning_model.frontends_active.values()]
-        # some_unused = False in frontends_active
-
         trainer = Trainer(
             max_epochs=max_epochs,
             gradient_clip_val=gradient_clip_value,
@@ -185,7 +182,7 @@ if __name__=='__main__':
             classifier_75_mlp=False,
         )
         datamodule = elm_datamodule.ELM_Datamodule(
-            data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
+            # data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
             signal_window_size=lightning_model.signal_window_size,
             max_elms=20,
             batch_size=256,
