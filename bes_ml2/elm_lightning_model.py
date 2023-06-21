@@ -326,7 +326,7 @@ class Lightning_Model(
 
     def update_step(self, batch, batch_idx, stage: str) -> torch.Tensor:
         signals, labels, class_labels_50p, class_labels_25p, class_labels_75p = batch
-        print(f"  min {labels.min()}, max {labels.max()} (stage {stage} batch {batch_idx})")
+        # print(f"  min {labels.min()}, max {labels.max()} (stage {stage} batch {batch_idx})")
         results = self(signals)
         sum_loss = None
         for frontend_key in self.frontends.keys():
@@ -475,7 +475,7 @@ class Lightning_Model(
                 twinx.plot(time, signal, label='Signal', color='C2')
                 twinx.set_ylabel('Scaled signal')
                 twinx.legend(fontsize='small', loc='lower right')
-                print(f"  min {np.nanmin(labels)}, max {np.nanmax(labels)}")
+                # print(f"  min {np.nanmin(labels)}, max {np.nanmax(labels)}")
                 if i_elm % 6 == 5 or i_elm == len(self.predict_outputs)-1:
                     plt.tight_layout()
                     filename = f'inference_{i_page:02d}'

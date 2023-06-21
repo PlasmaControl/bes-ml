@@ -182,25 +182,26 @@ if __name__=='__main__':
             classifier_75_mlp=False,
         )
         datamodule = elm_datamodule.ELM_Datamodule(
-            # data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
+            data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
             signal_window_size=lightning_model.signal_window_size,
-            max_elms=20,
+            max_elms=50,
             batch_size=256,
             fraction_validation=0.2,
             fraction_test=0.2,
             fir_hp_filter=10,  # highpass filter with f_pass in kHz
             post_elm_size=200,
-            # post_elm_delay=500,
+            mask_sigma_outliers=8,
+            limit_preelm_max_stdev=0.7,
         )
 
     trainer = BES_Trainer(
         lightning_model=lightning_model,
         datamodule=datamodule,
-        # wandb_log=True,
+        wandb_log=True,
     )
 
     trainer.run_all(
-        max_epochs=1,
+        max_epochs=4,
         # skip_test=True,
         # skip_predict=True,
     )

@@ -505,7 +505,7 @@ class ELM_Datamodule(LightningDataModule):
             # mask outlier signals
             if self.mask_sigma_outliers:
                 if None in [self.mask_lb, self.mask_ub]:
-                    assert dataset_stage == 'train' or not self.train_elm_indices, f"Dataset_stage: {dataset_stage}"
+                    # assert dataset_stage == 'train' or not self.train_elm_indices, f"Dataset_stage: {dataset_stage}"
                     print(f"  Calculating mask upper/lower bounds from {dataset_stage} data")
                     self.mask_lb = stats['mean'] - self.mask_sigma_outliers * stats['stdev']
                     self.mask_ub = stats['mean'] + self.mask_sigma_outliers * stats['stdev']
@@ -588,7 +588,7 @@ class ELM_Datamodule(LightningDataModule):
                 f"min {label_min:.2f} "+
                 f"25p {quantiles[0]:.2f} "+
                 f"50p {quantiles[1]:.2f} "+
-                f"mean {np.mean(packaged_labels[packaged_valid_t0_indices+self.signal_window_size]):.2f}"
+                f"mean {np.mean(packaged_labels[packaged_valid_t0_indices+self.signal_window_size]):.2f} "
                 f"75p {quantiles[2]:.2f} "+
                 f"max {label_max:.2f}"
             )
@@ -806,10 +806,14 @@ class ELM_Datamodule(LightningDataModule):
 
 if __name__ == '__main__':
     datamodule = ELM_Datamodule(
+        data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
+        max_elms=50,
         fraction_validation=0.,
         fraction_test=1.,
         post_elm_size=100,
         fir_hp_filter=10,
+        mask_sigma_outliers=6,
+        limit_preelm_max_stdev=0.8
     )
     datamodule.setup(stage='test')
     datamodule.setup(stage='predict')
