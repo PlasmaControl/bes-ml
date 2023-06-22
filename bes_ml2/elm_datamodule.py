@@ -240,16 +240,18 @@ class ELM_Datamodule(LightningDataModule):
             self.a_coeffs = np.zeros_like(self.b_coeffs)
             self.a_coeffs[0] = 1
             w, h = scipy.signal.freqz(self.b_coeffs, self.a_coeffs, worN=np.logspace(-1, np.log10(500), 1000), fs=1e3)
-            plt.figure()
-            plt.semilogx(w, 10 * np.log10(abs(h)))
-            plt.title('FIR filter response')
-            plt.xlabel('Frequency (kHz)')
-            plt.ylabel('Transmission [dB]')
-            plt.ylim([-30, None])
-            filepath = os.path.join(self.log_dir, f'fir_hp_filter.pdf')
-            print(f"  Saving figure {filepath}")
-            plt.savefig(filepath, format='pdf', transparent=True)
-            plt.close()
+            if self.is_global_zero:
+                plt.figure()
+                plt.semilogx(w, 10 * np.log10(abs(h)))
+                plt.title('FIR filter response')
+                plt.xlabel('Frequency (kHz)')
+                plt.ylabel('Transmission [dB]')
+                plt.ylim([-30, None])
+                filepath = os.path.join(self.log_dir, f'fir_hp_filter.pdf')
+                print(f"  Saving figure {filepath}")
+                assert os.path.exists(self.log_dir)
+                plt.savefig(filepath, format='pdf', transparent=True)
+                plt.close()
 
         for dataset_stage, indices in dataset_elm_indices.items():
             t0 = time.time()

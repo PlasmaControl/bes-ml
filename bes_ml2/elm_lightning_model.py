@@ -71,12 +71,13 @@ class Torch_MLP_Mixin(Torch_Base):
             with_sigmoid: bool = False,
     ) -> torch.nn.Module:
 
+        print("Constructing MLP layers")
+
         if self.mlp_batchnorm:
             print(f"  Batchnorm is active, so setting mlp_dropout=0")
             self.mlp_dropout = 0.0
 
         # MLP layers
-        print("Constructing MLP layers")
         mlp_layers = torch.nn.Sequential(torch.nn.Flatten())
         n_layers = len(self.mlp_layers)
         for i, layer_size in enumerate(self.mlp_layers):
