@@ -177,12 +177,12 @@ if __name__=='__main__':
             cnn_num_kernels=8,
             cnn_kernel_time_size=2,
             cnn_padding=[0]*3,
-            reconstruction_decoder=False,
+            # reconstruction_decoder=False,
             classifier_25_mlp=False,
             classifier_75_mlp=False,
         )
         datamodule = elm_datamodule.ELM_Datamodule(
-            data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
+            # data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
             signal_window_size=lightning_model.signal_window_size,
             max_elms=50,
             batch_size=256,
@@ -197,7 +197,7 @@ if __name__=='__main__':
     trainer = BES_Trainer(
         lightning_model=lightning_model,
         datamodule=datamodule,
-        wandb_log=True,
+        # wandb_log=True,
     )
 
     trainer.run_all(
