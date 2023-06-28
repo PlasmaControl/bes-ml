@@ -360,11 +360,20 @@ class Lightning_Model(
                         kwargs['zero_division'] = 0
                     else:
                         modified_predictions = frontend_result
+                    # y_pred=modified_predictions.detach().cpu()
+                    # y_true=target.detach().cpu()
                     metric_value = func(
+                        # y_pred=y_pred,
+                        # y_true=y_true,
                         y_pred=modified_predictions.detach().cpu(), 
                         y_true=target.detach().cpu(),
                         **kwargs,
                     )
+                    # if stage == 'val' and 'r2' in loss_or_score_name:
+                    #     y_diff = np.max(np.abs((y_true - y_pred).numpy()))
+                    #     print(f"{batch_idx}, {metric_value:.2e}, {y_diff:.2e}, min label {y_true.min():.3f}, max label {y_true.max():.3f}")
+                    #     if metric_value < -1e6:
+                    #         assert True
                 self.log(f"{loss_or_score_name}/{stage}", metric_value, sync_dist=True)
         self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True)
         return sum_loss
@@ -454,15 +463,15 @@ class Lightning_Model(
                 shot = result[0]['shot'][0]
                 elm_index = result[0]['elm_index'][0]
                 t0 = result[0]['t0'][0]
-                labels: torch.Tensor = torch.concat([batch['labels'] for batch in result]).squeeze().numpy(force=True)
-                predictions: torch.Tensor = torch.concat([batch['time_to_elm_mlp'] for batch in result]).squeeze().numpy(force=True)
-                signals: torch.Tensor = torch.concat([batch['signals'] for batch in result]).squeeze().numpy(force=True)
-                assert labels.shape[0] == predictions.shape[0] and labels.shape[0] == signals.shape[0]
+                labels = np.concatenate([batch['labels'].numpy(force=True) for batch in result]).squeeze()
+                predictions = np.concatenate([batch['time_to_elm_mlp'].numpy(force=True) for batch in result]).squeeze()
+                signal = np.concatenate([batch['signals'][...,-1,2,3].numpy(force=True) for batch in result]).squeeze()
+                assert labels.shape[0] == predictions.shape[0] and labels.shape[0] == signal.shape[0]
                 if i_elm % 6 == 0:
                     plt.close('all')
                     fig, axes = plt.subplots(ncols=3, nrows=2, figsize=(12, 6))
                     plt.suptitle(f"Inference on ELMs in test dataset (page {i_page})")
-                signal = signals[:, -1, 2, 3].squeeze()
+                # signal = signals[:, -1, 2, 3].squeeze()
                 pre_elm_size = np.count_nonzero(np.isfinite(labels))
                 time = (np.arange(len(labels)) - pre_elm_size) / 1e3
                 plt.sca(axes.flat[i_elm%6])
@@ -491,16 +500,15 @@ class Lightning_Model(
                             logger.log_image(key='inference', images=[filepath+'.png'])
                     i_page += 1
                     plt.close('all')
-
         if 'reconstruction_decoder' in self.predict_outputs[0][0]:
             plt.set_cmap('seismic')
             for i_elm, result in enumerate(self.predict_outputs):
                 shot = result[0]['shot'][0]
                 elm_index = result[0]['elm_index'][0]
                 t0 = result[0]['t0'][0]
-                class_labels: torch.Tensor = torch.concat([batch['class_labels'] for batch in result]).squeeze().numpy(force=True)
-                reconstruction: torch.Tensor = torch.concat([batch['reconstruction_decoder'] for batch in result]).squeeze().numpy(force=True)
-                signals: torch.Tensor = torch.concat([batch['signals'] for batch in result]).squeeze().numpy(force=True)
+                class_labels = np.concatenate([batch['class_labels'].numpy(force=True) for batch in result]).squeeze()
+                reconstruction = np.concatenate([batch['reconstruction_decoder'].numpy(force=True) for batch in result]).squeeze()
+                signals = np.concatenate([batch['signals'].numpy(force=True) for batch in result]).squeeze()
                 assert class_labels.shape[0] == reconstruction.shape[0] and class_labels.shape[0] == signals.shape[0]
                 assert np.array_equiv(tuple(reconstruction.shape), tuple(signals.shape))
                 pre_elm_size = np.flatnonzero(class_labels == 1)[0]  # length of pre-ELM phase

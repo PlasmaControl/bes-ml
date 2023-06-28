@@ -130,6 +130,7 @@ class BES_Trainer:
             num_nodes=int(os.getenv('SLURM_NNODES', default=1)),
             precision=float_precision,
             strategy=DDPStrategy(find_unused_parameters=find_unused_parameters),
+            use_distributed_sampler=False,
         )
         self.datamodule.is_global_zero = trainer.is_global_zero
         if trainer.is_global_zero:
@@ -177,31 +178,31 @@ if __name__=='__main__':
             cnn_num_kernels=8,
             cnn_kernel_time_size=2,
             cnn_padding=[0]*3,
-            reconstruction_decoder=False,
+            # reconstruction_decoder=False,
             classifier_25_mlp=False,
             classifier_75_mlp=False,
         )
         datamodule = elm_datamodule.ELM_Datamodule(
-            data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
+            # data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
             signal_window_size=lightning_model.signal_window_size,
-            max_elms=50,
+            max_elms=5,
             batch_size=256,
             fraction_validation=0.2,
             fraction_test=0.2,
-            fir_hp_filter=10,  # highpass filter with f_pass in kHz
-            post_elm_size=200,
-            mask_sigma_outliers=8,
-            limit_preelm_max_stdev=0.7,
+            # fir_hp_filter=10,  # highpass filter with f_pass in kHz
+            post_elm_size=100,
+            # mask_sigma_outliers=8,
+            # limit_preelm_max_stdev=0.7,
         )
 
     trainer = BES_Trainer(
         lightning_model=lightning_model,
         datamodule=datamodule,
-        wandb_log=True,
+        # wandb_log=True,
     )
 
     trainer.run_all(
-        max_epochs=4,
+        max_epochs=1,
         # skip_test=True,
         # skip_predict=True,
     )

@@ -772,24 +772,30 @@ class ELM_Datamodule(LightningDataModule):
         }
 
     def train_dataloader(self):
+        sampler = torch.utils.data.DistributedSampler(self.datasets["train"], shuffle=True)
         return torch.utils.data.DataLoader(
             dataset=self.datasets["train"],
+            sampler=sampler,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             persistent_workers=True,
         )
 
     def val_dataloader(self):
+        sampler = torch.utils.data.DistributedSampler(self.datasets["validation"], shuffle=True)
         return torch.utils.data.DataLoader(
             dataset=self.datasets["validation"],
+            sampler=sampler,
             batch_size=1024,
             num_workers=self.num_workers,
             persistent_workers=True,
         )
 
     def test_dataloader(self):
+        sampler = torch.utils.data.DistributedSampler(self.datasets["test"], shuffle=True)
         return torch.utils.data.DataLoader(
             dataset=self.datasets["test"],
+            sampler=sampler,
             batch_size=1024,
             num_workers=self.num_workers,
             persistent_workers=True,
