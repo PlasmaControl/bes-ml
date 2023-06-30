@@ -150,15 +150,16 @@ class BES_Trainer:
         if self.wandb_log:
             wandb.finish()
 
-        self.last_model_path = Path(trainer.checkpoint_callback.last_model_path).absolute()
-        print(f"Last model path: {self.last_model_path}")
-        best_model_path = Path(trainer.checkpoint_callback.best_model_path).absolute()
-        self.best_model_path = best_model_path.parent/'best.ckpt'
-        shutil.copyfile(
-            src=best_model_path,
-            dst=self.best_model_path,
-        )
-        print(f"Best model path: {self.best_model_path}")
+        if trainer.is_global_zero:
+            self.last_model_path = Path(trainer.checkpoint_callback.last_model_path).absolute()
+            print(f"Last model path: {self.last_model_path}")
+            best_model_path = Path(trainer.checkpoint_callback.best_model_path).absolute()
+            self.best_model_path = best_model_path.parent/'best.ckpt'
+            shutil.copyfile(
+                src=best_model_path,
+                dst=self.best_model_path,
+            )
+            print(f"Best model path: {self.best_model_path}")
 
 
 if __name__=='__main__':
@@ -178,21 +179,20 @@ if __name__=='__main__':
             cnn_num_kernels=8,
             cnn_kernel_time_size=2,
             cnn_padding=[0]*3,
-            # reconstruction_decoder=False,
             classifier_25_mlp=False,
             classifier_75_mlp=False,
         )
         datamodule = elm_datamodule.ELM_Datamodule(
-            # data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
+            data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
             signal_window_size=lightning_model.signal_window_size,
-            max_elms=5,
+            max_elms=20,
             batch_size=256,
             fraction_validation=0.2,
             fraction_test=0.2,
-            # fir_hp_filter=10,  # highpass filter with f_pass in kHz
+            fir_hp_filter=10,  # highpass filter with f_pass in kHz
             post_elm_size=100,
-            # mask_sigma_outliers=8,
-            # limit_preelm_max_stdev=0.7,
+            mask_sigma_outliers=8,
+            limit_preelm_max_stdev=0.7,
         )
 
     trainer = BES_Trainer(

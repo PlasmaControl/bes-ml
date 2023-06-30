@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import sklearn.metrics
 
 import torch
+import torch.cuda
 import torch.nn
 from lightning.pytorch import LightningModule, loggers
 
@@ -327,7 +328,6 @@ class Lightning_Model(
 
     def update_step(self, batch, batch_idx, stage: str) -> torch.Tensor:
         signals, labels, class_labels_50p, class_labels_25p, class_labels_75p = batch
-        # print(f"  min {labels.min()}, max {labels.max()} (stage {stage} batch {batch_idx})")
         results = self(signals)
         sum_loss = None
         for frontend_key in self.frontends.keys():
@@ -360,30 +360,27 @@ class Lightning_Model(
                         kwargs['zero_division'] = 0
                     else:
                         modified_predictions = frontend_result
-                    # y_pred=modified_predictions.detach().cpu()
-                    # y_true=target.detach().cpu()
                     metric_value = func(
-                        # y_pred=y_pred,
-                        # y_true=y_true,
                         y_pred=modified_predictions.detach().cpu(), 
                         y_true=target.detach().cpu(),
                         **kwargs,
                     )
-                    # if stage == 'val' and 'r2' in loss_or_score_name:
-                    #     y_diff = np.max(np.abs((y_true - y_pred).numpy()))
-                    #     print(f"{batch_idx}, {metric_value:.2e}, {y_diff:.2e}, min label {y_true.min():.3f}, max label {y_true.max():.3f}")
-                    #     if metric_value < -1e6:
-                    #         assert True
                 self.log(f"{loss_or_score_name}/{stage}", metric_value, sync_dist=True)
         self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True)
         return sum_loss
 
+    # def memstats(self) -> None:
+    #     alloc = torch.cuda.memory_allocated()/(1024**3)
+    #     reserved = torch.cuda.memory_reserved()/(1024**3)
+    #     print(f"  Device {self.global_rank} memory (GB): alloc {alloc:.3f} resv {reserved:.3f}")
+
     def on_fit_start(self) -> None:
         self.t_fit_start = time.time()
+        print(f"Fit start (global rank {self.global_rank})")
 
     def on_train_epoch_start(self):
         self.t_train_epoch_start = time.time()
-        print(f"Epoch {self.current_epoch} start")
+        print(f"Epoch {self.current_epoch} start (global rank {self.global_rank})")
         for frontend_key, frontend in self.frontends.items():
             if self.current_epoch < self.unfreeze_epoch[frontend_key]:
                 print(f'  Frontend `{frontend_key}` is frozen')
@@ -409,32 +406,34 @@ class Lightning_Model(
             self.log(f"param_std/{name}", std, sync_dist=True)
             self.log(f"param_skew/{name}", skew, sync_dist=True)
             self.log(f"param_kurt/{name}", kurt, sync_dist=True)
-        print(f"Epoch {self.current_epoch} elapsed train time: {(time.time()-self.t_train_epoch_start)/60:0.1f} min")
+        print(f"Epoch {self.current_epoch} elapsed train+val time: {(time.time()-self.t_train_epoch_start)/60:0.1f} min (global rank {self.global_rank})")
 
     def on_validation_epoch_start(self) -> None:
-        self.t_val_epoch_start = time.time()
+        print(f"  Validation start (global rank {self.global_rank})")
 
     def validation_step(self, batch, batch_idx) -> None:
         self.update_step(batch, batch_idx, stage='val')
 
     def on_validation_epoch_end(self) -> None:
-        print(f"Epoch {self.current_epoch} elapsed valid. time: {(time.time()-self.t_val_epoch_start)/60:0.1f} min")
+        print(f"  Validation end (global rank {self.global_rank})")
 
     def on_fit_end(self) -> None:
-        print(f"Fit elapsed time {(time.time()-self.t_fit_start)/60:0.1f} min")
+        print(f"Fit elapsed time {(time.time()-self.t_fit_start)/60:0.1f} min (global rank {self.global_rank})")
 
     def on_test_start(self) -> None:
         self.t_test_start = time.time()
+        print(f"Test start (global rank {self.global_rank})")
 
     def test_step(self, batch, batch_idx) -> None:
         self.update_step(batch, batch_idx, stage='test')
 
     def on_test_epoch_end(self) -> None:
-        print(f"Test elapsed time {(time.time()-self.t_test_start)/60:0.1f} min")
+        print(f"Test elapsed time {(time.time()-self.t_test_start)/60:0.1f} min (global rank {self.global_rank})")
 
     def on_predict_start(self) -> None:
         self.predict_outputs: list[list] = []
         self.t_predict_start = time.time()
+        print(f"Predict start (global rank {self.global_rank})")
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
         signals, labels, class_labels, shot, elm_index, t0 = batch
@@ -443,49 +442,47 @@ class Lightning_Model(
             self.predict_outputs.append([])
             assert dataloader_idx == len(self.predict_outputs)-1
         prediction_outputs = {
-            'labels': labels,
-            'signals': signals,
-            'class_labels': class_labels,
+            'labels': labels.numpy(force=True),
+            'signals': signals.numpy(force=True),
+            'class_labels': class_labels.numpy(force=True),
             'shot': shot,
             'elm_index': elm_index,
             't0': t0,
         }
-        prediction_outputs.update(results)
-        self.predict_outputs[-1].append(prediction_outputs)
+        for result_key, result_value in results.items():
+            prediction_outputs[result_key] = result_value.numpy(force=True)
+        self.predict_outputs[dataloader_idx].append(prediction_outputs)
         return True
     
-    def on_predict_epoch_end(self) -> None:
-        if self.global_rank != 0:
-            return
-        if 'time_to_elm_mlp' in self.predict_outputs[0][0]:
+    def on_predict_end(self) -> None:
+        print(f"on_predict_end() start (global rank {self.global_rank})")
+        if 'time_to_elm_mlp' in self.predict_outputs[0][0] and self.global_rank==0:
             i_page = 1
             for i_elm, result in enumerate(self.predict_outputs):
                 shot = result[0]['shot'][0]
                 elm_index = result[0]['elm_index'][0]
                 t0 = result[0]['t0'][0]
-                labels = np.concatenate([batch['labels'].numpy(force=True) for batch in result]).squeeze()
-                predictions = np.concatenate([batch['time_to_elm_mlp'].numpy(force=True) for batch in result]).squeeze()
-                signal = np.concatenate([batch['signals'][...,-1,2,3].numpy(force=True) for batch in result]).squeeze()
+                labels = np.concatenate([batch['labels'] for batch in result]).squeeze()
+                predictions = np.concatenate([batch['time_to_elm_mlp'] for batch in result]).squeeze()
+                signal = np.concatenate([batch['signals'][...,-1,2,3] for batch in result]).squeeze()
                 assert labels.shape[0] == predictions.shape[0] and labels.shape[0] == signal.shape[0]
                 if i_elm % 6 == 0:
                     plt.close('all')
                     fig, axes = plt.subplots(ncols=3, nrows=2, figsize=(12, 6))
                     plt.suptitle(f"Inference on ELMs in test dataset (page {i_page})")
-                # signal = signals[:, -1, 2, 3].squeeze()
                 pre_elm_size = np.count_nonzero(np.isfinite(labels))
-                time = (np.arange(len(labels)) - pre_elm_size) / 1e3
+                elm_time = (np.arange(len(labels)) - pre_elm_size) / 1e3
                 plt.sca(axes.flat[i_elm%6])
-                plt.plot(time, labels, label='Label')
-                plt.plot(time, predictions, label='Prediction')
+                plt.plot(elm_time, labels, label='Label')
+                plt.plot(elm_time, predictions, label='Prediction')
                 plt.ylabel("Label | Prediction")
                 plt.xlabel('Time to ELM (ms)')
                 plt.title(f'ELM index {elm_index} | Shot {shot} @ {t0:.1f} ms')
                 plt.legend(fontsize='small', loc='upper right')
                 twinx = axes.flat[i_elm%6].twinx()
-                twinx.plot(time, signal, label='Signal', color='C2')
+                twinx.plot(elm_time, signal, label='Signal', color='C2')
                 twinx.set_ylabel('Scaled signal')
                 twinx.legend(fontsize='small', loc='lower right')
-                # print(f"  min {np.nanmin(labels)}, max {np.nanmax(labels)}")
                 if i_elm % 6 == 5 or i_elm == len(self.predict_outputs)-1:
                     plt.tight_layout()
                     filename = f'inference_{i_page:02d}'
@@ -500,15 +497,15 @@ class Lightning_Model(
                             logger.log_image(key='inference', images=[filepath+'.png'])
                     i_page += 1
                     plt.close('all')
-        if 'reconstruction_decoder' in self.predict_outputs[0][0]:
+        if 'reconstruction_decoder' in self.predict_outputs[0][0] and self.global_rank==0:
             plt.set_cmap('seismic')
             for i_elm, result in enumerate(self.predict_outputs):
                 shot = result[0]['shot'][0]
                 elm_index = result[0]['elm_index'][0]
                 t0 = result[0]['t0'][0]
-                class_labels = np.concatenate([batch['class_labels'].numpy(force=True) for batch in result]).squeeze()
-                reconstruction = np.concatenate([batch['reconstruction_decoder'].numpy(force=True) for batch in result]).squeeze()
-                signals = np.concatenate([batch['signals'].numpy(force=True) for batch in result]).squeeze()
+                class_labels = np.concatenate([batch['class_labels'] for batch in result]).squeeze()
+                reconstruction = np.concatenate([batch['reconstruction_decoder'] for batch in result]).squeeze()
+                signals = np.concatenate([batch['signals'] for batch in result]).squeeze()
                 assert class_labels.shape[0] == reconstruction.shape[0] and class_labels.shape[0] == signals.shape[0]
                 assert np.array_equiv(tuple(reconstruction.shape), tuple(signals.shape))
                 pre_elm_size = np.flatnonzero(class_labels == 1)[0]  # length of pre-ELM phase
@@ -572,6 +569,5 @@ class Lightning_Model(
                     elif isinstance(logger, loggers.WandbLogger):
                         logger.log_image(key='inference', images=[filepath+'.png'])
                 plt.close()
+        print(f"Predict elapsed time {(time.time()-self.t_predict_start)/60:0.1f} min (global rank {self.global_rank})")
 
-    def on_predict_end(self) -> None:
-        print(f"Predict elapsed time {(time.time()-self.t_predict_start)/60:0.1f} min")

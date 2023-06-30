@@ -786,7 +786,7 @@ class ELM_Datamodule(LightningDataModule):
         return torch.utils.data.DataLoader(
             dataset=self.datasets["validation"],
             sampler=sampler,
-            batch_size=1024,
+            batch_size=256,
             num_workers=self.num_workers,
             persistent_workers=True,
         )
@@ -796,7 +796,7 @@ class ELM_Datamodule(LightningDataModule):
         return torch.utils.data.DataLoader(
             dataset=self.datasets["test"],
             sampler=sampler,
-            batch_size=1024,
+            batch_size=256,
             num_workers=self.num_workers,
             persistent_workers=True,
         )
@@ -805,7 +805,7 @@ class ELM_Datamodule(LightningDataModule):
         return [
             torch.utils.data.DataLoader(
                 dataset=dataset,
-                batch_size=1024,
+                batch_size=256,
                 num_workers=self.num_workers,
                 persistent_workers=True,
             ) for dataset in self.datasets['predict']
