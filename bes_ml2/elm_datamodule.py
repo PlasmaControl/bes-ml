@@ -814,14 +814,16 @@ class ELM_Datamodule(LightningDataModule):
 
 if __name__ == '__main__':
     datamodule = ELM_Datamodule(
-        data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
-        max_elms=50,
+        # data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events.hdf5',
+        # data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events_long_windows_20230116.hdf5',
+        data_file='/global/homes/d/drsmith/ml/scratch/data/labeled_elm_events_long_windows_20230124.hdf5',
+        # max_elms=50,
         fraction_validation=0.,
-        fraction_test=1.,
+        fraction_test=0.,
         post_elm_size=100,
-        fir_hp_filter=10,
-        mask_sigma_outliers=6,
-        limit_preelm_max_stdev=0.8
+        # fir_hp_filter=10,
+        # mask_sigma_outliers=6,
+        # limit_preelm_max_stdev=0.8
     )
-    datamodule.setup(stage='test')
-    datamodule.setup(stage='predict')
+    datamodule.setup(stage='fit')
+    # datamodule.setup(stage='predict')
