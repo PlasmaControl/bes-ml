@@ -252,7 +252,6 @@ class Model(LightningModule, _Base_Class):
             threshold=self.lr_scheduler_threshold,
             min_lr=2e-5,
             mode='min' if 'loss' in self.monitor_metric else 'max',
-            verbose=True,
         )
         return {
             'optimizer': self.optimizer,
@@ -311,6 +310,7 @@ class Data(_Base_Class, LightningDataModule):
     fraction_test: float = 0.2
     use_random_data: bool = False
     seed: int = 0  # seed for ELM index shuffling; must be same across processes
+    is_distributed: bool = False
 
     def __post_init__(self):
         super().__post_init__()
@@ -337,11 +337,13 @@ class Data(_Base_Class, LightningDataModule):
             setattr(self, item, state[item])
 
     def setup(self, stage: str):
+        assert stage in ['fit', 'test','predict']
         if self.elm_indices['all'] is None:
             self._get_elm_indices_and_split()
 
         stages = ['train', 'validation'] if stage == 'fit' else [stage]
         for st in stages:
+            assert st in ['train', 'validation','test','predict']
             if st in self.datasets and isinstance(self.datasets[st], torch.utils.data.Dataset):
                 continue
             assert self.elm_indices[st] is not None
@@ -361,9 +363,22 @@ class Data(_Base_Class, LightningDataModule):
                     signals = np.array(elm_event["bes_signals"], dtype=np.float32)  # (64, <time>)
                     signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (time, pol, rad)
                     time = np.array(elm_event['bes_time'], dtype=np.float32)
+                    assert time.size == signals.shape[0]
                     t_start = elm_event.attrs['t_start']
                     t_stop = elm_event.attrs['t_stop']
-                    # elm_data.append({})
+                    t_stop -= 0.05  # shift ELM onset earlier to ensure only pre-ELMd data
+                    t_mask = (time >= t_start) & (time <= t_stop)
+                    signals = signals[t_mask, ...]
+                    time_to_onset = time[t_mask] - t_stop
+                    labels, signals, valid_t0 = self._get_valid_t0(time_to_onset, signals)
+                    elm_data.append({
+                        'signals': signals,
+                        'labels': labels,
+                        'valid_t0': valid_t0,
+                        'elm_index': elm_index,
+                        'shot': elm_event.attrs['shot'],
+                        'time_t0': time[0],
+                    })
             
             packaged_labels = []
             packaged_signals = []
@@ -371,8 +386,8 @@ class Data(_Base_Class, LightningDataModule):
 
             packaged_valid_t0_indices = []
 
-            if stage in ['train', 'validation', 'test']:
-                self.datasets[stage] = ELM_TrainValTest_Dataset(
+            if st in ['train', 'validation', 'test']:
+                self.datasets[st] = ELM_TrainValTest_Dataset(
                     signals=packaged_signals,
                     labels=packaged_labels,
                     sample_indices=packaged_valid_t0_indices,
@@ -381,9 +396,17 @@ class Data(_Base_Class, LightningDataModule):
                     # label_scaled_75p=self.label_scaled_75p,
                 )
             
-            if stage in ['test', 'predict']:
+            if st in ['test', 'predict']:
                 pass
                 # self.datasets['predict'] = ELM_Predict_Dataset()
+
+    def _get_valid_t0(
+            self,
+            labels: np.ndarray = None,
+            signals: np.ndarray = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        valid_t0 = None
+        return labels, signals, valid_t0
 
     def _get_elm_indices_and_split(self):
         with h5py.File(self.data_file, 'r') as root:
@@ -419,15 +442,18 @@ class Data(_Base_Class, LightningDataModule):
 
     def _train_val_test_dataloaders(self, stage: str) -> torch.utils.data.DataLoader:
         shuffle = drop_last = True if stage=='train' else False
+        sampler = torch.utils.data.DistributedSampler(
+            dataset=self.datasets[stage],
+            shuffle=shuffle,
+            drop_last=drop_last,
+        ) if self.is_distributed else None
         return torch.utils.data.DataLoader(
             dataset=self.datasets[stage],
-            sampler=torch.utils.data.DistributedSampler(
-                dataset=self.datasets[stage],
-                shuffle=shuffle,
-                drop_last=drop_last,
-            ),
+            sampler=sampler,
             batch_size=self.batch_size_per_worker,
             num_workers=self.num_workers,
+            shuffle=None if self.is_distributed else shuffle,
+            drop_last=None if self.is_distributed else drop_last,
             prefetch_factor=2,
             persistent_workers=True,
             # pin_memory=False,
@@ -457,6 +483,9 @@ class Data(_Base_Class, LightningDataModule):
 if __name__=='__main__':
 
     ### controls
+    world_size = int(os.getenv('WORLD_SIZE', default=0))
+    strategy = DDPStrategy(find_unused_parameters=False) if world_size else 'auto'
+    use_distributed_sampler = bool(world_size)
     signal_window_size = 1024
     max_epochs = 2
     max_steps = 100
@@ -472,13 +501,23 @@ if __name__=='__main__':
     torch.set_default_dtype(torch.float32)
 
     ### model
-    # model = Model(
-    #     signal_window_size=signal_window_size,
-    #     lr=1e-3,
-    # )
-    # test_output = model(model.example_batch_data)
-    # monitor_metric = model.monitor_metric
-    # metric_mode = 'min' if 'loss' in monitor_metric else 'max'
+    model = Model(
+        signal_window_size=signal_window_size,
+        lr=1e-3,
+    )
+    test_output = model(model.example_batch_data)
+    monitor_metric = model.monitor_metric
+    metric_mode = 'min' if 'loss' in monitor_metric else 'max'
+
+    ### data
+    data = Data(
+        signal_window_size = signal_window_size,
+        data_file = '/Users/drsmith/Documents/repos/bes-ml/bes_ml2/small_elm_data.hdf5',
+        max_elms= 20,
+        batch_size_per_worker = 128,
+        fraction_test=0,
+        num_workers=2,
+    )
 
     ### loggers
     # tb_logger = TensorBoardLogger(
@@ -528,38 +567,28 @@ if __name__=='__main__':
         # ),
     ]
     ### initialize trainer
-    # trainer = Trainer(
-    #     gradient_clip_val = None,
-    #     gradient_clip_algorithm = None,
-    #     max_epochs = max_epochs,
-    #     max_steps = max_steps,
-    #     max_time = None,
-    #     logger = loggers,
-    #     callbacks = callbacks,
-    #     enable_checkpointing = True,
-    #     enable_progress_bar = True,
-    #     enable_model_summary = True,
-    #     precision = None,
-    #     strategy = "auto",
-    #     log_every_n_steps = log_freq,
-    #     use_distributed_sampler = True,
-    #     num_nodes = int(os.getenv('SLURM_NNODES', default=1)),
-    # )
-    ### data
-    data = Data(
-        signal_window_size = signal_window_size,
-        data_file = '/Users/drsmith/Documents/repos/bes-ml/bes_ml2/small_elm_data.hdf5',
-        max_elms= 20,
-        batch_size_per_worker = 128,
-        fraction_test=0,
-        num_workers=2,
+    trainer = Trainer(
+        gradient_clip_val = None,
+        gradient_clip_algorithm = None,
+        max_epochs = max_epochs,
+        max_steps = max_steps,
+        max_time = None,
+        logger = loggers,
+        callbacks = callbacks,
+        enable_checkpointing = False,
+        enable_progress_bar = True,
+        enable_model_summary = True,
+        precision = None,
+        strategy = strategy,
+        log_every_n_steps = log_freq,
+        use_distributed_sampler = use_distributed_sampler,
+        num_nodes = int(os.getenv('SLURM_NNODES', default=1)),
     )
-    data.setup('fit')
     ### run trainer
-    # assert model.signal_window_size == data.signal_window_size
-    # trainer.fit(
-    #     model=model,
-    #     datamodule=data,
-    # )
+    assert model.signal_window_size == data.signal_window_size
+    trainer.fit(
+        model=model,
+        datamodule=data,
+    )
 
     # wandb.finish()
