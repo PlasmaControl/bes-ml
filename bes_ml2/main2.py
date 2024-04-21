@@ -283,10 +283,10 @@ class Model(LightningModule, _Base_Class):
 
 @dataclasses.dataclass(eq=False)
 class ELM_TrainValTest_Dataset(torch.utils.data.Dataset, _Base_Class):
-    signals=packaged_signals
-    labels=packaged_labels
-    sample_indices=packaged_valid_t0_indices
-    signal_window_size=self.signal_window_size
+    signals: np.ndarray = None
+    labels: np.ndarray = None
+    sample_indices: np.ndarray = None
+    signal_window_size: int = None
 
     def __post_init__(self):
         super().__init__()
@@ -295,7 +295,8 @@ class ELM_TrainValTest_Dataset(torch.utils.data.Dataset, _Base_Class):
         return 0
     
     def __getitem__(self, i: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return signal_window, label_time_to_elm, label_50p
+        # return signal_window, label_time_to_elm, label_50p
+        return None, None, None
 
 @dataclasses.dataclass(eq=False)
 class Data(LightningDataModule, _Base_Class):
@@ -346,9 +347,9 @@ class Data(LightningDataModule, _Base_Class):
         for stage, indices in elm_indices.items():
             if stage in self.datasets and self.datasets[stage]:
                 continue
-            if self.use_random_data:
-                self.datasets[stage] = Random_Dataset()
-                continue
+            # if self.use_random_data:
+            #     self.datasets[stage] = Random_Dataset()
+            #     continue
             elm_data = []
             with h5py.File(self.data_file, 'r') as h5_file:
                 elms = h5_file['elms']
