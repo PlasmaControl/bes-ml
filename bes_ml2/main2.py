@@ -38,15 +38,6 @@ def print_fields(obj):
         print(field_str)
 
 
-class _LitWrapper(LightningModule):
-    def __init__(self, torch_model):
-        super().__init__()
-        self.torch_model = torch_model
-    
-    def forward(self, inputs):
-        return self.torch_model(inputs)
-
-
 @dataclasses.dataclass(eq=False)
 class _Base_Class:
     signal_window_size: int = 1024
@@ -54,6 +45,15 @@ class _Base_Class:
     def __post_init__(self):
         assert np.log2(self.signal_window_size).is_integer(), \
             'Signal window must be power of 2'
+
+
+class _LitWrapper(LightningModule):
+    def __init__(self, torch_model):
+        super().__init__()
+        self.torch_model = torch_model
+    
+    def forward(self, inputs):
+        return self.torch_model(inputs)
 
 
 @dataclasses.dataclass(eq=False)
@@ -282,24 +282,27 @@ class Model(LightningModule, _Base_Class):
 #         return iter(self.samples)
 
 @dataclasses.dataclass(eq=False)
-class ELM_TrainValTest_Dataset(torch.utils.data.Dataset, _Base_Class):
+class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
     signals: np.ndarray = None
     labels: np.ndarray = None
     sample_indices: np.ndarray = None
     signal_window_size: int = None
 
     def __post_init__(self):
-        super().__init__()
+        super().__post_init__()
+        super(_Base_Class, self).__init__()
 
     def __len__(self) -> int:
         return 0
     
     def __getitem__(self, i: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # return signal_window, label_time_to_elm, label_50p
-        return None, None, None
+        signal_window = None
+        label_time_to_elm = None
+        label_50p = None
+        return signal_window, label_time_to_elm, label_50p
 
 @dataclasses.dataclass(eq=False)
-class Data(LightningDataModule, _Base_Class):
+class Data(_Base_Class, LightningDataModule):
     data_file: str|Path = None
     max_elms: int = None
     batch_size_per_worker: int = 128
@@ -307,18 +310,17 @@ class Data(LightningDataModule, _Base_Class):
     fraction_validation: float = 0.2
     fraction_test: float = 0.2
     use_random_data: bool = False
+    seed: int = 0  # seed for ELM index shuffling; must be same across processes
 
     def __post_init__(self):
-        super().__init__()
-        super(LightningDataModule, self).__post_init__()
+        super().__post_init__()
+        super(_Base_Class, self).__init__()
         self.save_hyperparameters()
         self.data_file = Path(self.data_file).absolute()
 
         self.datasets = {}
-        self.all_elm_indices = None
-        self.train_elm_indices = None
-        self.validation_elm_indices = None
-        self.test_elm_indices = None
+        self.elm_indices: dict[str,Iterable] = {cat: None for cat in ['all','train','validation','test']}
+        # self.shots: dict[str,Iterable] = {cat: None for cat in ['all','train','validation','test']}
 
         print_fields(self)
 
@@ -335,34 +337,33 @@ class Data(LightningDataModule, _Base_Class):
             setattr(self, item, state[item])
 
     def setup(self, stage: str):
-        if self.all_elm_indices is None:
+        if self.elm_indices['all'] is None:
             self._get_elm_indices_and_split()
-        elm_indices = {}
-        if stage == 'fit':
-            elm_indices['train'] = self.train_elm_indices
-            elm_indices['validation'] = self.validation_elm_indices
-        elif stage == 'test' or stage == 'predict':
-            elm_indices[stage] = self.test_elm_indices
 
-        for stage, indices in elm_indices.items():
-            if stage in self.datasets and self.datasets[stage]:
+        stages = ['train', 'validation'] if stage == 'fit' else [stage]
+        for st in stages:
+            if st in self.datasets and isinstance(self.datasets[st], torch.utils.data.Dataset):
                 continue
+            assert self.elm_indices[st] is not None
+            indices = self.elm_indices[st]
+            n_indices = len(indices)
+            print(f"Reading {n_indices} ELMs for stage {st}")
             # if self.use_random_data:
-            #     self.datasets[stage] = Random_Dataset()
+            #     self.datasets[st] = Random_Dataset()
             #     continue
             elm_data = []
             with h5py.File(self.data_file, 'r') as h5_file:
                 elms = h5_file['elms']
                 for i_elm, elm_index in enumerate(indices):
                     if i_elm%100 == 0:
-                        print(f"  Reading ELM event {i_elm:04d}/{indices.size:04d}")
-                    elm_event = elms[f"{elm_index:05d}"]
-                    signals = np.array(elm_event["signals"], dtype=np.float32)  # (64, <time>)
+                        print(f"  Reading ELM event {i_elm:04d}/{n_indices:04d}")
+                    elm_event = elms[f"{elm_index:06d}"]
+                    signals = np.array(elm_event["bes_signals"], dtype=np.float32)  # (64, <time>)
                     signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (time, pol, rad)
-                    time = np.array(elm_event['time'], dtype=np.float32)
+                    time = np.array(elm_event['bes_time'], dtype=np.float32)
                     t_start = elm_event.attrs['t_start']
                     t_stop = elm_event.attrs['t_stop']
-                    elm_data.append({})
+                    # elm_data.append({})
             
             packaged_labels = []
             packaged_signals = []
@@ -385,14 +386,36 @@ class Data(LightningDataModule, _Base_Class):
                 # self.datasets['predict'] = ELM_Predict_Dataset()
 
     def _get_elm_indices_and_split(self):
-        # read shots for all ELM indices
-        # shuffles shots
-        # partition shots into train, val, test
-        # load ELM indices for train, val, test
-        self.all_elm_indices = []
-        self.train_elm_indices = []
-        self.validation_elm_indices = []
-        self.test_elm_indices = []
+        with h5py.File(self.data_file, 'r') as root:
+            shots = [int(shot_key) for shot_key in root['shots']]
+            assert len(shots) == len(set(shots))
+            shots = set(shots)
+            shots_from_elms = set([int(elm_group.attrs['shot']) for elm_group in root['elms'].values()])
+            assert len(shots ^ shots_from_elms) == 0
+            elms = [int(elm_key) for elm_key in root['elms']]
+        # shuffle ELM indices
+        print(f"Total ELMs in dataset: {len(elms)}")
+        print(f"Total shots in dataset: {len(shots)}")
+        print(f"Shuffling ELMs with seed={self.seed}")
+        np.random.default_rng(self.seed).shuffle(elms)
+        # limit number of ELM events
+        if self.max_elms:
+            elms = elms[:self.max_elms]
+        # split ELM indicies
+        self.elm_indices['all'] = tuple(elms)
+        n_elms = len(self.elm_indices['all'])
+        n_test_elms = int(self.fraction_test * n_elms)
+        n_validation_elms = int(self.fraction_validation * n_elms)
+        self.elm_indices['test'] = tuple(self.elm_indices['all'][:n_test_elms])
+        train_val_elm_indices = self.elm_indices['all'][n_test_elms:]
+        self.elm_indices['validation'] = train_val_elm_indices[:n_validation_elms]
+        self.elm_indices['train'] = train_val_elm_indices[n_validation_elms:]
+        print("ELMs for analysis")
+        for stage, elm_indices in self.elm_indices.items():
+            tmp = f"  {stage.capitalize()} ELMs: {len(elm_indices)}"
+            if stage != 'all':
+                tmp += f" ({len(elm_indices)/len(self.elm_indices['all'])*1e2:.1f}%)"
+            print(tmp)
 
     def _train_val_test_dataloaders(self, stage: str) -> torch.utils.data.DataLoader:
         shuffle = drop_last = True if stage=='train' else False
@@ -434,6 +457,7 @@ class Data(LightningDataModule, _Base_Class):
 if __name__=='__main__':
 
     ### controls
+    signal_window_size = 1024
     max_epochs = 2
     max_steps = 100
     log_freq = 100
@@ -448,14 +472,13 @@ if __name__=='__main__':
     torch.set_default_dtype(torch.float32)
 
     ### model
-    signal_window_size = 1024
-    model = Model(
-        signal_window_size=signal_window_size,
-        lr=1e-3,
-    )
-    test_output = model(model.example_batch_data)
-    monitor_metric = model.monitor_metric
-    metric_mode = 'min' if 'loss' in monitor_metric else 'max'
+    # model = Model(
+    #     signal_window_size=signal_window_size,
+    #     lr=1e-3,
+    # )
+    # test_output = model(model.example_batch_data)
+    # monitor_metric = model.monitor_metric
+    # metric_mode = 'min' if 'loss' in monitor_metric else 'max'
 
     ### loggers
     # tb_logger = TensorBoardLogger(
@@ -485,11 +508,11 @@ if __name__=='__main__':
 
     ### callbacks
     callbacks = [
-        LearningRateMonitor(
-            logging_interval = None,
-            log_momentum = False,
-            log_weight_decay = False
-        ),
+        # LearningRateMonitor(
+        #     logging_interval = None,
+        #     log_momentum = False,
+        #     log_weight_decay = False
+        # ),
         # ModelCheckpoint(
         #     monitor=monitor_metric,
         #     mode=metric_mode,
@@ -505,30 +528,33 @@ if __name__=='__main__':
         # ),
     ]
     ### initialize trainer
-    trainer = Trainer(
-        gradient_clip_val = None,
-        gradient_clip_algorithm = None,
-        max_epochs = max_epochs,
-        max_steps = max_steps,
-        max_time = None,
-        logger = loggers,
-        callbacks = callbacks,
-        enable_checkpointing = True,
-        enable_progress_bar = True,
-        enable_model_summary = True,
-        precision = None,
-        strategy = "auto",
-        log_every_n_steps = log_freq,
-        use_distributed_sampler = True,
-        num_nodes = int(os.getenv('SLURM_NNODES', default=1)),
-    )
-    ### data
-    # data = Data(
-    #     signal_window_size = signal_window_size,
-    #     data_file = None,
-    #     max_elms= 20,
-    #     batch_size_per_worker = 128,
+    # trainer = Trainer(
+    #     gradient_clip_val = None,
+    #     gradient_clip_algorithm = None,
+    #     max_epochs = max_epochs,
+    #     max_steps = max_steps,
+    #     max_time = None,
+    #     logger = loggers,
+    #     callbacks = callbacks,
+    #     enable_checkpointing = True,
+    #     enable_progress_bar = True,
+    #     enable_model_summary = True,
+    #     precision = None,
+    #     strategy = "auto",
+    #     log_every_n_steps = log_freq,
+    #     use_distributed_sampler = True,
+    #     num_nodes = int(os.getenv('SLURM_NNODES', default=1)),
     # )
+    ### data
+    data = Data(
+        signal_window_size = signal_window_size,
+        data_file = '/Users/drsmith/Documents/repos/bes-ml/bes_ml2/small_elm_data.hdf5',
+        max_elms= 20,
+        batch_size_per_worker = 128,
+        fraction_test=0,
+        num_workers=2,
+    )
+    data.setup('fit')
     ### run trainer
     # assert model.signal_window_size == data.signal_window_size
     # trainer.fit(
