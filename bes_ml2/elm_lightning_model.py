@@ -315,8 +315,10 @@ class Lightning_Model(
         )
         return {
             'optimizer': self.optimizer,
-            'lr_scheduler': self.lr_scheduler,
-            'monitor': self.monitor_metric,
+            'lr_scheduler': {
+                'scheduler': self.lr_scheduler,
+                'monitor': self.monitor_metric,
+            },
         }
 
     def forward(self, signals: torch.Tensor) -> dict[str, torch.Tensor]:
