@@ -305,6 +305,7 @@ class Data(_Base_Class, LightningDataModule):
     data_file: str|Path = None
     max_elms: int = None
     batch_size_per_worker: int = 128
+    stride_factor: int = 8
     num_workers: int = 4
     fraction_validation: float = 0.2
     fraction_test: float = 0.2
@@ -365,26 +366,41 @@ class Data(_Base_Class, LightningDataModule):
                     time = np.array(elm_event['bes_time'], dtype=np.float32)
                     assert time.size == signals.shape[0]
                     t_start = elm_event.attrs['t_start']
-                    t_stop = elm_event.attrs['t_stop']
-                    t_stop -= 0.05  # shift ELM onset earlier to ensure only pre-ELMd data
+                    t_stop = elm_event.attrs['t_stop'] - 0.05
                     t_mask = (time >= t_start) & (time <= t_stop)
                     signals = signals[t_mask, ...]
-                    time_to_onset = time[t_mask] - t_stop
-                    labels, signals, valid_t0 = self._get_valid_t0(time_to_onset, signals)
+                    time_to_elm = time[t_mask] - time[t_mask][-1]
+                    valid_t0 = np.zeros(time_to_elm.size, dtype=int)
+                    s_end = len(time_to_elm)
+                    while True:
+                        s_start = s_end - self.signal_window_size
+                        if s_start < 0: break
+                        valid_t0[s_start] = 1
+                        s_end -= self.signal_window_size // self.stride_factor
+                    assert signals.shape[0] == time_to_elm.size
+                    assert time_to_elm.size == valid_t0.size
                     elm_data.append({
                         'signals': signals,
-                        'labels': labels,
+                        'time_to_elm': time_to_elm,
                         'valid_t0': valid_t0,
                         'elm_index': elm_index,
                         'shot': elm_event.attrs['shot'],
-                        'time_t0': time[0],
+                        'time_t0': time[t_mask][0],
                     })
             
-            packaged_labels = []
-            packaged_signals = []
-            packaged_valid_t0 = []
+            packaged_signals = np.concatenate(
+                [elm['signals'] for elm in elm_data],
+                axis=0,
+            )
+            packaged_time_to_elm = np.concatenate(
+                [elm['time_to_elm'] for elm in elm_data],
+            )
+            packaged_valid_t0 = np.concatenate(
+                [elm['valid_t0'] for elm in elm_data],
+            )
 
-            packaged_valid_t0_indices = []
+            packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
+            packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
 
             if st in ['train', 'validation', 'test']:
                 self.datasets[st] = ELM_TrainValTest_Dataset(
