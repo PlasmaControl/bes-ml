@@ -523,7 +523,8 @@ if __name__=='__main__':
     signal_window_size = 1024
     max_epochs = 2
     max_steps = 100
-    log_freq = 100
+    log_freq = 10
+    fraction_test = 0
     experiment_dir = Path('./experiment_default').absolute()
     experiment_dir.mkdir(parents=True, exist_ok=True)
     experiment_name = experiment_dir.name
@@ -531,6 +532,7 @@ if __name__=='__main__':
     trial_name = None
     early_stopping_min_delta = 1e-3
     early_stopping_patience = 5
+    use_wandb = False
 
     torch.set_default_dtype(torch.float32)
 
@@ -544,7 +546,6 @@ if __name__=='__main__':
     metric_mode = 'min' if 'loss' in monitor_metric else 'max'
 
     ### data
-    fraction_test = 0.2
     datamodule = Data(
         signal_window_size = signal_window_size,
         data_file = '/Users/drsmith/Documents/repos/bes-ml/bes_ml2/small_elm_data.hdf5',
@@ -555,41 +556,41 @@ if __name__=='__main__':
     )
 
     ### loggers
-    # tb_logger = TensorBoardLogger(
-    #     save_dir=experiment_parent_dir,
-    #     name=experiment_name,
-    #     version=trial_name,
-    #     default_hp_metric=False,
-    # )
-    # trial_dir = Path(tb_logger.log_dir).absolute()
-    # trial_dir.mkdir(parents=True, exist_ok=True)
-    # print(f"Trial directory: {trial_dir}")
-    # wandb.login()
-    # wandb_logger = WandbLogger(
-    #     save_dir=experiment_dir,
-    #     project=experiment_name,
-    #     name=trial_name,
-    # )
-    # wandb_logger.watch(
-    #     model=model, 
-    #     log='all', 
-    #     log_freq=log_freq,
-    # )
-    loggers = [
-        # tb_logger, 
-        # wandb_logger,
-    ]
+    loggers = []
+    tb_logger = TensorBoardLogger(
+        save_dir=experiment_parent_dir,
+        name=experiment_name,
+        version=trial_name,
+        default_hp_metric=False,
+    )
+    loggers.append(tb_logger)
+    trial_dir = Path(tb_logger.log_dir).absolute()
+    print(f"Trial directory: {trial_dir}")
+
+    if use_wandb:
+        wandb.login()
+        wandb_logger = WandbLogger(
+            save_dir=experiment_dir,
+            project=experiment_name,
+            name=trial_name,
+        )
+        wandb_logger.watch(
+            model=model, 
+            log='all', 
+            log_freq=log_freq,
+        )
+        loggers.append(wandb_logger)
 
     ### callbacks
     callbacks = [
-        # LearningRateMonitor(
-        #     logging_interval = None,
-        #     log_momentum = False,
-        #     log_weight_decay = False
-        # ),
         ModelCheckpoint(
             monitor=monitor_metric,
             mode=metric_mode,
+        ),
+        LearningRateMonitor(
+            logging_interval = None,
+            log_momentum = False,
+            log_weight_decay = False
         ),
         # EarlyStopping(
         #     monitor=monitor_metric,
@@ -624,4 +625,5 @@ if __name__=='__main__':
     if fraction_test:
         trainer.test(model, datamodule)
 
-    # wandb.finish()
+    if use_wandb:
+        wandb.finish()
