@@ -24,6 +24,7 @@ from lightning.pytorch import Trainer, LightningModule, LightningDataModule, Cal
 from lightning.pytorch.strategies import Strategy, DDPStrategy
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from lightning.pytorch.callbacks import LearningRateMonitor, EarlyStopping, ModelCheckpoint
+from lightning.pytorch.utilities.model_summary import ModelSummary
 
 
 def print_fields(obj):
@@ -236,12 +237,7 @@ class Model(LightningModule, _Base_Class):
             self, 
             stage: str = None,  # fit, validate, test, or predict
     ):
-        # called in every process at beginning of every stage
         pass
-        # datamodule = self.trainer.datamodule
-        # for label_percentile in ['label_scaled_25p', 'label_scaled_50p', 'label_scaled_75p']:
-        #     assert hasattr(datamodule, label_percentile)
-        #     setattr(self, label_percentile, getattr(datamodule, label_percentile))
 
     def configure_optimizers(self):
         self.optimizer = torch.optim.Adam(
@@ -266,30 +262,10 @@ class Model(LightningModule, _Base_Class):
         }
 
 
-# @dataclasses.dataclass(eq=False)
-# class Random_Dataset(torch.utils.data.IterableDataset, _Base_Class):
-#     dataset_size: int = int(1e4)
-
-#     def __post_init__(self):
-#         super().__init__()
-#         super(torch.utils.data.IterableDataset, self).__post_init__()
-#         self.samples = []
-#         for _ in range(self.dataset_size):
-#             self.samples.append((
-#                 torch.randn((1, self.signal_window_size, 8, 8)),
-#                 torch.rand((1)),
-#                 torch.randint(0, 2, (1)),
-#             ))
-
-#     def __iter__(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-#         return iter(self.samples)
-
 @dataclasses.dataclass(eq=False)
 class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
     signals: np.ndarray = None
     t0_and_time_to_elm_labels: dict[int, float] = None
-    # labels: np.ndarray = None
-    # sample_indices: np.ndarray = None
     signal_window_size: int = None
 
     def __post_init__(self):
@@ -320,7 +296,7 @@ class Data(_Base_Class, LightningDataModule):
     max_elms: int = None
     batch_size_per_worker: int = 128
     stride_factor: int = 8
-    num_workers: int = 4
+    num_workers: int = 0
     fraction_validation: float = 0.2
     fraction_test: float = 0.2
     use_random_data: bool = False
@@ -335,7 +311,6 @@ class Data(_Base_Class, LightningDataModule):
 
         self.datasets = {}
         self.elm_indices: dict[str,Iterable] = {cat: None for cat in ['all','train','validation','test']}
-        # self.shots: dict[str,Iterable] = {cat: None for cat in ['all','train','validation','test']}
 
         print_fields(self)
 
@@ -365,9 +340,6 @@ class Data(_Base_Class, LightningDataModule):
             indices = self.elm_indices[st]
             n_indices = len(indices)
             print(f"Reading {n_indices} ELMs for stage {st}")
-            # if self.use_random_data:
-            #     self.datasets[st] = Random_Dataset()
-            #     continue
             elm_data = []
             with h5py.File(self.data_file, 'r') as h5_file:
                 elms = h5_file['elms']
@@ -413,34 +385,20 @@ class Data(_Base_Class, LightningDataModule):
                 [elm['valid_t0'] for elm in elm_data],
             )
 
-            # t0_and_time_to_elm_labels = {}
-            # for i, is_valid_t0 in enumerate(concat_valid_t0):
-            #     if not is_valid_t0: continue
-            #     t0_and_time_to_elm_labels[i] = \
-            #         concat_time_to_elm[i + self.signal_window_size - 1]
-                
             t0_and_time_to_elm_labels = {
                 i_t0: concat_time_to_elm[i_t0 + self.signal_window_size - 1]
                 for i_t0, is_valid_t0 in enumerate(concat_valid_t0) if is_valid_t0
             }
-
-            # t0_indices = np.arange(concat_valid_t0.size, dtype=int)
-            # t0_indices = t0_indices[concat_valid_t0 == 1]
-
-            # concat_time_to_elm = concat_time_to_elm[t0_indices+self.signal_window_size-1]
 
             if st in ['train', 'validation', 'test']:
                 self.datasets[st] = ELM_TrainValTest_Dataset(
                     signals=concat_signals,
                     t0_and_time_to_elm_labels=t0_and_time_to_elm_labels,
                     signal_window_size=self.signal_window_size,
-                    # label_scaled_25p=self.label_scaled_25p,
-                    # label_scaled_75p=self.label_scaled_75p,
                 )
             
             if st in ['test', 'predict']:
                 pass
-                # self.datasets['predict'] = ELM_Predict_Dataset()
 
     def _get_elm_indices_and_split(self):
         with h5py.File(self.data_file, 'r') as root:
@@ -488,8 +446,8 @@ class Data(_Base_Class, LightningDataModule):
             num_workers=self.num_workers,
             shuffle=None if self.is_distributed else shuffle,
             drop_last=None if self.is_distributed else drop_last,
-            prefetch_factor=2,
-            persistent_workers=True,
+            prefetch_factor=2 if self.num_workers else None,
+            persistent_workers=bool(self.num_workers),
             # pin_memory=False,
             # pin_memory_device="",
         )
@@ -523,7 +481,9 @@ if __name__=='__main__':
     signal_window_size = 1024
     max_epochs = 2
     max_steps = 100
+    lr = 1e-3
     log_freq = 10
+    max_elms = 20
     fraction_test = 0
     experiment_dir = Path('./experiment_default').absolute()
     experiment_dir.mkdir(parents=True, exist_ok=True)
@@ -537,19 +497,22 @@ if __name__=='__main__':
     torch.set_default_dtype(torch.float32)
 
     ### model
-    model = Model(
+    lit_model = Model(
         signal_window_size=signal_window_size,
-        lr=1e-3,
+        lr=lr,
     )
-    test_output = model(model.example_batch_data)
-    monitor_metric = model.monitor_metric
+    test_output = lit_model(lit_model.example_batch_data)
+    monitor_metric = lit_model.monitor_metric
     metric_mode = 'min' if 'loss' in monitor_metric else 'max'
 
+    print("Model Summary:")
+    print(ModelSummary(lit_model, max_depth=-1))
+
     ### data
-    datamodule = Data(
+    lit_datamodule = Data(
         signal_window_size = signal_window_size,
         data_file = '/Users/drsmith/Documents/repos/bes-ml/bes_ml2/small_elm_data.hdf5',
-        max_elms= 20,
+        max_elms= max_elms,
         batch_size_per_worker = 128,
         fraction_test=fraction_test,
         num_workers=2,
@@ -575,7 +538,7 @@ if __name__=='__main__':
             name=trial_name,
         )
         wandb_logger.watch(
-            model=model, 
+            model=lit_model, 
             log='all', 
             log_freq=log_freq,
         )
@@ -620,10 +583,10 @@ if __name__=='__main__':
         num_nodes = int(os.getenv('SLURM_NNODES', default=1)),
     )
 
-    trainer.fit(model, datamodule=datamodule)
+    trainer.fit(lit_model, datamodule=lit_datamodule)
 
     if fraction_test:
-        trainer.test(model, datamodule)
+        trainer.test(lit_model, lit_datamodule)
 
     if use_wandb:
         wandb.finish()
