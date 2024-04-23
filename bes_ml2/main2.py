@@ -84,7 +84,7 @@ class Model(LightningModule, _Base_Class):
 
         # task sub-models and metrics
         self.task_models: Mapping[str, LightningModule] = torch.nn.ModuleDict()
-        self.task_metrics: dict = {}
+        self.task_metrics: dict[str, dict] = {}
 
         # binary classifier task
         task_name = 'classifier'
@@ -126,29 +126,33 @@ class Model(LightningModule, _Base_Class):
         self.update_step(batch, batch_idx, stage='test')
 
     def update_step(self, batch, batch_idx, stage: str) -> torch.Tensor:
-        signals, labels = batch
-        results = self(signals)
+        signal_window, time_to_elm, quantiles = batch
+        task_results = self(signal_window)
         sum_loss = None
-        for metric_name, func in self.metric_functions.items():
-            if 'loss' in metric_name:
-                metric_value = func(
-                    input=results,
-                    target=labels.type_as(results),
-                )
-                sum_loss = metric_value if sum_loss is None else sum_loss + metric_value
-            elif 'score' in metric_name:
-                kwargs = {}
-                if 'f1' in metric_name:
-                    modified_predictions = (results > 0.5).type(torch.int)
-                    kwargs['zero_division'] = 0
-                else:
-                    modified_predictions = results
-                metric_value = func(
-                    y_pred=modified_predictions.detach().cpu(), 
-                    y_true=labels.detach().cpu(),
-                    **kwargs,
-                )
-            self.log(f"{metric_name}/{stage}", metric_value, sync_dist=True)
+        for task, task_metrics in self.task_metrics.items():
+            results: torch.Tensor = task_results[task]
+            if task == 'classifier':
+                labels: torch.Tensor = quantiles[0.5]
+            for metric_name, metric_function in task_metrics.items():
+                if 'loss' in metric_name:
+                    metric_value = metric_function(
+                        input=results.reshape_as(labels),
+                        target=labels.type_as(results),
+                    )
+                    sum_loss = sum_loss + metric_value if sum_loss else metric_value
+                elif 'score' in metric_name:
+                    kwargs = {}
+                    if 'f1' in metric_name:
+                        modified_predictions = (results > 0.5).type(torch.int)
+                        kwargs['zero_division'] = 0
+                    else:
+                        modified_predictions = results
+                    metric_value = metric_function(
+                        y_pred=modified_predictions.detach().cpu(), 
+                        y_true=labels.detach().cpu(),
+                        **kwargs,
+                    )
+                self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True)
         self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True)
         return sum_loss
 
@@ -283,22 +287,32 @@ class Model(LightningModule, _Base_Class):
 @dataclasses.dataclass(eq=False)
 class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
     signals: np.ndarray = None
-    labels: np.ndarray = None
-    sample_indices: np.ndarray = None
+    t0_and_time_to_elm_labels: dict[int, float] = None
+    # labels: np.ndarray = None
+    # sample_indices: np.ndarray = None
     signal_window_size: int = None
 
     def __post_init__(self):
         super().__post_init__()
         super(_Base_Class, self).__init__()
+        self.signals = torch.from_numpy(self.signals[np.newaxis, ...])
+        self.time_to_elm_labels = [val for val in self.t0_and_time_to_elm_labels.values()]
+        self.t0_indices = [key for key in self.t0_and_time_to_elm_labels.keys()]
+        quantiles = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
+        self.quantiles = {
+            q: qval 
+            for q, qval in zip(quantiles, np.quantile(self.time_to_elm_labels, quantiles))
+        }
 
     def __len__(self) -> int:
-        return 0
+        return len(self.t0_and_time_to_elm_labels)
     
     def __getitem__(self, i: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        signal_window = None
-        label_time_to_elm = None
-        label_50p = None
-        return signal_window, label_time_to_elm, label_50p
+        i_t0 = self.t0_indices[i]
+        time_to_elm = self.time_to_elm_labels[i]
+        signal_window = self.signals[:, i_t0 : i_t0 + self.signal_window_size, :, :]
+        quantiles = {q: int(time_to_elm<=qval) for q, qval in self.quantiles.items()}
+        return signal_window, time_to_elm, quantiles
 
 @dataclasses.dataclass(eq=False)
 class Data(_Base_Class, LightningDataModule):
@@ -369,7 +383,7 @@ class Data(_Base_Class, LightningDataModule):
                     t_stop = elm_event.attrs['t_stop'] - 0.05
                     t_mask = (time >= t_start) & (time <= t_stop)
                     signals = signals[t_mask, ...]
-                    time_to_elm = time[t_mask] - time[t_mask][-1]
+                    time_to_elm = (time[t_mask] - time[t_mask][-1]) * -1
                     valid_t0 = np.zeros(time_to_elm.size, dtype=int)
                     s_end = len(time_to_elm)
                     while True:
@@ -388,25 +402,37 @@ class Data(_Base_Class, LightningDataModule):
                         'time_t0': time[t_mask][0],
                     })
             
-            packaged_signals = np.concatenate(
+            concat_signals = np.concatenate(
                 [elm['signals'] for elm in elm_data],
                 axis=0,
             )
-            packaged_time_to_elm = np.concatenate(
+            concat_time_to_elm = np.concatenate(
                 [elm['time_to_elm'] for elm in elm_data],
             )
-            packaged_valid_t0 = np.concatenate(
+            concat_valid_t0 = np.concatenate(
                 [elm['valid_t0'] for elm in elm_data],
             )
 
-            packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
-            packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
+            # t0_and_time_to_elm_labels = {}
+            # for i, is_valid_t0 in enumerate(concat_valid_t0):
+            #     if not is_valid_t0: continue
+            #     t0_and_time_to_elm_labels[i] = \
+            #         concat_time_to_elm[i + self.signal_window_size - 1]
+                
+            t0_and_time_to_elm_labels = {
+                i_t0: concat_time_to_elm[i_t0 + self.signal_window_size - 1]
+                for i_t0, is_valid_t0 in enumerate(concat_valid_t0) if is_valid_t0
+            }
+
+            # t0_indices = np.arange(concat_valid_t0.size, dtype=int)
+            # t0_indices = t0_indices[concat_valid_t0 == 1]
+
+            # concat_time_to_elm = concat_time_to_elm[t0_indices+self.signal_window_size-1]
 
             if st in ['train', 'validation', 'test']:
                 self.datasets[st] = ELM_TrainValTest_Dataset(
-                    signals=packaged_signals,
-                    labels=packaged_labels,
-                    sample_indices=packaged_valid_t0_indices,
+                    signals=concat_signals,
+                    t0_and_time_to_elm_labels=t0_and_time_to_elm_labels,
                     signal_window_size=self.signal_window_size,
                     # label_scaled_25p=self.label_scaled_25p,
                     # label_scaled_75p=self.label_scaled_75p,
@@ -415,14 +441,6 @@ class Data(_Base_Class, LightningDataModule):
             if st in ['test', 'predict']:
                 pass
                 # self.datasets['predict'] = ELM_Predict_Dataset()
-
-    def _get_valid_t0(
-            self,
-            labels: np.ndarray = None,
-            signals: np.ndarray = None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        valid_t0 = None
-        return labels, signals, valid_t0
 
     def _get_elm_indices_and_split(self):
         with h5py.File(self.data_file, 'r') as root:
@@ -592,7 +610,7 @@ if __name__=='__main__':
         logger = loggers,
         callbacks = callbacks,
         enable_checkpointing = False,
-        enable_progress_bar = True,
+        enable_progress_bar = False,
         enable_model_summary = True,
         precision = None,
         strategy = strategy,
