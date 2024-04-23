@@ -356,7 +356,7 @@ class Data(_Base_Class, LightningDataModule):
         if self.elm_indices['all'] is None:
             self._get_elm_indices_and_split()
 
-        stages = ['train', 'validation'] if stage == 'fit' else [stage]
+        stages = ['train', 'validation'] if stage == 'fit' else [stage.value]
         for st in stages:
             assert st in ['train', 'validation','test','predict']
             if st in self.datasets and isinstance(self.datasets[st], torch.utils.data.Dataset):
@@ -507,7 +507,7 @@ class Data(_Base_Class, LightningDataModule):
         return [
             torch.utils.data.DataLoader(
                 dataset=dataset,
-                batch_size=256,
+                batch_size=self.batch_size_per_worker,
                 num_workers=self.num_workers,
                 persistent_workers=True,
             ) for dataset in self.datasets['predict']
@@ -544,12 +544,13 @@ if __name__=='__main__':
     metric_mode = 'min' if 'loss' in monitor_metric else 'max'
 
     ### data
-    data = Data(
+    fraction_test = 0.2
+    datamodule = Data(
         signal_window_size = signal_window_size,
         data_file = '/Users/drsmith/Documents/repos/bes-ml/bes_ml2/small_elm_data.hdf5',
         max_elms= 20,
         batch_size_per_worker = 128,
-        fraction_test=0,
+        fraction_test=fraction_test,
         num_workers=2,
     )
 
@@ -586,11 +587,10 @@ if __name__=='__main__':
         #     log_momentum = False,
         #     log_weight_decay = False
         # ),
-        # ModelCheckpoint(
-        #     monitor=monitor_metric,
-        #     mode=metric_mode,
-        #     save_last=None,
-        # ),
+        ModelCheckpoint(
+            monitor=monitor_metric,
+            mode=metric_mode,
+        ),
         # EarlyStopping(
         #     monitor=monitor_metric,
         #     mode=metric_mode,
@@ -609,7 +609,7 @@ if __name__=='__main__':
         max_time = None,
         logger = loggers,
         callbacks = callbacks,
-        enable_checkpointing = False,
+        enable_checkpointing = True,
         enable_progress_bar = False,
         enable_model_summary = True,
         precision = None,
@@ -618,11 +618,10 @@ if __name__=='__main__':
         use_distributed_sampler = use_distributed_sampler,
         num_nodes = int(os.getenv('SLURM_NNODES', default=1)),
     )
-    ### run trainer
-    assert model.signal_window_size == data.signal_window_size
-    trainer.fit(
-        model=model,
-        datamodule=data,
-    )
+
+    trainer.fit(model, datamodule=datamodule)
+
+    if fraction_test:
+        trainer.test(model, datamodule)
 
     # wandb.finish()

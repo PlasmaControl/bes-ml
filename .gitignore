@@ -4,6 +4,7 @@ study_test/
 experiment*/
 MNIST/
 lightning_logs/
+checkpoints/
 
 # data files
 *.pkl
