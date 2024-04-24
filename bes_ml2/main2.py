@@ -24,7 +24,8 @@ import torch.optim.lr_scheduler
 from lightning.pytorch import Trainer, LightningModule, LightningDataModule, Callback
 from lightning.pytorch.strategies import Strategy, DDPStrategy
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
-from lightning.pytorch.callbacks import LearningRateMonitor, EarlyStopping, ModelCheckpoint
+from lightning.pytorch.callbacks import \
+    LearningRateMonitor, EarlyStopping, ModelCheckpoint, DeviceStatsMonitor
 from lightning.pytorch.utilities.model_summary import ModelSummary
 
 
@@ -66,7 +67,6 @@ class Model(LightningModule, _Base_Class):
     weight_decay: float = 1e-6
     leaky_relu_slope: float = 1e-2
     monitor_metric: str = 'sum_loss/val'
-    log_dir: str = dataclasses.field(default='.', init=False)
 
     def __post_init__(self):
 
@@ -101,7 +101,7 @@ class Model(LightningModule, _Base_Class):
         self.total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"Total model parameters: {self.total_parameters:,}")
 
-        # self.initialize_parameters()
+        self.initialize_parameters()
 
         print("Example batch evaluation with batch_size=128")
         self.example_batch_data = torch.zeros(
@@ -173,21 +173,12 @@ class Model(LightningModule, _Base_Class):
     def on_train_epoch_end(self):
         delt = time.time() - self.t_train_epoch_start
         if self.is_global_zero and self.global_step > 0:
-            print(f"  Epoch {self.current_epoch} time: {delt/60:.1f} min (steps {self.global_step:,d})")
-            if self.current_epoch == 0:
-                print(f"    Batches for training: {self.trainer.num_training_batches}")
-                print(f"    Batches for validation: {self.trainer.num_val_batches}")
-            print(self.trainer.logged_metrics)
-
-    # def on_validation_epoch_start(self):
-    #     self.t_val_epoch_start = time.time()
-
-    # def on_validation_epoch_end(self):
-    #     delt = time.time() - self.t_val_epoch_start
-    #     if self.is_global_zero and self.global_step > 0:
-    #         print(f"  Epoch {self.current_epoch} val time: {delt/60:.1f} min")
-    #         if self.current_epoch == 0:
-    #             print(f"    Batches for validation: {self.trainer.num_val_batches}")
+            logged_metrics = self.trainer.logged_metrics
+            line =  f"  Epoch {self.current_epoch} time: {delt/60:.1f} min  " 
+            line += f"steps {self.global_step:,d}  "
+            line += f"train loss {logged_metrics['sum_loss/train']:.4f}  "
+            line += f"val loss {logged_metrics['sum_loss/val']:.4f}  "
+            print(line)
 
     def on_fit_end(self) -> None:
         delt = time.time() - self.t_fit_start
@@ -259,7 +250,7 @@ class Model(LightningModule, _Base_Class):
         return _LitWrapper(mlp_classifier)
 
     def initialize_parameters(self):
-        print("Initializing model parameters")
+        print("Initializing model to uniform random weights and biases=0")
         for name, param in self.named_parameters():
             if name.endswith(".bias"):
                 print(f"  {name}: initialized to zeros (numel {param.data.numel()})")
@@ -331,6 +322,7 @@ class Data(_Base_Class, LightningDataModule):
     batch_size_per_rank: int = 128
     stride_factor: int = 8
     num_workers: int = 0
+    outlier_value: float = 6
     fraction_validation: float = 0.2
     fraction_test: float = 0.2
     use_random_data: bool = False
@@ -351,7 +343,14 @@ class Data(_Base_Class, LightningDataModule):
 
         print_fields(self)
 
-        self.state_items = []
+        # datamodule state, to reproduce pre-processing
+        self.state_items = [
+            'raw_signal_mean',
+            'raw_signal_stdev',
+        ]
+        for item in self.state_items:
+            if not hasattr(self, item):
+                setattr(self, item, None)
 
     def get_state_dict(self) -> dict:
         state_dict = {}
@@ -429,6 +428,43 @@ class Data(_Base_Class, LightningDataModule):
                 for i_t0, is_valid_t0 in enumerate(concat_valid_t0) if is_valid_t0
             }
 
+            # remove signal windows with outliers
+            if self.outlier_value:
+                outlier_count = 0
+                for i_t0 in list(t0_and_time_to_elm_labels.keys()):
+                    signal_window = concat_signals[..., i_t0 : i_t0 + self.signal_window_size, :, :]
+                    if np.abs(signal_window).max() > self.outlier_value:
+                        del t0_and_time_to_elm_labels[i_t0]
+                        outlier_count += 1
+                print(f"  Outlier signal windows removed: {outlier_count:,d}")
+            
+            # Window and batch counts
+            window_count = len(t0_and_time_to_elm_labels)
+            total_batches = window_count / self.batch_size_per_rank
+            batches_per_rank = total_batches / self.trainer.world_size
+            print(f"  Signal window count: {window_count:,d}  Batches: {total_batches:,.1f}  Batches/rank: {batches_per_rank:,.1f}")
+
+            # Raw signal stats
+            raw_stats = self._get_statistics(
+                signals=concat_signals,
+                sample_indices=np.array(list(t0_and_time_to_elm_labels.keys()), dtype=int),
+            )
+            print(f"  Raw signals min {raw_stats['min']:.2f} max {raw_stats['max']:.2f} mean {raw_stats['mean']:.2f} stdev {raw_stats['stdev']:.2f} exkurt {raw_stats['exkurt']:.2f}")
+            if st == 'train':
+                self.raw_signal_mean = raw_stats['mean']
+                self.raw_signal_stdev = raw_stats['stdev']
+            else:
+                assert self.raw_signal_mean and self.raw_signal_stdev
+
+            # normalize signals
+            concat_signals = (concat_signals-self.raw_signal_mean) / self.raw_signal_stdev
+            norm_stats = self._get_statistics(
+                signals=concat_signals,
+                sample_indices=np.array(list(t0_and_time_to_elm_labels.keys()), dtype=int),
+            )
+            print(f"  Normalized signals min {norm_stats['min']:.2f} max {norm_stats['max']:.2f} mean {norm_stats['mean']:.2f} stdev {norm_stats['stdev']:.2f} exkurt {norm_stats['exkurt']:.2f}")
+
+            # create datasets
             if st in ['train', 'validation', 'test']:
                 self.datasets[st] = ELM_TrainValTest_Dataset(
                     signals=concat_signals,
@@ -510,18 +546,54 @@ class Data(_Base_Class, LightningDataModule):
             ) for dataset in self.datasets['predict']
         ]
 
+    def _get_statistics(
+            self, 
+            signals: np.ndarray,
+            sample_indices: np.ndarray, 
+    ) -> dict:
+        signal_min = np.array(np.inf)
+        signal_max = np.array(-np.inf)
+        n_bins = 200
+        cummulative_hist = np.zeros(n_bins, dtype=int)
+        stat_samples = int(100e3)
+        stat_interval = np.max([1, sample_indices.size//stat_samples])
+        n_samples = sample_indices.size // stat_interval
+        for i in sample_indices[::stat_interval]:
+            signal_window = signals[i: i + self.signal_window_size, :, :]
+            signal_min = np.min([signal_min, signal_window.min()])
+            signal_max = np.max([signal_max, signal_window.max()])
+            hist, bin_edges = np.histogram(
+                signal_window,
+                bins=n_bins,
+                range=[-10.4, 10.4],
+            )
+            cummulative_hist += hist
+        bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
+        mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
+        stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
+        exkurt = np.sum(cummulative_hist * ((bin_center - mean)/stdev) ** 4) / np.sum(cummulative_hist) - 3
+        return {
+            'count': sample_indices.size,
+            'min': signal_min,
+            'max': signal_max,
+            'mean': mean,
+            'stdev': stdev,
+            'exkurt': exkurt,
+        }
+
+
 
 if __name__=='__main__':
 
-    # world_size = int(os.getenv('WORLD_SIZE', default=0))
-    world_size = 2
-    batch_size_per_rank = 16
+    world_size = int(os.getenv('WORLD_SIZE', default=0))
+    # world_size = 0
+    batch_size_per_rank = 32
     signal_window_size = 1024
-    max_epochs = 2
+    max_epochs = 8
     max_steps = -1
     max_elms = 20
     fraction_test = 0
-    lr = 1e-3
+    lr = 5e-3
     log_freq = 10
     early_stopping_min_delta = 1e-3
     early_stopping_patience = 5
@@ -542,7 +614,7 @@ if __name__=='__main__':
         signal_window_size=signal_window_size,
         lr=lr,
     )
-    test_output = lit_model(lit_model.example_batch_data)
+    # test_output = lit_model(lit_model.example_batch_data)
     monitor_metric = lit_model.monitor_metric
     metric_mode = 'min' if 'loss' in monitor_metric else 'max'
 
@@ -593,6 +665,7 @@ if __name__=='__main__':
             mode=metric_mode,
             save_last=True,
         ),
+        DeviceStatsMonitor(),
         # EarlyStopping(
         #     monitor=monitor_metric,
         #     mode=metric_mode,
@@ -614,7 +687,7 @@ if __name__=='__main__':
         callbacks = callbacks,
         enable_checkpointing = True,
         enable_progress_bar = False,
-        enable_model_summary = True,
+        enable_model_summary = False,
         precision = '16-mixed' if torch.cuda.is_available() else 32,
         strategy = DDPStrategy(
             gradient_as_bucket_view=True,
