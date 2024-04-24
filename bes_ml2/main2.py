@@ -347,15 +347,17 @@ class Data(_Base_Class, LightningDataModule):
         self.state_items = [
             'raw_signal_mean',
             'raw_signal_stdev',
+            'elm_indices',
+            'train_quantiles',
         ]
         for item in self.state_items:
             if not hasattr(self, item):
                 setattr(self, item, None)
 
     def get_state_dict(self) -> dict:
-        state_dict = {}
-        for item in self.state_items:
-            state_dict[item] = getattr(self, item)
+        state_dict = {
+            item: getattr(self, item) for item in self.state_items
+        }
         return state_dict
 
     def load_state_dict(self, state: dict) -> None:
@@ -363,9 +365,12 @@ class Data(_Base_Class, LightningDataModule):
             setattr(self, item, state[item])
 
     def setup(self, stage: str):
-        self.is_distributed = self.trainer.world_size > 1
-        print(f"Batch size per rank: {self.batch_size_per_rank}  (world size {self.trainer.world_size})")
         assert stage in ['fit', 'test','predict']
+
+        self.is_distributed = self.trainer.world_size > 1
+        self.is_global_zero = self.trainer.is_global_zero
+        if self.is_global_zero: print(f"Batch size per rank: {self.batch_size_per_rank}  (world size {self.trainer.world_size})")
+
         if self.elm_indices['all'] is None:
             self._get_elm_indices_and_split()
 
@@ -377,13 +382,13 @@ class Data(_Base_Class, LightningDataModule):
             assert self.elm_indices[st] is not None
             indices = self.elm_indices[st]
             n_indices = len(indices)
-            print(f"Reading {n_indices} ELMs for stage {st}")
+            if self.is_global_zero: print(f"Reading {n_indices} ELMs for stage {st}")
             elm_data = []
             with h5py.File(self.data_file, 'r') as h5_file:
                 elms = h5_file['elms']
                 for i_elm, elm_index in enumerate(indices):
                     if i_elm%100 == 0:
-                        print(f"  Reading ELM event {i_elm:04d}/{n_indices:04d}")
+                        if self.is_global_zero: print(f"  Reading ELM event {i_elm:04d}/{n_indices:04d}")
                     elm_event = elms[f"{elm_index:06d}"]
                     signals = np.array(elm_event["bes_signals"], dtype=np.float32)  # (64, <time>)
                     signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (time, pol, rad)
@@ -436,23 +441,27 @@ class Data(_Base_Class, LightningDataModule):
                     if np.abs(signal_window).max() > self.outlier_value:
                         del t0_and_time_to_elm_labels[i_t0]
                         outlier_count += 1
-                print(f"  Outlier signal windows removed: {outlier_count:,d}")
+                if self.is_global_zero: print(f"  Outlier signal windows removed: {outlier_count:,d}")
             
             # Window and batch counts
             window_count = len(t0_and_time_to_elm_labels)
             total_batches = window_count / self.batch_size_per_rank
             batches_per_rank = total_batches / self.trainer.world_size
-            print(f"  Signal window count: {window_count:,d}  Batches: {total_batches:,.1f}  Batches/rank: {batches_per_rank:,.1f}")
+            if self.is_global_zero: print(f"  Signal window count: {window_count:,d}  Batches: {total_batches:,.1f}  Batches/rank: {batches_per_rank:,.1f}")
 
             # Raw signal stats
             raw_stats = self._get_statistics(
                 signals=concat_signals,
                 sample_indices=np.array(list(t0_and_time_to_elm_labels.keys()), dtype=int),
             )
-            print(f"  Raw signals min {raw_stats['min']:.2f} max {raw_stats['max']:.2f} mean {raw_stats['mean']:.2f} stdev {raw_stats['stdev']:.2f} exkurt {raw_stats['exkurt']:.2f}")
+            if self.is_global_zero: print(f"  Raw signals min {raw_stats['min']:.2f} max {raw_stats['max']:.2f} mean {raw_stats['mean']:.2f} stdev {raw_stats['stdev']:.2f} exkurt {raw_stats['exkurt']:.2f}")
             if st == 'train':
                 self.raw_signal_mean = raw_stats['mean']
                 self.raw_signal_stdev = raw_stats['stdev']
+                self.save_hyperparameters({
+                    'raw_signal_mean': self.raw_signal_mean,
+                    'raw_signal_stdev': self.raw_signal_stdev,
+                })
             else:
                 assert self.raw_signal_mean and self.raw_signal_stdev
 
@@ -462,7 +471,7 @@ class Data(_Base_Class, LightningDataModule):
                 signals=concat_signals,
                 sample_indices=np.array(list(t0_and_time_to_elm_labels.keys()), dtype=int),
             )
-            print(f"  Normalized signals min {norm_stats['min']:.2f} max {norm_stats['max']:.2f} mean {norm_stats['mean']:.2f} stdev {norm_stats['stdev']:.2f} exkurt {norm_stats['exkurt']:.2f}")
+            if self.is_global_zero: print(f"  Normalized signals min {norm_stats['min']:.2f} max {norm_stats['max']:.2f} mean {norm_stats['mean']:.2f} stdev {norm_stats['stdev']:.2f} exkurt {norm_stats['exkurt']:.2f}")
 
             # create datasets
             if st in ['train', 'validation', 'test']:
@@ -473,6 +482,9 @@ class Data(_Base_Class, LightningDataModule):
                 )
                 if st == 'train':
                     self.train_quantiles = self.datasets[st].quantiles
+                    self.save_hyperparameters({
+                        'train_quantiles': self.train_quantiles,
+                    })
             
             if st in ['test', 'predict']:
                 pass
@@ -486,9 +498,9 @@ class Data(_Base_Class, LightningDataModule):
             assert len(shots ^ shots_from_elms) == 0
             elms = [int(elm_key) for elm_key in root['elms']]
         # shuffle ELM indices
-        print(f"Total ELMs in dataset: {len(elms)}")
-        print(f"Total shots in dataset: {len(shots)}")
-        print(f"Shuffling ELMs with seed={self.seed}")
+        if self.is_global_zero: print(f"Total ELMs in dataset: {len(elms)}")
+        if self.is_global_zero: print(f"Total shots in dataset: {len(shots)}")
+        if self.is_global_zero: print(f"Shuffling ELMs with seed={self.seed}")
         np.random.default_rng(self.seed).shuffle(elms)
         # limit number of ELM events
         if self.max_elms:
@@ -502,12 +514,12 @@ class Data(_Base_Class, LightningDataModule):
         train_val_elm_indices = self.elm_indices['all'][n_test_elms:]
         self.elm_indices['validation'] = train_val_elm_indices[:n_validation_elms]
         self.elm_indices['train'] = train_val_elm_indices[n_validation_elms:]
-        print("ELMs for analysis")
+        if self.is_global_zero: print("ELMs for analysis")
         for stage, elm_indices in self.elm_indices.items():
             tmp = f"  {stage.capitalize()} ELMs: {len(elm_indices)}"
             if stage != 'all':
                 tmp += f" ({len(elm_indices)/len(self.elm_indices['all'])*1e2:.1f}%)"
-            print(tmp)
+            if self.is_global_zero: print(tmp)
 
     def _train_val_test_dataloaders(self, stage: str) -> torch.utils.data.DataLoader:
         shuffle = True if stage=='train' else False
@@ -557,7 +569,6 @@ class Data(_Base_Class, LightningDataModule):
         cummulative_hist = np.zeros(n_bins, dtype=int)
         stat_samples = int(100e3)
         stat_interval = np.max([1, sample_indices.size//stat_samples])
-        n_samples = sample_indices.size // stat_interval
         for i in sample_indices[::stat_interval]:
             signal_window = signals[i: i + self.signal_window_size, :, :]
             signal_min = np.min([signal_min, signal_window.min()])
@@ -585,15 +596,15 @@ class Data(_Base_Class, LightningDataModule):
 
 if __name__=='__main__':
 
-    world_size = int(os.getenv('WORLD_SIZE', default=0))
-    # world_size = 0
+    # world_size = int(os.getenv('WORLD_SIZE', default=0))
+    world_size = 2
     batch_size_per_rank = 32
     signal_window_size = 1024
     max_epochs = 8
     max_steps = -1
     max_elms = 20
     fraction_test = 0
-    lr = 5e-3
+    lr = 1e-3
     log_freq = 10
     early_stopping_min_delta = 1e-3
     early_stopping_patience = 5
