@@ -121,11 +121,11 @@ class Model(LightningModule, _Base_Class):
         return results
 
     def training_step(self, batch, batch_idx) -> torch.Tensor:
-        print(f"  train step batch size: {batch[1].numel()} (global rank {self.global_rank})")
+        # print(f"  train step batch size: {batch[1].numel()} (global rank {self.global_rank})")
         return self.update_step(batch, batch_idx, stage='train')
 
     def validation_step(self, batch, batch_idx) -> None:
-        print(f"  val step batch size: {batch[1].numel()} (global rank {self.global_rank})")
+        # print(f"  val step batch size: {batch[1].numel()} (global rank {self.global_rank})")
         self.update_step(batch, batch_idx, stage='val')
 
     def test_step(self, batch, batch_idx) -> None:
@@ -172,21 +172,22 @@ class Model(LightningModule, _Base_Class):
 
     def on_train_epoch_end(self):
         delt = time.time() - self.t_train_epoch_start
-        if self.is_global_zero:
-            print(f"  Epoch {self.current_epoch} train time: {delt/60:.1f} min")
-            print(f"  Global steps: {self.global_step}")
+        if self.is_global_zero and self.global_step > 0:
+            print(f"  Epoch {self.current_epoch} time: {delt/60:.1f} min (steps {self.global_step:,d})")
+            if self.current_epoch == 0:
+                print(f"    Batches for training: {self.trainer.num_training_batches}")
+                print(f"    Batches for validation: {self.trainer.num_val_batches}")
+            print(self.trainer.logged_metrics)
 
-    def on_validation_epoch_start(self):
-        self.t_val_epoch_start = time.time()
+    # def on_validation_epoch_start(self):
+    #     self.t_val_epoch_start = time.time()
 
-    def on_validation_epoch_end(self):
-        delt = time.time() - self.t_val_epoch_start
-        if self.is_global_zero:
-            print(f"  Epoch {self.current_epoch} val time: {delt/60:.1f} min")
-            print(f"  Global steps: {self.global_step}")
-            if self.current_epoch==0:
-                print(f"Batches for training: {self.trainer.num_training_batches}")
-                print(f"Batches for validation: {self.trainer.num_val_batches}")
+    # def on_validation_epoch_end(self):
+    #     delt = time.time() - self.t_val_epoch_start
+    #     if self.is_global_zero and self.global_step > 0:
+    #         print(f"  Epoch {self.current_epoch} val time: {delt/60:.1f} min")
+    #         if self.current_epoch == 0:
+    #             print(f"    Batches for validation: {self.trainer.num_val_batches}")
 
     def on_fit_end(self) -> None:
         delt = time.time() - self.t_fit_start
@@ -473,11 +474,10 @@ class Data(_Base_Class, LightningDataModule):
             print(tmp)
 
     def _train_val_test_dataloaders(self, stage: str) -> torch.utils.data.DataLoader:
-        shuffle = drop_last = True if stage=='train' else False
+        shuffle = True if stage=='train' else False
         sampler = torch.utils.data.DistributedSampler(
             dataset=self.datasets[stage],
             shuffle=shuffle,
-            drop_last=drop_last,
         ) if self.is_distributed else None
         return torch.utils.data.DataLoader(
             dataset=self.datasets[stage],
@@ -485,7 +485,6 @@ class Data(_Base_Class, LightningDataModule):
             batch_size=self.batch_size_per_rank,
             num_workers=self.num_workers,
             shuffle=None if self.is_distributed else shuffle,
-            drop_last=False if self.is_distributed else drop_last,
             prefetch_factor=2 if self.num_workers else None,
             persistent_workers=bool(self.num_workers),
             # pin_memory=False,
@@ -515,11 +514,11 @@ class Data(_Base_Class, LightningDataModule):
 if __name__=='__main__':
 
     # world_size = int(os.getenv('WORLD_SIZE', default=0))
-    world_size = 0
+    world_size = 2
     batch_size_per_rank = 16
     signal_window_size = 1024
     max_epochs = 2
-    # max_steps = 100
+    max_steps = -1
     max_elms = 20
     fraction_test = 0
     lr = 1e-3
@@ -528,13 +527,13 @@ if __name__=='__main__':
     early_stopping_patience = 5
     use_wandb = False
 
-    datetime_str = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-    slurm_identifier = os.getenv('UNIQUE_IDENTIFIER', None)
-    trial_name = f"r{slurm_identifier}_{datetime_str}" if slurm_identifier else f"r{datetime_str}"
-
     experiment_name = 'experiment_default'
     experiment_dir = Path(experiment_name).absolute()
     experiment_dir.mkdir(parents=True, exist_ok=True)
+
+    datetime_str = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+    slurm_identifier = os.getenv('UNIQUE_IDENTIFIER', None)
+    trial_name = f"r{slurm_identifier}_{datetime_str}" if slurm_identifier else f"r{datetime_str}"
 
     torch.set_default_dtype(torch.float32)
 
@@ -606,7 +605,7 @@ if __name__=='__main__':
     ### initialize trainer
     trainer = Trainer(
         max_epochs = max_epochs,
-        # max_steps = max_steps,
+        max_steps = max_steps,
         max_time = None,
         gradient_clip_val = None,
         gradient_clip_algorithm = None,
