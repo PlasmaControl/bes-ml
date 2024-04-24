@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from logging import Logger
 from collections.abc import Iterable, Mapping, Callable
 import os
+import time
 
 
 import numpy as np
@@ -95,6 +96,8 @@ class Model(LightningModule, _Base_Class):
             'f1_score': sklearn.metrics.f1_score,
         }
 
+        self.is_global_zero: int = None
+
         self.total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"Total model parameters: {self.total_parameters:,}")
 
@@ -118,9 +121,11 @@ class Model(LightningModule, _Base_Class):
         return results
 
     def training_step(self, batch, batch_idx) -> torch.Tensor:
+        print(f"  train step batch size: {batch[1].numel()} (global rank {self.global_rank})")
         return self.update_step(batch, batch_idx, stage='train')
 
     def validation_step(self, batch, batch_idx) -> None:
+        print(f"  val step batch size: {batch[1].numel()} (global rank {self.global_rank})")
         self.update_step(batch, batch_idx, stage='val')
 
     def test_step(self, batch, batch_idx) -> None:
@@ -156,6 +161,37 @@ class Model(LightningModule, _Base_Class):
                 self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True)
         self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True)
         return sum_loss
+
+    def on_fit_start(self):
+        self.t_fit_start = time.time()
+        if self.trainer.is_global_zero:
+            print("Fit start")
+
+    def on_train_epoch_start(self):
+        self.t_train_epoch_start = time.time()
+
+    def on_train_epoch_end(self):
+        delt = time.time() - self.t_train_epoch_start
+        if self.is_global_zero:
+            print(f"  Epoch {self.current_epoch} train time: {delt/60:.1f} min")
+            print(f"  Global steps: {self.global_step}")
+
+    def on_validation_epoch_start(self):
+        self.t_val_epoch_start = time.time()
+
+    def on_validation_epoch_end(self):
+        delt = time.time() - self.t_val_epoch_start
+        if self.is_global_zero:
+            print(f"  Epoch {self.current_epoch} val time: {delt/60:.1f} min")
+            print(f"  Global steps: {self.global_step}")
+            if self.current_epoch==0:
+                print(f"Batches for training: {self.trainer.num_training_batches}")
+                print(f"Batches for validation: {self.trainer.num_val_batches}")
+
+    def on_fit_end(self) -> None:
+        delt = time.time() - self.t_fit_start
+        if self.is_global_zero:
+            print(f"Fit time: {delt/60:0.1f} min")
 
     def make_feature_model(self) -> tuple[LightningModule, int]:
 
@@ -233,11 +269,8 @@ class Model(LightningModule, _Base_Class):
                 param.data.uniform_(-sqrt_k, sqrt_k)
                 print(f"  {name}: initialized to uniform +- {sqrt_k:.1e} n*var: {n_in*torch.var(param.data):.3f} (n {param.data.numel()})")
 
-    def setup(
-            self, 
-            stage: str = None,  # fit, validate, test, or predict
-    ):
-        pass
+    def setup(self, stage=None):  # fit, validate, test, or predict
+        self.is_global_zero = self.trainer.is_global_zero
 
     def configure_optimizers(self):
         self.optimizer = torch.optim.Adam(
@@ -287,21 +320,21 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
         i_t0 = self.t0_indices[i]
         time_to_elm = self.time_to_elm_labels[i]
         signal_window = self.signals[:, i_t0 : i_t0 + self.signal_window_size, :, :]
-        quantiles = {q: int(time_to_elm<=qval) for q, qval in self.quantiles.items()}
-        return signal_window, time_to_elm, quantiles
+        quantile_binary_label = {q: int(time_to_elm<=qval) for q, qval in self.quantiles.items()}
+        return signal_window, time_to_elm, quantile_binary_label
 
 @dataclasses.dataclass(eq=False)
 class Data(_Base_Class, LightningDataModule):
     data_file: str|Path = None
     max_elms: int = None
-    batch_size_per_worker: int = 128
+    batch_size_per_rank: int = 128
     stride_factor: int = 8
     num_workers: int = 0
     fraction_validation: float = 0.2
     fraction_test: float = 0.2
     use_random_data: bool = False
     seed: int = 0  # seed for ELM index shuffling; must be same across processes
-    is_distributed: bool = False
+    # is_distributed: bool = False
 
     def __post_init__(self):
         super().__post_init__()
@@ -309,8 +342,11 @@ class Data(_Base_Class, LightningDataModule):
         self.save_hyperparameters()
         self.data_file = Path(self.data_file).absolute()
 
-        self.datasets = {}
+        self.datasets: dict[str, ELM_TrainValTest_Dataset] = {}
         self.elm_indices: dict[str,Iterable] = {cat: None for cat in ['all','train','validation','test']}
+        self.train_quantiles: dict[float, int] = {}
+
+        self.is_distributed = None
 
         print_fields(self)
 
@@ -327,6 +363,8 @@ class Data(_Base_Class, LightningDataModule):
             setattr(self, item, state[item])
 
     def setup(self, stage: str):
+        self.is_distributed = self.trainer.world_size > 1
+        print(f"Batch size per rank: {self.batch_size_per_rank}  (world size {self.trainer.world_size})")
         assert stage in ['fit', 'test','predict']
         if self.elm_indices['all'] is None:
             self._get_elm_indices_and_split()
@@ -396,6 +434,8 @@ class Data(_Base_Class, LightningDataModule):
                     t0_and_time_to_elm_labels=t0_and_time_to_elm_labels,
                     signal_window_size=self.signal_window_size,
                 )
+                if st == 'train':
+                    self.train_quantiles = self.datasets[st].quantiles
             
             if st in ['test', 'predict']:
                 pass
@@ -442,10 +482,10 @@ class Data(_Base_Class, LightningDataModule):
         return torch.utils.data.DataLoader(
             dataset=self.datasets[stage],
             sampler=sampler,
-            batch_size=self.batch_size_per_worker,
+            batch_size=self.batch_size_per_rank,
             num_workers=self.num_workers,
             shuffle=None if self.is_distributed else shuffle,
-            drop_last=None if self.is_distributed else drop_last,
+            drop_last=False if self.is_distributed else drop_last,
             prefetch_factor=2 if self.num_workers else None,
             persistent_workers=bool(self.num_workers),
             # pin_memory=False,
@@ -465,7 +505,7 @@ class Data(_Base_Class, LightningDataModule):
         return [
             torch.utils.data.DataLoader(
                 dataset=dataset,
-                batch_size=self.batch_size_per_worker,
+                batch_size=self.batch_size_per_rank,
                 num_workers=self.num_workers,
                 persistent_workers=True,
             ) for dataset in self.datasets['predict']
@@ -474,25 +514,27 @@ class Data(_Base_Class, LightningDataModule):
 
 if __name__=='__main__':
 
-    ### controls
-    world_size = int(os.getenv('WORLD_SIZE', default=0))
-    strategy = DDPStrategy(find_unused_parameters=False) if world_size else 'auto'
-    use_distributed_sampler = bool(world_size)
+    # world_size = int(os.getenv('WORLD_SIZE', default=0))
+    world_size = 0
+    batch_size_per_rank = 16
     signal_window_size = 1024
     max_epochs = 2
-    max_steps = 100
-    lr = 1e-3
-    log_freq = 10
+    # max_steps = 100
     max_elms = 20
     fraction_test = 0
-    experiment_dir = Path('./experiment_default').absolute()
-    experiment_dir.mkdir(parents=True, exist_ok=True)
-    experiment_name = experiment_dir.name
-    experiment_parent_dir = experiment_dir.parent
-    trial_name = None
+    lr = 1e-3
+    log_freq = 10
     early_stopping_min_delta = 1e-3
     early_stopping_patience = 5
     use_wandb = False
+
+    datetime_str = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+    slurm_identifier = os.getenv('UNIQUE_IDENTIFIER', None)
+    trial_name = f"r{slurm_identifier}_{datetime_str}" if slurm_identifier else f"r{datetime_str}"
+
+    experiment_name = 'experiment_default'
+    experiment_dir = Path(experiment_name).absolute()
+    experiment_dir.mkdir(parents=True, exist_ok=True)
 
     torch.set_default_dtype(torch.float32)
 
@@ -513,7 +555,7 @@ if __name__=='__main__':
         signal_window_size = signal_window_size,
         data_file = '/Users/drsmith/Documents/repos/bes-ml/bes_ml2/small_elm_data.hdf5',
         max_elms= max_elms,
-        batch_size_per_worker = 128,
+        batch_size_per_rank = batch_size_per_rank,
         fraction_test=fraction_test,
         num_workers=2,
     )
@@ -521,7 +563,7 @@ if __name__=='__main__':
     ### loggers
     loggers = []
     tb_logger = TensorBoardLogger(
-        save_dir=experiment_parent_dir,
+        save_dir=experiment_dir.parent,
         name=experiment_name,
         version=trial_name,
         default_hp_metric=False,
@@ -546,14 +588,11 @@ if __name__=='__main__':
 
     ### callbacks
     callbacks = [
+        LearningRateMonitor(),
         ModelCheckpoint(
             monitor=monitor_metric,
             mode=metric_mode,
-        ),
-        LearningRateMonitor(
-            logging_interval = None,
-            log_momentum = False,
-            log_weight_decay = False
+            save_last=True,
         ),
         # EarlyStopping(
         #     monitor=monitor_metric,
@@ -566,20 +605,24 @@ if __name__=='__main__':
     ]
     ### initialize trainer
     trainer = Trainer(
+        max_epochs = max_epochs,
+        # max_steps = max_steps,
+        max_time = None,
         gradient_clip_val = None,
         gradient_clip_algorithm = None,
-        max_epochs = max_epochs,
-        max_steps = max_steps,
-        max_time = None,
         logger = loggers,
+        log_every_n_steps = log_freq,
         callbacks = callbacks,
         enable_checkpointing = True,
         enable_progress_bar = False,
         enable_model_summary = True,
-        precision = None,
-        strategy = strategy,
-        log_every_n_steps = log_freq,
-        use_distributed_sampler = use_distributed_sampler,
+        precision = '16-mixed' if torch.cuda.is_available() else 32,
+        strategy = DDPStrategy(
+            gradient_as_bucket_view=True,
+            static_graph=True,
+        ) if world_size else 'auto',
+        use_distributed_sampler = bool(world_size),
+        devices = world_size if world_size else "auto",
         num_nodes = int(os.getenv('SLURM_NNODES', default=1)),
     )
 
