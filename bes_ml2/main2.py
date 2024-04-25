@@ -28,6 +28,7 @@ from lightning.pytorch.callbacks import \
     LearningRateMonitor, EarlyStopping, ModelCheckpoint, DeviceStatsMonitor
 from lightning.pytorch.utilities.model_summary import ModelSummary
 
+torch.set_float32_matmul_precision('medium')
 
 def print_fields(obj):
     print(f"{obj.__class__.__name__} fields:")
@@ -597,7 +598,7 @@ class Data(_Base_Class, LightningDataModule):
 if __name__=='__main__':
 
     # world_size = int(os.getenv('WORLD_SIZE', default=0))
-    world_size = 2
+    world_size = 0
     batch_size_per_rank = 32
     signal_window_size = 1024
     max_epochs = 8
@@ -635,7 +636,8 @@ if __name__=='__main__':
     ### data
     lit_datamodule = Data(
         signal_window_size = signal_window_size,
-        data_file = '/Users/drsmith/Documents/repos/bes-ml/bes_ml2/small_elm_data.hdf5',
+        # data_file = '/Users/drsmith/Documents/repos/bes-ml/bes_ml2/small_elm_data.hdf5',
+        data_file='/global/homes/d/drsmith/ml/scratch/data/small_data_50.hdf5',
         max_elms= max_elms,
         batch_size_per_rank = batch_size_per_rank,
         fraction_test=fraction_test,
