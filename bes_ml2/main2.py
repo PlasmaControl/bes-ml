@@ -368,6 +368,8 @@ class Data(_Base_Class, LightningDataModule):
     def setup(self, stage: str):
         assert stage in ['fit', 'test','predict']
 
+        print(f"Global rank {self.trainer.global_rank} device: {torch.cuda.get_device_name()}")
+
         self.is_distributed = self.trainer.world_size > 1
         self.is_global_zero = self.trainer.is_global_zero
         if self.is_global_zero: print(f"Batch size per rank: {self.batch_size_per_rank}  (world size {self.trainer.world_size})")
