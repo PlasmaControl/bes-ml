@@ -175,10 +175,10 @@ class Model(LightningModule, _Base_Class):
         delt = time.time() - self.t_train_epoch_start
         if self.is_global_zero and self.global_step > 0:
             logged_metrics = self.trainer.logged_metrics
-            line =  f"  Epoch {self.current_epoch} time: {delt/60:.1f} min  " 
-            line += f"steps {self.global_step:,d}  "
-            line += f"train loss {logged_metrics['sum_loss/train']:.4f}  "
-            line += f"val loss {logged_metrics['sum_loss/val']:.4f}  "
+            line =  f"  Epoch {self.current_epoch:03d}  time: {delt/60:.1f} min  " 
+            # line += f"steps {self.global_step:,d}  "
+            line += f"train loss {logged_metrics['sum_loss/train']:.3f}  "
+            line += f"val loss {logged_metrics['sum_loss/val']:.3f}  "
             print(line)
 
     def on_fit_end(self) -> None:
@@ -436,6 +436,8 @@ class Data(_Base_Class, LightningDataModule):
                 for i_t0, is_valid_t0 in enumerate(concat_valid_t0) if is_valid_t0
             }
 
+            if self.is_global_zero: print(f"  Initial signal window count: {len(t0_and_time_to_elm_labels):,d}")
+
             # remove signal windows with outliers
             if self.outlier_value:
                 outlier_count = 0
@@ -601,17 +603,18 @@ if __name__=='__main__':
 
     # world_size = int(os.getenv('WORLD_SIZE', default=0))
     world_size = 0
-    batch_size_per_rank = 32
+    batch_size_per_rank = 16
     signal_window_size = 1024
     max_epochs = 8
     max_steps = -1
-    max_elms = 20
+    max_elms = None
     fraction_test = 0
-    lr = 1e-3
+    lr = 1e-4
     log_freq = 10
+    num_workers = 4
     early_stopping_min_delta = 1e-3
     early_stopping_patience = 5
-    use_wandb = False
+    use_wandb = True
 
     experiment_name = 'experiment_default'
     experiment_dir = Path(experiment_name).absolute()
@@ -628,22 +631,17 @@ if __name__=='__main__':
         signal_window_size=signal_window_size,
         lr=lr,
     )
-    # test_output = lit_model(lit_model.example_batch_data)
-    monitor_metric = lit_model.monitor_metric
-    metric_mode = 'min' if 'loss' in monitor_metric else 'max'
-
     print("Model Summary:")
     print(ModelSummary(lit_model, max_depth=-1))
 
     ### data
     lit_datamodule = Data(
-        signal_window_size = signal_window_size,
-        # data_file = '/Users/drsmith/Documents/repos/bes-ml/bes_ml2/small_elm_data.hdf5',
-        data_file='/global/homes/d/drsmith/ml/scratch/data/small_data_50.hdf5',
-        max_elms= max_elms,
-        batch_size_per_rank = batch_size_per_rank,
+        signal_window_size=signal_window_size,
+        data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_50.hdf5',
+        max_elms=max_elms,
+        batch_size_per_rank=batch_size_per_rank,
         fraction_test=fraction_test,
-        num_workers=2,
+        num_workers=num_workers,
     )
 
     ### loggers
@@ -673,6 +671,8 @@ if __name__=='__main__':
         loggers.append(wandb_logger)
 
     ### callbacks
+    monitor_metric = lit_model.monitor_metric
+    metric_mode = 'min' if 'loss' in monitor_metric else 'max'
     callbacks = [
         LearningRateMonitor(),
         ModelCheckpoint(
@@ -690,6 +690,7 @@ if __name__=='__main__':
         #     verbose=True,
         # ),
     ]
+
     ### initialize trainer
     trainer = Trainer(
         max_epochs = max_epochs,
