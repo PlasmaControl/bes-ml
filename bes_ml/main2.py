@@ -2,6 +2,7 @@ from pathlib import Path
 import dataclasses
 from datetime import datetime, timedelta
 from logging import Logger
+from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Callable
 import os
 import time
@@ -51,18 +52,17 @@ class _Base_Class:
             'Signal window must be power of 2'
 
 
-class _LitWrapper(LightningModule):
-    def __init__(self, torch_model):
-        super().__init__()
-        self.torch_model = torch_model
-    
-    def forward(self, inputs):
-        return self.torch_model(inputs)
+# class _LitWrapper(LightningModule):
+#     def __init__(self, torch_model):
+#         super().__init__()
+#         self.torch_model = torch_model
+#     def forward(self, inputs):
+#         return self.torch_model(inputs)
 
 
 @dataclasses.dataclass(eq=False)
 class Model(LightningModule, _Base_Class):
-    lr: float = 1e-3  # maximum LR used by first layer
+    initial_max_lr: float = 1e-3  # maximum LR used by first layer
     lr_scheduler_patience: int = 20
     lr_scheduler_threshold: float = 1e-3
     weight_decay: float = 1e-6
@@ -83,14 +83,15 @@ class Model(LightningModule, _Base_Class):
         self.input_data_shape = (1, 1, self.signal_window_size, 8, 8)
 
         # feature space sub-model
-        self.feature_space_model, self.feature_space_size = self.make_feature_model()
+        self.i_layer = 0
+        self.feature_model, self.feature_space_size = self.make_feature_model()
 
         # task sub-models and metrics
         self.task_models: Mapping[str, LightningModule] = torch.nn.ModuleDict()
         self.task_metrics: dict[str, dict] = {}
 
         # binary classifier task
-        task_name = 'classifier'
+        task_name = 'med_class'
         self.task_models[task_name] = self.make_mlp_classifier()
         self.task_metrics[task_name] = {
             'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
@@ -113,12 +114,23 @@ class Model(LightningModule, _Base_Class):
         for task_name, task_output in example_batch_output.items():
             print(f"  {task_name} output shape: {task_output.shape}")
 
-    def forward(self, signals: torch.Tensor) -> dict[str, torch.Tensor]:
-        features = self.feature_space_model(signals)
-        results = {
-            task_model_name: task_model(features)
-            for task_model_name, task_model in self.task_models.items()
-        }
+    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        for layer in self.feature_model:
+            x = torch.nn.functional.leaky_relu(layer(x), negative_slope=self.leaky_relu_slope)
+        # features = self.feature_space_model(x)
+        features = x.flatten(1)
+        results = {}
+        for task_model_name, task_model in self.task_models.items():
+            x = features
+            for i, layer in enumerate(task_model):
+                x = layer(x)
+                if i+1 < len(task_model):
+                    x = torch.nn.functional.leaky_relu(x, negative_slope=self.leaky_relu_slope)
+            results[task_model_name] = x
+        # results = {
+        #     task_model_name: task_model(x.flatten())
+        #     for task_model_name, task_model in self.task_models.items()
+        # }
         return results
 
     def training_step(self, batch, batch_idx) -> torch.Tensor:
@@ -190,7 +202,7 @@ class Model(LightningModule, _Base_Class):
 
         print("Feature space sub-model")
 
-        feature_model = torch.nn.Sequential()
+        feature_layer_dict = OrderedDict()
 
         conv_layers = {
             'conv_time_0':  {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
@@ -215,22 +227,23 @@ class Model(LightningModule, _Base_Class):
             data_shape = tuple(conv(torch.zeros(data_shape)).shape)
             print(f"  {layer_name} kern: {conv.kernel_size} stride: {conv.stride} out_ch: {conv.out_channels} param: {n_params:,d} output: {data_shape} (size {np.prod(data_shape)})")
             out_channels = conv.out_channels
-            feature_model.append(conv)
-            feature_model.append(torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope))
+            feature_layer_dict[f"Conv_{self.i_layer:02d}"] = conv
+            self.i_layer += 1
 
-        feature_model.append(torch.nn.Flatten())
-        output_shape = tuple(feature_model(torch.zeros(self.input_data_shape)).shape)
+        feature_model = torch.nn.Sequential(feature_layer_dict)
+
+        output_shape = tuple(feature_model(torch.zeros(self.input_data_shape)).flatten().shape)
         print(f"  Flattened feature space shape: {output_shape}")
         n_params = sum(p.numel() for p in feature_model.parameters() if p.requires_grad)
         print(f"  Feature sub-model parameters: {n_params:,d}")
 
-        return _LitWrapper(feature_model), np.prod(output_shape)
+        return feature_model, np.prod(output_shape)
 
     def make_mlp_classifier(self) -> LightningModule:
 
         print("MLP classifier sub-model")
 
-        mlp_classifier = torch.nn.Sequential()
+        mlp_layer_dict = OrderedDict()
 
         assert self.feature_space_size
         mlp_layers = (self.feature_space_size, 64, 32, 1)
@@ -242,13 +255,15 @@ class Model(LightningModule, _Base_Class):
             )
             n_params = sum(p.numel() for p in fc_layer.parameters() if p.requires_grad)
             print(f"  Fully connected layer {i+1} in_features {fc_layer.in_features} out_features {fc_layer.out_features} parameters: {n_params:,d}")
-            mlp_classifier.append(fc_layer)
-            mlp_classifier.append(torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope))
+            mlp_layer_dict[f"FC_{self.i_layer:02d}"] = fc_layer
+            self.i_layer += 1
+
+        mlp_classifier = torch.nn.Sequential(mlp_layer_dict)
 
         n_params = n_params = sum(p.numel() for p in mlp_classifier.parameters() if p.requires_grad)
         print(f"  MLP sub-model parameters: {n_params:,d}")
 
-        return _LitWrapper(mlp_classifier)
+        return mlp_classifier
 
     def initialize_parameters(self):
         print("Initializing model to uniform random weights and biases=0")
@@ -268,7 +283,7 @@ class Model(LightningModule, _Base_Class):
     def configure_optimizers(self):
         self.optimizer = torch.optim.Adam(
             self.parameters(), 
-            lr=self.lr,
+            lr=self.initial_max_lr,
             weight_decay=self.weight_decay,
         )
         self.lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -276,7 +291,7 @@ class Model(LightningModule, _Base_Class):
             factor=0.5,
             patience=self.lr_scheduler_patience,
             threshold=self.lr_scheduler_threshold,
-            min_lr=2e-5,
+            min_lr=1e-5,
             mode='min' if 'loss' in self.monitor_metric else 'max',
         )
         return {
@@ -603,14 +618,14 @@ if __name__=='__main__':
 
     # world_size = int(os.getenv('WORLD_SIZE', default=0))
     world_size = 0
-    batch_size_per_rank = 16
+    batch_size_per_rank = 8
     signal_window_size = 1024
-    max_epochs = 8
+    max_epochs = 3
     max_steps = -1
     max_elms = None
     fraction_test = 0
-    lr = 1e-4
-    log_freq = 10
+    lr = 1e-5
+    log_freq = 2
     num_workers = 4
     early_stopping_min_delta = 1e-3
     early_stopping_patience = 5
@@ -629,15 +644,17 @@ if __name__=='__main__':
     ### model
     lit_model = Model(
         signal_window_size=signal_window_size,
-        lr=lr,
+        initial_max_lr=lr,
     )
     print("Model Summary:")
     print(ModelSummary(lit_model, max_depth=-1))
 
+    exit(0)
+
     ### data
     lit_datamodule = Data(
         signal_window_size=signal_window_size,
-        data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_50.hdf5',
+        data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
         max_elms=max_elms,
         batch_size_per_rank=batch_size_per_rank,
         fraction_test=fraction_test,
@@ -680,15 +697,15 @@ if __name__=='__main__':
             mode=metric_mode,
             save_last=True,
         ),
-        DeviceStatsMonitor(),
-        # EarlyStopping(
-        #     monitor=monitor_metric,
-        #     mode=metric_mode,
-        #     min_delta=early_stopping_min_delta,
-        #     patience=early_stopping_patience,
-        #     log_rank_zero_only=True,
-        #     verbose=True,
-        # ),
+        # DeviceStatsMonitor(),
+        EarlyStopping(
+            monitor=monitor_metric,
+            mode=metric_mode,
+            min_delta=early_stopping_min_delta,
+            patience=early_stopping_patience,
+            log_rank_zero_only=True,
+            verbose=True,
+        ),
     ]
 
     ### initialize trainer
