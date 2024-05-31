@@ -27,7 +27,7 @@ from lightning.pytorch.strategies import Strategy, DDPStrategy
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from lightning.pytorch.callbacks import \
     LearningRateMonitor, EarlyStopping, ModelCheckpoint, DeviceStatsMonitor
-from lightning.pytorch.utilities.model_summary import ModelSummary
+from lightning.pytorch.utilities.model_summary.model_summary import ModelSummary
 
 torch.set_float32_matmul_precision('medium')
 
@@ -87,7 +87,7 @@ class Model(LightningModule, _Base_Class):
         self.feature_model, self.feature_space_size = self.make_feature_model()
 
         # task sub-models and metrics
-        self.task_models: Mapping[str, LightningModule] = torch.nn.ModuleDict()
+        self.task_models = torch.nn.ModuleDict()
         self.task_metrics: dict[str, dict] = {}
 
         # binary classifier task
@@ -98,7 +98,7 @@ class Model(LightningModule, _Base_Class):
             'f1_score': sklearn.metrics.f1_score,
         }
 
-        self.is_global_zero: int = None
+        self.is_global_zero: bool = False
 
         self.total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"Total model parameters: {self.total_parameters:,}")
@@ -150,7 +150,7 @@ class Model(LightningModule, _Base_Class):
         sum_loss = None
         for task, task_metrics in self.task_metrics.items():
             results: torch.Tensor = task_results[task]
-            if task == 'classifier':
+            if 'class' in task:
                 labels: torch.Tensor = quantiles[0.5]
             for metric_name, metric_function in task_metrics.items():
                 if 'loss' in metric_name:
@@ -198,7 +198,7 @@ class Model(LightningModule, _Base_Class):
         if self.is_global_zero:
             print(f"Fit time: {delt/60:0.1f} min")
 
-    def make_feature_model(self) -> tuple[LightningModule, int]:
+    def make_feature_model(self) -> tuple:
 
         print("Feature space sub-model")
 
@@ -618,9 +618,9 @@ if __name__=='__main__':
 
     # world_size = int(os.getenv('WORLD_SIZE', default=0))
     world_size = 0
-    batch_size_per_rank = 8
+    batch_size_per_rank = 64
     signal_window_size = 1024
-    max_epochs = 3
+    max_epochs = 10
     max_steps = -1
     max_elms = None
     fraction_test = 0
@@ -648,8 +648,6 @@ if __name__=='__main__':
     )
     print("Model Summary:")
     print(ModelSummary(lit_model, max_depth=-1))
-
-    exit(0)
 
     ### data
     lit_datamodule = Data(
