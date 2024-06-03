@@ -76,34 +76,53 @@ class Model(LightningModule, _Base_Class):
         super(LightningModule, self).__post_init__()
 
         self.save_hyperparameters()
-
         print_fields(self)
+        self.is_global_zero: bool = False
 
         # input data shape
         self.input_data_shape = (1, 1, self.signal_window_size, 8, 8)
 
         # feature space sub-model
-        self.i_layer = 0
         self.feature_model, self.feature_space_size = self.make_feature_model()
+        self.feature_model_layers = {
+            mod_name: mod for mod_name, mod in self.feature_model.named_children()
+        }
+        print("Feature model layers:")
+        for mod_name in self.feature_model_layers:
+            print(f"  {mod_name}")
 
         # task sub-models and metrics
         self.task_models = torch.nn.ModuleDict()
+        self.task_models_layers = {}
         self.task_metrics: dict[str, dict] = {}
 
         # binary classifier task
-        task_name = 'med_class'
+        task_name = 'median_classifier'
         self.task_models[task_name] = self.make_mlp_classifier()
+        self.task_models_layers[task_name] = {
+            mod_name: mod for mod_name, mod in self.task_models[task_name].named_children()
+        }
+        print(f"Task model `{task_name}` layers:")
+        for mod_name in self.task_models_layers[task_name]:
+            print(f"  {mod_name}")
         self.task_metrics[task_name] = {
             'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
             'f1_score': sklearn.metrics.f1_score,
         }
 
-        self.is_global_zero: bool = False
-
         self.total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"Total model parameters: {self.total_parameters:,}")
 
-        self.initialize_parameters()
+        print("Initializing model to uniform random weights and biases=0")
+        for name, param in self.named_parameters():
+            if name.endswith(".bias"):
+                print(f"  {name}: initialized to zeros (numel {param.data.numel()})")
+                param.data.fill_(0)
+            elif name.endswith(".weight"):
+                n_in = np.prod(param.shape[1:])
+                sqrt_k = np.sqrt(3. / n_in)
+                param.data.uniform_(-sqrt_k, sqrt_k)
+                print(f"  {name}: initialized to uniform +- {sqrt_k:.1e} n*var: {n_in*torch.var(param.data):.3f} (n {param.data.numel()})")
 
         print("Batch evaluation (batch_size=128) with randn() data")
         self.example_batch_data = torch.randn(
@@ -117,7 +136,6 @@ class Model(LightningModule, _Base_Class):
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         for layer in self.feature_model:
             x = torch.nn.functional.leaky_relu(layer(x), negative_slope=self.leaky_relu_slope)
-        # features = self.feature_space_model(x)
         features = x.flatten(1)
         results = {}
         for task_model_name, task_model in self.task_models.items():
@@ -127,10 +145,6 @@ class Model(LightningModule, _Base_Class):
                 if i+1 < len(task_model):
                     x = torch.nn.functional.leaky_relu(x, negative_slope=self.leaky_relu_slope)
             results[task_model_name] = x
-        # results = {
-        #     task_model_name: task_model(x.flatten())
-        #     for task_model_name, task_model in self.task_models.items()
-        # }
         return results
 
     def training_step(self, batch, batch_idx) -> torch.Tensor:
@@ -227,8 +241,7 @@ class Model(LightningModule, _Base_Class):
             data_shape = tuple(conv(torch.zeros(data_shape)).shape)
             print(f"  {layer_name} kern: {conv.kernel_size} stride: {conv.stride} out_ch: {conv.out_channels} param: {n_params:,d} output: {data_shape} (size {np.prod(data_shape)})")
             out_channels = conv.out_channels
-            feature_layer_dict[f"Conv_{self.i_layer:02d}"] = conv
-            self.i_layer += 1
+            feature_layer_dict[layer_name] = conv
 
         feature_model = torch.nn.Sequential(feature_layer_dict)
 
@@ -256,8 +269,7 @@ class Model(LightningModule, _Base_Class):
             )
             n_params = sum(p.numel() for p in fc_layer.parameters() if p.requires_grad)
             print(f"  Fully connected layer {i+1} in_features {fc_layer.in_features} out_features {fc_layer.out_features} parameters: {n_params:,d}")
-            mlp_layer_dict[f"FC_{self.i_layer:02d}"] = fc_layer
-            self.i_layer += 1
+            mlp_layer_dict[f"fc_{i:d}"] = fc_layer
 
         mlp_classifier = torch.nn.Sequential(mlp_layer_dict)
 
@@ -265,18 +277,6 @@ class Model(LightningModule, _Base_Class):
         print(f"  MLP sub-model parameters: {n_params:,d}")
 
         return mlp_classifier
-
-    def initialize_parameters(self):
-        print("Initializing model to uniform random weights and biases=0")
-        for name, param in self.named_parameters():
-            if name.endswith(".bias"):
-                print(f"  {name}: initialized to zeros (numel {param.data.numel()})")
-                param.data.fill_(0)
-            elif name.endswith(".weight"):
-                n_in = np.prod(param.shape[1:])
-                sqrt_k = np.sqrt(3. / n_in)
-                param.data.uniform_(-sqrt_k, sqrt_k)
-                print(f"  {name}: initialized to uniform +- {sqrt_k:.1e} n*var: {n_in*torch.var(param.data):.3f} (n {param.data.numel()})")
 
     def setup(self, stage=None):  # fit, validate, test, or predict
         self.is_global_zero = self.trainer.is_global_zero
@@ -309,6 +309,8 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
     signals: np.ndarray = None
     t0_and_time_to_elm_labels: dict[int, float] = None
     signal_window_size: int = None
+    quantile_min: float = None
+    quantile_max: float = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -316,14 +318,29 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
         self.signals = torch.from_numpy(self.signals[np.newaxis, ...])
         self.t0_indices = list(self.t0_and_time_to_elm_labels.keys())
         self.time_to_elm_labels = list(self.t0_and_time_to_elm_labels.values())
+        print(f"  Full data signal windows: {len(self):,d}")
         quantiles = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
-        self.time_to_elm_quantiles = {
-            q: qval.item() 
-            for q, qval in zip(quantiles, np.quantile(self.time_to_elm_labels, quantiles))
-        }
+        quantile_values = np.quantile(self.time_to_elm_labels, quantiles)
+        self.time_to_elm_quantiles = {q: qval.item() for q, qval in zip(quantiles, quantile_values)}
+        print(f"  Full data time-to-ELM quantiles:")
+        for q, qval in self.time_to_elm_quantiles.items():
+            print(f"    Quantile {q:.2f}: {qval:.1f} ms")
+
+        # restrict quantile range
+        if self.quantile_min is not None and self.quantile_max is not None:
+            print(f"  Restricting time-to-ELM labels to quantile range: {self.quantile_min:.2f}-{self.quantile_max:.2f}")
+            qmin_val, qmax_val = np.quantile(self.time_to_elm_labels, (self.quantile_min, self.quantile_max))
+            mask = np.logical_and(
+                self.time_to_elm_labels >= qmin_val,
+                self.time_to_elm_labels <= qmax_val,
+            )
+            self.time_to_elm_labels = np.array(self.time_to_elm_labels)[mask].tolist()
+            self.t0_indices = np.array(self.t0_indices, dtype=int)[mask].tolist()
+            print(f"  Restricted data signal windows: {len(self):,d}")
+            print(f"  Restricted time-to-ELM min/max: {np.min(self.time_to_elm_labels):.1f}-{np.max(self.time_to_elm_labels):.1f} ms")
 
     def __len__(self) -> int:
-        return len(self.t0_and_time_to_elm_labels)
+        return len(self.t0_indices)
     
     def __getitem__(self, i: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         i_t0 = self.t0_indices[i]
@@ -331,6 +348,7 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
         signal_window = self.signals[:, i_t0 : i_t0 + self.signal_window_size, :, :]
         quantile_binary_label = {q: int(time_to_elm<=qval) for q, qval in self.time_to_elm_quantiles.items()}
         return signal_window, time_to_elm, quantile_binary_label
+
 
 @dataclasses.dataclass(eq=False)
 class Data(_Base_Class, LightningDataModule):
@@ -344,6 +362,8 @@ class Data(_Base_Class, LightningDataModule):
     fraction_test: float = 0.2
     use_random_data: bool = False
     seed: int = 0  # seed for ELM index shuffling; must be same across processes
+    quantile_min: float = None
+    quantile_max: float = None
     # is_distributed: bool = False
 
     def __post_init__(self):
@@ -501,6 +521,8 @@ class Data(_Base_Class, LightningDataModule):
                     signals=concat_signals,
                     t0_and_time_to_elm_labels=t0_and_time_to_elm_labels,
                     signal_window_size=self.signal_window_size,
+                    quantile_min=self.quantile_min,
+                    quantile_max=self.quantile_max,
                 )
                 if st == 'train':
                     self.time_to_elm_quantiles = self.datasets[st].time_to_elm_quantiles
@@ -632,6 +654,8 @@ if __name__=='__main__':
     early_stopping_min_delta = 1e-3
     early_stopping_patience = 5
     use_wandb = False
+    quantile_min = 0.2
+    quantile_max = 0.8
 
     experiment_name = 'experiment_default'
     experiment_dir = Path(experiment_name).absolute()
@@ -651,6 +675,8 @@ if __name__=='__main__':
     print("Model Summary:")
     print(ModelSummary(lit_model, max_depth=-1))
 
+    exit()
+
     ### data
     lit_datamodule = Data(
         signal_window_size=signal_window_size,
@@ -660,6 +686,8 @@ if __name__=='__main__':
         batch_size_per_rank=batch_size_per_rank,
         fraction_test=fraction_test,
         num_workers=num_workers,
+        quantile_min=quantile_min,
+        quantile_max=quantile_max,
     )
 
     ### loggers
