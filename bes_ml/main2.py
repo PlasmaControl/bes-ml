@@ -105,14 +105,14 @@ class Model(LightningModule, _Base_Class):
 
         self.initialize_parameters()
 
-        print("Example batch evaluation with batch_size=128")
-        self.example_batch_data = torch.zeros(
+        print("Batch evaluation (batch_size=128) with randn() data")
+        self.example_batch_data = torch.randn(
             size=[128]+list(self.input_data_shape[1:]),
             dtype=torch.float32,
         )
         example_batch_output = self(self.example_batch_data)
         for task_name, task_output in example_batch_output.items():
-            print(f"  {task_name} output shape: {task_output.shape}")
+            print(f"  {task_name} output shape: {task_output.shape}  mean: {torch.mean(task_output):.3e}  var: {torch.var(task_output):.3e}")
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         for layer in self.feature_model:
@@ -252,6 +252,7 @@ class Model(LightningModule, _Base_Class):
             fc_layer = torch.nn.Linear(
                 in_features=mlp_layers[i],
                 out_features=mlp_layers[i+1],
+                bias=True if (i+1) < len(mlp_layers)-1 else False
             )
             n_params = sum(p.numel() for p in fc_layer.parameters() if p.requires_grad)
             print(f"  Fully connected layer {i+1} in_features {fc_layer.in_features} out_features {fc_layer.out_features} parameters: {n_params:,d}")
@@ -313,11 +314,11 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
         super().__post_init__()
         super(_Base_Class, self).__init__()
         self.signals = torch.from_numpy(self.signals[np.newaxis, ...])
-        self.time_to_elm_labels = [val for val in self.t0_and_time_to_elm_labels.values()]
-        self.t0_indices = [key for key in self.t0_and_time_to_elm_labels.keys()]
+        self.t0_indices = list(self.t0_and_time_to_elm_labels.keys())
+        self.time_to_elm_labels = list(self.t0_and_time_to_elm_labels.values())
         quantiles = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
-        self.quantiles = {
-            q: qval 
+        self.time_to_elm_quantiles = {
+            q: qval.item() 
             for q, qval in zip(quantiles, np.quantile(self.time_to_elm_labels, quantiles))
         }
 
@@ -328,7 +329,7 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
         i_t0 = self.t0_indices[i]
         time_to_elm = self.time_to_elm_labels[i]
         signal_window = self.signals[:, i_t0 : i_t0 + self.signal_window_size, :, :]
-        quantile_binary_label = {q: int(time_to_elm<=qval) for q, qval in self.quantiles.items()}
+        quantile_binary_label = {q: int(time_to_elm<=qval) for q, qval in self.time_to_elm_quantiles.items()}
         return signal_window, time_to_elm, quantile_binary_label
 
 @dataclasses.dataclass(eq=False)
@@ -353,7 +354,7 @@ class Data(_Base_Class, LightningDataModule):
 
         self.datasets: dict[str, ELM_TrainValTest_Dataset] = {}
         self.elm_indices: dict[str,Iterable] = {cat: None for cat in ['all','train','validation','test']}
-        self.train_quantiles: dict[float, int] = {}
+        self.time_to_elm_quantiles: dict[float, int] = {}
 
         self.is_distributed = None
 
@@ -364,7 +365,7 @@ class Data(_Base_Class, LightningDataModule):
             'raw_signal_mean',
             'raw_signal_stdev',
             'elm_indices',
-            'train_quantiles',
+            'time_to_elm_quantiles',
         ]
         for item in self.state_items:
             if not hasattr(self, item):
@@ -383,7 +384,8 @@ class Data(_Base_Class, LightningDataModule):
     def setup(self, stage: str):
         assert stage in ['fit', 'test','predict']
 
-        print(f"Global rank {self.trainer.global_rank} device: {torch.cuda.get_device_name()}")
+        device = torch.cuda.get_device_name() if torch.cuda.is_available() else 'cpu'
+        print(f"Global rank {self.trainer.global_rank} device: {device}")
 
         self.is_distributed = self.trainer.world_size > 1
         self.is_global_zero = self.trainer.is_global_zero
@@ -501,9 +503,9 @@ class Data(_Base_Class, LightningDataModule):
                     signal_window_size=self.signal_window_size,
                 )
                 if st == 'train':
-                    self.train_quantiles = self.datasets[st].quantiles
+                    self.time_to_elm_quantiles = self.datasets[st].time_to_elm_quantiles
                     self.save_hyperparameters({
-                        'train_quantiles': self.train_quantiles,
+                        'time_to_elm_quantiles': self.time_to_elm_quantiles,
                     })
             
             if st in ['test', 'predict']:
@@ -605,11 +607,11 @@ class Data(_Base_Class, LightningDataModule):
         exkurt = np.sum(cummulative_hist * ((bin_center - mean)/stdev) ** 4) / np.sum(cummulative_hist) - 3
         return {
             'count': sample_indices.size,
-            'min': signal_min,
-            'max': signal_max,
-            'mean': mean,
-            'stdev': stdev,
-            'exkurt': exkurt,
+            'min': signal_min.item(),
+            'max': signal_max.item(),
+            'mean': mean.item(),
+            'stdev': stdev.item(),
+            'exkurt': exkurt.item(),
         }
 
 
@@ -620,7 +622,7 @@ if __name__=='__main__':
     world_size = 0
     batch_size_per_rank = 64
     signal_window_size = 1024
-    max_epochs = 10
+    max_epochs = 2
     max_steps = -1
     max_elms = None
     fraction_test = 0
@@ -629,7 +631,7 @@ if __name__=='__main__':
     num_workers = 4
     early_stopping_min_delta = 1e-3
     early_stopping_patience = 5
-    use_wandb = True
+    use_wandb = False
 
     experiment_name = 'experiment_default'
     experiment_dir = Path(experiment_name).absolute()
@@ -652,7 +654,8 @@ if __name__=='__main__':
     ### data
     lit_datamodule = Data(
         signal_window_size=signal_window_size,
-        data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
+        # data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
+        data_file='/Users/drsmith/Documents/repos/bes-ml/bes_ml/small_elm_data.hdf5',
         max_elms=max_elms,
         batch_size_per_rank=batch_size_per_rank,
         fraction_test=fraction_test,
