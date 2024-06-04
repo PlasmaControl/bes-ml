@@ -84,12 +84,9 @@ class Model(LightningModule, _Base_Class):
 
         # feature space sub-model
         self.feature_model, self.feature_space_size = self.make_feature_model()
-        self.feature_model_layers = {
-            mod_name: mod for mod_name, mod in self.feature_model.named_children()
-        }
-        print("Feature model layers:")
-        for mod_name in self.feature_model_layers:
-            print(f"  {mod_name}")
+        # self.feature_model_layers = {
+        #     mod_name: mod for mod_name, mod in self.feature_model.named_children()
+        # }
 
         # task sub-models and metrics
         self.task_models = torch.nn.ModuleDict()
@@ -99,12 +96,9 @@ class Model(LightningModule, _Base_Class):
         # binary classifier task
         task_name = 'median_classifier'
         self.task_models[task_name] = self.make_mlp_classifier()
-        self.task_models_layers[task_name] = {
-            mod_name: mod for mod_name, mod in self.task_models[task_name].named_children()
-        }
-        print(f"Task model `{task_name}` layers:")
-        for mod_name in self.task_models_layers[task_name]:
-            print(f"  {mod_name}")
+        # self.task_models_layers[task_name] = {
+        #     mod_name: mod for mod_name, mod in self.task_models[task_name].named_children()
+        # }
         self.task_metrics[task_name] = {
             'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
             'f1_score': sklearn.metrics.f1_score,
@@ -115,14 +109,16 @@ class Model(LightningModule, _Base_Class):
 
         print("Initializing model to uniform random weights and biases=0")
         for name, param in self.named_parameters():
-            if name.endswith(".bias"):
+            if name.endswith("bias"):
                 print(f"  {name}: initialized to zeros (numel {param.data.numel()})")
                 param.data.fill_(0)
-            elif name.endswith(".weight"):
+            elif name.endswith("weight"):
                 n_in = np.prod(param.shape[1:])
                 sqrt_k = np.sqrt(3. / n_in)
                 param.data.uniform_(-sqrt_k, sqrt_k)
                 print(f"  {name}: initialized to uniform +- {sqrt_k:.1e} n*var: {n_in*torch.var(param.data):.3f} (n {param.data.numel()})")
+            else:
+                raise ValueError
 
         print("Batch evaluation (batch_size=128) with randn() data")
         self.example_batch_data = torch.randn(
@@ -132,6 +128,123 @@ class Model(LightningModule, _Base_Class):
         example_batch_output = self(self.example_batch_data)
         for task_name, task_output in example_batch_output.items():
             print(f"  {task_name} output shape: {task_output.shape}  mean: {torch.mean(task_output):.3e}  var: {torch.var(task_output):.3e}")
+
+    def make_feature_model(self) -> tuple:
+
+        print("Feature space sub-model")
+
+        feature_layer_dict = OrderedDict()
+
+        conv_layers = {
+            'conv1d_time_0':  {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
+            'conv2d_space_1': {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1},
+            'conv1d_time_2':  {'out_channels': 8, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
+            'conv2d_space_3': {'out_channels': 8, 'kernel': (1, 3, 3), 'stride': 1},
+            'conv2d_space_4': {'out_channels': 8, 'kernel': (1, 4, 4), 'stride': 1},
+        }
+
+        data_shape = self.input_data_shape
+        print(f"  Data shape: {data_shape}  (size {np.prod(data_shape)})")
+        out_channels = 1
+        for layer_name, layer in conv_layers.items():
+            conv = torch.nn.Conv3d(
+                in_channels=out_channels,
+                out_channels=layer['out_channels'],
+                kernel_size=layer['kernel'],
+                stride=layer['stride'],
+            )
+            n_params = sum(p.numel() for p in conv.parameters() if p.requires_grad)
+            data_shape = tuple(conv(torch.zeros(data_shape)).shape)
+            print(f"  {layer_name} kern {conv.kernel_size}  stride {conv.stride}  out_ch {conv.out_channels}  param {n_params:,d}  output {data_shape} (size {np.prod(data_shape)})")
+            out_channels = conv.out_channels
+            feature_layer_dict[layer_name] = conv
+
+        feature_model = torch.nn.Sequential(feature_layer_dict)
+
+        output_size = feature_model(torch.zeros(self.input_data_shape)).numel()
+        print(f"  Feature space size: {output_size}")
+        assert output_size == 128
+
+        n_params = sum(p.numel() for p in feature_model.parameters() if p.requires_grad)
+        print(f"  Feature sub-model parameters: {n_params:,d}")
+
+        return feature_model, output_size
+
+    def make_mlp_classifier(self) -> LightningModule:
+
+        print("MLP classifier sub-model")
+
+        mlp_layer_dict = OrderedDict()
+
+        assert self.feature_space_size
+        mlp_layers = (self.feature_space_size, 64, 32, 1)
+
+        for i in range(len(mlp_layers)-1):
+            layer_name = f"fc_{i:d}"
+            fc_layer = torch.nn.Linear(
+                in_features=mlp_layers[i],
+                out_features=mlp_layers[i+1],
+                bias=True if (i+1) < len(mlp_layers)-1 else False
+            )
+            n_params = sum(p.numel() for p in fc_layer.parameters() if p.requires_grad)
+            print(f"  {layer_name}  in_features {fc_layer.in_features}  out_features {fc_layer.out_features}  parameters {n_params:,d}")
+            mlp_layer_dict[layer_name] = fc_layer
+
+        mlp_classifier = torch.nn.Sequential(mlp_layer_dict)
+
+        n_params = n_params = sum(p.numel() for p in mlp_classifier.parameters() if p.requires_grad)
+        print(f"  MLP sub-model parameters: {n_params:,d}")
+
+        return mlp_classifier
+
+    def configure_optimizers(self):
+        parameter_group = []
+        lr = self.initial_max_lr
+        print("Initial layer-wise learning rates")
+        for layer_name, layer in self.feature_model.named_children():
+            for param_name, param in layer.named_parameters():
+                assert param_name.endswith('weight') or param_name.endswith('bias')
+                param_lr = lr if param_name.endswith('weight') else lr/8
+                parameter_group.append({
+                    'params': param,
+                    'lr': param_lr,
+                })
+                print(f"  {layer_name} {param_name} {param_lr:.3e}")
+            lr /= 2
+        lr_after_feature_model = lr
+        for task_name, task_model in self.task_models.items():
+            lr = lr_after_feature_model
+            for layer_name, layer in task_model.named_children():
+                for param_name, param in layer.named_parameters():
+                    assert param_name.endswith('weight') or param_name.endswith('bias')
+                    param_lr = lr if param_name.endswith('weight') else lr/8
+                    parameter_group.append({
+                        'params': param,
+                        'lr': param_lr,
+                    })
+                    print(f"  {task_name} {layer_name} {param_name} {param_lr:.3e}")
+                lr /= 2
+
+        self.optimizer = torch.optim.Adam(
+            # self.parameters(), 
+            parameter_group,
+            lr=self.initial_max_lr,
+            weight_decay=self.weight_decay,
+        )
+        self.lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer=self.optimizer,
+            factor=0.5,
+            patience=self.lr_scheduler_patience,
+            threshold=self.lr_scheduler_threshold,
+            mode='min' if 'loss' in self.monitor_metric else 'max',
+        )
+        return {
+            'optimizer': self.optimizer,
+            'lr_scheduler': {
+                'scheduler': self.lr_scheduler,
+                'monitor': self.monitor_metric,
+            },
+        }
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         for layer in self.feature_model:
@@ -212,96 +325,8 @@ class Model(LightningModule, _Base_Class):
         if self.is_global_zero:
             print(f"Fit time: {delt/60:0.1f} min")
 
-    def make_feature_model(self) -> tuple:
-
-        print("Feature space sub-model")
-
-        feature_layer_dict = OrderedDict()
-
-        conv_layers = {
-            'conv_time_0':  {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
-            'conv_space_1': {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1},
-            'conv_time_2':  {'out_channels': 4, 'kernel': (4, 1, 1), 'stride': (4, 1, 1)},
-            'conv_space_3': {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1},
-            'conv_space_5': {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1},
-            'conv_space_6': {'out_channels': 4, 'kernel': (1, 2, 2), 'stride': 1},
-        }
-
-        data_shape = self.input_data_shape
-        print(f"  Data shape: {data_shape}  (size {np.prod(data_shape)})")
-        out_channels = 1
-        for layer_name, layer in conv_layers.items():
-            conv = torch.nn.Conv3d(
-                in_channels=out_channels,
-                out_channels=layer['out_channels'],
-                kernel_size=layer['kernel'],
-                stride=layer['stride'],
-            )
-            n_params = sum(p.numel() for p in conv.parameters() if p.requires_grad)
-            data_shape = tuple(conv(torch.zeros(data_shape)).shape)
-            print(f"  {layer_name} kern: {conv.kernel_size} stride: {conv.stride} out_ch: {conv.out_channels} param: {n_params:,d} output: {data_shape} (size {np.prod(data_shape)})")
-            out_channels = conv.out_channels
-            feature_layer_dict[layer_name] = conv
-
-        feature_model = torch.nn.Sequential(feature_layer_dict)
-
-        output_shape = tuple(feature_model(torch.zeros(self.input_data_shape)).flatten().shape)
-        print(f"  Flattened feature space shape: {output_shape}")
-        n_params = sum(p.numel() for p in feature_model.parameters() if p.requires_grad)
-        print(f"  Feature sub-model parameters: {n_params:,d}")
-
-        return feature_model, np.prod(output_shape)
-
-    def make_mlp_classifier(self) -> LightningModule:
-
-        print("MLP classifier sub-model")
-
-        mlp_layer_dict = OrderedDict()
-
-        assert self.feature_space_size
-        mlp_layers = (self.feature_space_size, 64, 32, 1)
-
-        for i in range(len(mlp_layers)-1):
-            fc_layer = torch.nn.Linear(
-                in_features=mlp_layers[i],
-                out_features=mlp_layers[i+1],
-                bias=True if (i+1) < len(mlp_layers)-1 else False
-            )
-            n_params = sum(p.numel() for p in fc_layer.parameters() if p.requires_grad)
-            print(f"  Fully connected layer {i+1} in_features {fc_layer.in_features} out_features {fc_layer.out_features} parameters: {n_params:,d}")
-            mlp_layer_dict[f"fc_{i:d}"] = fc_layer
-
-        mlp_classifier = torch.nn.Sequential(mlp_layer_dict)
-
-        n_params = n_params = sum(p.numel() for p in mlp_classifier.parameters() if p.requires_grad)
-        print(f"  MLP sub-model parameters: {n_params:,d}")
-
-        return mlp_classifier
-
     def setup(self, stage=None):  # fit, validate, test, or predict
         self.is_global_zero = self.trainer.is_global_zero
-
-    def configure_optimizers(self):
-        self.optimizer = torch.optim.Adam(
-            self.parameters(), 
-            lr=self.initial_max_lr,
-            weight_decay=self.weight_decay,
-        )
-        self.lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer=self.optimizer,
-            factor=0.5,
-            patience=self.lr_scheduler_patience,
-            threshold=self.lr_scheduler_threshold,
-            min_lr=1e-5,
-            mode='min' if 'loss' in self.monitor_metric else 'max',
-        )
-        return {
-            'optimizer': self.optimizer,
-            'lr_scheduler': {
-                'scheduler': self.lr_scheduler,
-                'monitor': self.monitor_metric,
-            },
-        }
 
 
 @dataclasses.dataclass(eq=False)
@@ -648,7 +673,7 @@ if __name__=='__main__':
     max_steps = -1
     max_elms = None
     fraction_test = 0
-    lr = 1e-5
+    initial_max_lr = 1e-5
     log_freq = 2
     num_workers = 4
     early_stopping_min_delta = 1e-3
@@ -670,12 +695,10 @@ if __name__=='__main__':
     ### model
     lit_model = Model(
         signal_window_size=signal_window_size,
-        initial_max_lr=lr,
+        initial_max_lr=initial_max_lr,
     )
     print("Model Summary:")
     print(ModelSummary(lit_model, max_depth=-1))
-
-    exit()
 
     ### data
     lit_datamodule = Data(
