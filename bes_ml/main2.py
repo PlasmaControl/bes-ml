@@ -2,8 +2,8 @@ from pathlib import Path
 import dataclasses
 from datetime import datetime, timedelta
 from logging import Logger
-from collections import OrderedDict
-from collections.abc import Iterable, Mapping, Callable
+from typing import \
+    OrderedDict, Iterable, Mapping, Callable, Any, Sized
 import os
 import time
 
@@ -109,6 +109,7 @@ class Model(LightningModule, _Base_Class):
 
         print("Initializing model to uniform random weights and biases=0")
         for name, param in self.named_parameters():
+            if 'batchnorm' in name: continue
             if name.endswith("bias"):
                 print(f"  {name}: initialized to zeros (numel {param.data.numel()})")
                 param.data.fill_(0)
@@ -129,29 +130,44 @@ class Model(LightningModule, _Base_Class):
         for task_name, task_output in example_batch_output.items():
             print(f"  {task_name} output shape: {task_output.shape}  mean: {torch.mean(task_output):.3e}  var: {torch.var(task_output):.3e}")
 
-    def make_feature_model(self) -> tuple:
+    def make_feature_model(self) -> tuple[torch.nn.Module, int]:
 
         print("Feature space sub-model")
 
         feature_layer_dict = OrderedDict()
 
-        conv_layers = {
-            'conv1d_time_0':  {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
-            'conv2d_space_1': {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1},
-            'conv1d_time_2':  {'out_channels': 8, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
-            'conv2d_space_3': {'out_channels': 8, 'kernel': (1, 3, 3), 'stride': 1},
-            'conv2d_space_4': {'out_channels': 8, 'kernel': (1, 4, 4), 'stride': 1},
-        }
+        # conv_layers = {
+        #     'conv_0_time_1d':  {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
+        #     'conv_1_space_2d': {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1},
+        #     'conv_2_time_1d':  {'out_channels': 8, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
+        #     'conv_3_space_2d': {'out_channels': 8, 'kernel': (1, 3, 3), 'stride': 1},
+        #     'conv_4_space_2d': {'out_channels': 8, 'kernel': (1, 4, 4), 'stride': 1},
+        # }
+
+        conv_layers = (
+            {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
+            {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1},
+            {'out_channels': 8, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
+            {'out_channels': 8, 'kernel': (1, 3, 3), 'stride': 1},
+            {'out_channels': 8, 'kernel': (1, 4, 4), 'stride': 1},
+        )
 
         data_shape = self.input_data_shape
         print(f"  Data shape: {data_shape}  (size {np.prod(data_shape)})")
-        out_channels = 1
-        for layer_name, layer in conv_layers.items():
+        out_channels: int|Any = None
+        for i_layer, layer in enumerate(conv_layers):
+        # for layer_name, layer in conv_layers.items():
+            if i_layer != 0:
+                feature_layer_dict[f"batchnorm_{i_layer:02d}"] = torch.nn.BatchNorm3d(
+                    num_features=out_channels,
+                )
+            layer_name = f"conv_{i_layer:02d}"
             conv = torch.nn.Conv3d(
-                in_channels=out_channels,
+                in_channels=1 if out_channels is None else out_channels,
                 out_channels=layer['out_channels'],
                 kernel_size=layer['kernel'],
                 stride=layer['stride'],
+                bias=False,
             )
             n_params = sum(p.numel() for p in conv.parameters() if p.requires_grad)
             data_shape = tuple(conv(torch.zeros(data_shape)).shape)
@@ -170,7 +186,7 @@ class Model(LightningModule, _Base_Class):
 
         return feature_model, output_size
 
-    def make_mlp_classifier(self) -> LightningModule:
+    def make_mlp_classifier(self) -> torch.nn.Module:
 
         print("MLP classifier sub-model")
 
@@ -180,11 +196,15 @@ class Model(LightningModule, _Base_Class):
         mlp_layers = (self.feature_space_size, 64, 32, 1)
 
         for i in range(len(mlp_layers)-1):
-            layer_name = f"fc_{i:d}"
+            mlp_layer_dict[f"batchnorm_{i:02d}"] = torch.nn.BatchNorm1d(
+                num_features=mlp_layers[i],
+            )
+            layer_name = f"fc_{i:02d}_in{mlp_layers[i]:d}_out{mlp_layers[i+1]:d}"
             fc_layer = torch.nn.Linear(
                 in_features=mlp_layers[i],
                 out_features=mlp_layers[i+1],
-                bias=True if (i+1) < len(mlp_layers)-1 else False
+                # bias=True if (i+1) < len(mlp_layers)-1 else False,
+                bias=False,
             )
             n_params = sum(p.numel() for p in fc_layer.parameters() if p.requires_grad)
             print(f"  {layer_name}  in_features {fc_layer.in_features}  out_features {fc_layer.out_features}  parameters {n_params:,d}")
@@ -210,7 +230,7 @@ class Model(LightningModule, _Base_Class):
                     'lr': param_lr,
                 })
                 print(f"  {layer_name} {param_name} {param_lr:.3e}")
-            lr /= 2
+            lr /= 1.5
         lr_after_feature_model = lr
         for task_name, task_model in self.task_models.items():
             lr = lr_after_feature_model
@@ -223,7 +243,7 @@ class Model(LightningModule, _Base_Class):
                         'lr': param_lr,
                     })
                     print(f"  {task_name} {layer_name} {param_name} {param_lr:.3e}")
-                lr /= 2
+                lr /= 1.5
 
         self.optimizer = torch.optim.Adam(
             # self.parameters(), 
@@ -247,15 +267,17 @@ class Model(LightningModule, _Base_Class):
         }
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
-        for layer in self.feature_model:
+        for layer in self.feature_model.children():
             x = torch.nn.functional.leaky_relu(layer(x), negative_slope=self.leaky_relu_slope)
         features = x.flatten(1)
         results = {}
         for task_model_name, task_model in self.task_models.items():
             x = features
-            for i, layer in enumerate(task_model):
+            children_layers = list(task_model.children())
+            nlayers = len(children_layers)
+            for i, layer in enumerate(children_layers):
                 x = layer(x)
-                if i+1 < len(task_model):
+                if i+1 < nlayers:
                     x = torch.nn.functional.leaky_relu(x, negative_slope=self.leaky_relu_slope)
             results[task_model_name] = x
         return results
@@ -274,7 +296,7 @@ class Model(LightningModule, _Base_Class):
     def update_step(self, batch, batch_idx, stage: str) -> torch.Tensor:
         signal_window, time_to_elm, quantiles = batch
         task_results = self(signal_window)
-        sum_loss = None
+        sum_loss = torch.Tensor([0.0])
         for task, task_metrics in self.task_metrics.items():
             results: torch.Tensor = task_results[task]
             if 'class' in task:
@@ -331,11 +353,11 @@ class Model(LightningModule, _Base_Class):
 
 @dataclasses.dataclass(eq=False)
 class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
-    signals: np.ndarray = None
-    t0_and_time_to_elm_labels: dict[int, float] = None
-    signal_window_size: int = None
-    quantile_min: float = None
-    quantile_max: float = None
+    signals: np.ndarray|Any = None
+    t0_and_time_to_elm_labels: dict[int, float]|Any = None
+    signal_window_size: int|Any = None
+    quantile_min: float|Any = None
+    quantile_max: float|Any = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -367,7 +389,7 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
     def __len__(self) -> int:
         return len(self.t0_indices)
     
-    def __getitem__(self, i: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(self, i: int) -> tuple:
         i_t0 = self.t0_indices[i]
         time_to_elm = self.time_to_elm_labels[i]
         signal_window = self.signals[:, i_t0 : i_t0 + self.signal_window_size, :, :]
@@ -377,8 +399,8 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
 
 @dataclasses.dataclass(eq=False)
 class Data(_Base_Class, LightningDataModule):
-    data_file: str|Path = None
-    max_elms: int = None
+    data_file: str|Path|Any = None
+    max_elms: int|Any = None
     batch_size_per_rank: int = 128
     stride_factor: int = 8
     num_workers: int = 0
@@ -387,8 +409,8 @@ class Data(_Base_Class, LightningDataModule):
     fraction_test: float = 0.2
     use_random_data: bool = False
     seed: int = 0  # seed for ELM index shuffling; must be same across processes
-    quantile_min: float = None
-    quantile_max: float = None
+    quantile_min: float|Any = None
+    quantile_max: float|Any = None
     # is_distributed: bool = False
 
     def __post_init__(self):
@@ -396,9 +418,10 @@ class Data(_Base_Class, LightningDataModule):
         super(_Base_Class, self).__init__()
         self.save_hyperparameters()
         self.data_file = Path(self.data_file).absolute()
+        assert self.data_file.exists()
 
         self.datasets: dict[str, ELM_TrainValTest_Dataset] = {}
-        self.elm_indices: dict[str,Iterable] = {cat: None for cat in ['all','train','validation','test']}
+        self.elm_indices: dict[str,tuple] = {cat: () for cat in ['all','train','validation','test']}
         self.time_to_elm_quantiles: dict[float, int] = {}
 
         self.is_distributed = None
@@ -436,10 +459,10 @@ class Data(_Base_Class, LightningDataModule):
         self.is_global_zero = self.trainer.is_global_zero
         if self.is_global_zero: print(f"Batch size per rank: {self.batch_size_per_rank}  (world size {self.trainer.world_size})")
 
-        if self.elm_indices['all'] is None:
+        if not self.elm_indices['all']:
             self._get_elm_indices_and_split()
 
-        stages = ['train', 'validation'] if stage == 'fit' else [stage.value]
+        stages = ['train', 'validation'] if stage == 'fit' else [stage]
         for st in stages:
             assert st in ['train', 'validation','test','predict']
             if st in self.datasets and isinstance(self.datasets[st], torch.utils.data.Dataset):
@@ -450,11 +473,11 @@ class Data(_Base_Class, LightningDataModule):
             if self.is_global_zero: print(f"Reading {n_indices} ELMs for stage {st}")
             elm_data = []
             with h5py.File(self.data_file, 'r') as h5_file:
-                elms = h5_file['elms']
+                elms: h5py.Group = h5_file['elms']
                 for i_elm, elm_index in enumerate(indices):
                     if i_elm%100 == 0:
                         if self.is_global_zero: print(f"  Reading ELM event {i_elm:04d}/{n_indices:04d}")
-                    elm_event = elms[f"{elm_index:06d}"]
+                    elm_event: h5py.Group = elms[f"{elm_index:06d}"]
                     signals = np.array(elm_event["bes_signals"], dtype=np.float32)  # (64, <time>)
                     signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (time, pol, rad)
                     time = np.array(elm_event['bes_time'], dtype=np.float32)
@@ -645,7 +668,7 @@ class Data(_Base_Class, LightningDataModule):
             hist, bin_edges = np.histogram(
                 signal_window,
                 bins=n_bins,
-                range=[-10.4, 10.4],
+                range=(-10.4, 10.4),
             )
             cummulative_hist += hist
         bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
@@ -667,20 +690,20 @@ if __name__=='__main__':
 
     # world_size = int(os.getenv('WORLD_SIZE', default=0))
     world_size = 0
-    batch_size_per_rank = 64
+    batch_size_per_rank = 8
     signal_window_size = 1024
-    max_epochs = 2
+    max_epochs = 8
     max_steps = -1
     max_elms = None
     fraction_test = 0
-    initial_max_lr = 1e-5
-    log_freq = 2
-    num_workers = 4
+    initial_max_lr = 2e-3
+    log_freq = 25
+    num_workers = 2
     early_stopping_min_delta = 1e-3
     early_stopping_patience = 5
-    use_wandb = False
-    quantile_min = 0.2
-    quantile_max = 0.8
+    use_wandb = True
+    quantile_min = None
+    quantile_max = None
 
     experiment_name = 'experiment_default'
     experiment_dir = Path(experiment_name).absolute()
@@ -703,8 +726,8 @@ if __name__=='__main__':
     ### data
     lit_datamodule = Data(
         signal_window_size=signal_window_size,
-        # data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
-        data_file='/Users/drsmith/Documents/repos/bes-ml/bes_ml/small_elm_data.hdf5',
+        data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
+        # data_file='/Users/drsmith/Documents/repos/bes-ml/bes_ml/small_elm_data.hdf5',
         max_elms=max_elms,
         batch_size_per_rank=batch_size_per_rank,
         fraction_test=fraction_test,
