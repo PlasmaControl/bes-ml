@@ -63,6 +63,7 @@ class _Base_Class:
 @dataclasses.dataclass(eq=False)
 class Model(LightningModule, _Base_Class):
     initial_max_lr: float = 1e-3  # maximum LR used by first layer
+    layerwise_lr_decrement: float = 1.5
     lr_scheduler_patience: int = 20
     lr_scheduler_threshold: float = 1e-3
     weight_decay: float = 1e-6
@@ -109,7 +110,7 @@ class Model(LightningModule, _Base_Class):
 
         print("Initializing model to uniform random weights and biases=0")
         for name, param in self.named_parameters():
-            if 'batchnorm' in name: continue
+            if 'bn' in name: continue
             if name.endswith("bias"):
                 print(f"  {name}: initialized to zeros (numel {param.data.numel()})")
                 param.data.fill_(0)
@@ -158,7 +159,7 @@ class Model(LightningModule, _Base_Class):
         for i_layer, layer in enumerate(conv_layers):
         # for layer_name, layer in conv_layers.items():
             if i_layer != 0:
-                feature_layer_dict[f"batchnorm_{i_layer:02d}"] = torch.nn.BatchNorm3d(
+                feature_layer_dict[f"bn_{i_layer:02d}"] = torch.nn.BatchNorm3d(
                     num_features=out_channels,
                 )
             layer_name = f"conv_{i_layer:02d}"
@@ -196,10 +197,10 @@ class Model(LightningModule, _Base_Class):
         mlp_layers = (self.feature_space_size, 64, 32, 1)
 
         for i in range(len(mlp_layers)-1):
-            mlp_layer_dict[f"batchnorm_{i:02d}"] = torch.nn.BatchNorm1d(
+            mlp_layer_dict[f"bn_{i:02d}"] = torch.nn.BatchNorm1d(
                 num_features=mlp_layers[i],
             )
-            layer_name = f"fc_{i:02d}_in{mlp_layers[i]:d}_out{mlp_layers[i+1]:d}"
+            layer_name = f"fc_{i:02d}"
             fc_layer = torch.nn.Linear(
                 in_features=mlp_layers[i],
                 out_features=mlp_layers[i+1],
@@ -222,19 +223,13 @@ class Model(LightningModule, _Base_Class):
         lr = self.initial_max_lr
         print("Initial layer-wise learning rates")
         for layer_name, layer in self.feature_model.named_children():
-            for param_name, param in layer.named_parameters():
-                assert param_name.endswith('weight') or param_name.endswith('bias')
-                param_lr = lr if param_name.endswith('weight') else lr/8
-                parameter_group.append({
-                    'params': param,
-                    'lr': param_lr,
-                })
-                print(f"  {layer_name} {param_name} {param_lr:.3e}")
-            lr /= 1.5
-        lr_after_feature_model = lr
-        for task_name, task_model in self.task_models.items():
-            lr = lr_after_feature_model
-            for layer_name, layer in task_model.named_children():
+            if 'bn' in layer_name:
+                for param_name, param in layer.named_parameters():
+                    parameter_group.append({
+                        'params': param,
+                        'lr': self.initial_max_lr/10,
+                    })
+            else:
                 for param_name, param in layer.named_parameters():
                     assert param_name.endswith('weight') or param_name.endswith('bias')
                     param_lr = lr if param_name.endswith('weight') else lr/8
@@ -242,8 +237,28 @@ class Model(LightningModule, _Base_Class):
                         'params': param,
                         'lr': param_lr,
                     })
-                    print(f"  {task_name} {layer_name} {param_name} {param_lr:.3e}")
-                lr /= 1.5
+                    print(f"  {layer_name} {param_name} {param_lr:.3e}")
+                lr /= self.layerwise_lr_decrement
+        lr_after_feature_model = lr
+        for task_name, task_model in self.task_models.items():
+            lr = lr_after_feature_model
+            for layer_name, layer in task_model.named_children():
+                if 'bn' in layer_name:
+                    for param_name, param in layer.named_parameters():
+                        parameter_group.append({
+                            'params': param,
+                            'lr': self.initial_max_lr/10,
+                        })
+                else:
+                    for param_name, param in layer.named_parameters():
+                        assert param_name.endswith('weight') or param_name.endswith('bias')
+                        param_lr = lr if param_name.endswith('weight') else lr/8
+                        parameter_group.append({
+                            'params': param,
+                            'lr': param_lr,
+                        })
+                        print(f"  {task_name} {layer_name} {param_name} {param_lr:.3e}")
+                    lr /= self.layerwise_lr_decrement
 
         self.optimizer = torch.optim.Adam(
             # self.parameters(), 
@@ -358,6 +373,7 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
     signal_window_size: int|Any = None
     quantile_min: float|Any = None
     quantile_max: float|Any = None
+    contrastive_learning: bool = False
 
     def __post_init__(self):
         super().__post_init__()
@@ -375,12 +391,19 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
 
         # restrict quantile range
         if self.quantile_min is not None and self.quantile_max is not None:
-            print(f"  Restricting time-to-ELM labels to quantile range: {self.quantile_min:.2f}-{self.quantile_max:.2f}")
             qmin_val, qmax_val = np.quantile(self.time_to_elm_labels, (self.quantile_min, self.quantile_max))
-            mask = np.logical_and(
-                self.time_to_elm_labels >= qmin_val,
-                self.time_to_elm_labels <= qmax_val,
-            )
+            if not self.contrastive_learning:
+                print(f"  Restricting time-to-ELM labels to quantile range: {self.quantile_min:.2f}-{self.quantile_max:.2f}")
+                mask = np.logical_and(
+                    self.time_to_elm_labels >= qmin_val,
+                    self.time_to_elm_labels <= qmax_val,
+                )
+            else:
+                print(f"  Contrastive learning with time-to-ELM quantiles 0.0-{self.quantile_min:.2f} and {self.quantile_max:.2f}-1.0")
+                mask = np.logical_or(
+                    self.time_to_elm_labels <= qmin_val,
+                    self.time_to_elm_labels >= qmax_val,
+                )
             self.time_to_elm_labels = np.array(self.time_to_elm_labels)[mask].tolist()
             self.t0_indices = np.array(self.t0_indices, dtype=int)[mask].tolist()
             print(f"  Restricted data signal windows: {len(self):,d}")
@@ -411,6 +434,7 @@ class Data(_Base_Class, LightningDataModule):
     seed: int = 0  # seed for ELM index shuffling; must be same across processes
     quantile_min: float|Any = None
     quantile_max: float|Any = None
+    contrastive_learing: bool = False
     # is_distributed: bool = False
 
     def __post_init__(self):
@@ -571,6 +595,7 @@ class Data(_Base_Class, LightningDataModule):
                     signal_window_size=self.signal_window_size,
                     quantile_min=self.quantile_min,
                     quantile_max=self.quantile_max,
+                    contrastive_learning=self.contrastive_learing,
                 )
                 if st == 'train':
                     self.time_to_elm_quantiles = self.datasets[st].time_to_elm_quantiles
@@ -692,18 +717,23 @@ if __name__=='__main__':
     world_size = 0
     batch_size_per_rank = 8
     signal_window_size = 1024
-    max_epochs = 8
+    max_epochs = 4
     max_steps = -1
-    max_elms = None
+    max_elms = 500
+    fraction_validation = 0.1
     fraction_test = 0
     initial_max_lr = 2e-3
-    log_freq = 25
+    log_freq = 50
     num_workers = 2
     early_stopping_min_delta = 1e-3
     early_stopping_patience = 5
     use_wandb = True
-    quantile_min = None
-    quantile_max = None
+    quantile_min = 0.4
+    quantile_max = 0.6
+    contrastive_learning = True
+    layerwise_lr_decrement = 1.5
+    weight_decay = 1e-4
+    gradient_clip_val = 500
 
     experiment_name = 'experiment_default'
     experiment_dir = Path(experiment_name).absolute()
@@ -719,6 +749,8 @@ if __name__=='__main__':
     lit_model = Model(
         signal_window_size=signal_window_size,
         initial_max_lr=initial_max_lr,
+        layerwise_lr_decrement=layerwise_lr_decrement,
+        weight_decay=weight_decay,
     )
     print("Model Summary:")
     print(ModelSummary(lit_model, max_depth=-1))
@@ -726,14 +758,17 @@ if __name__=='__main__':
     ### data
     lit_datamodule = Data(
         signal_window_size=signal_window_size,
-        data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
+        # data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
+        data_file='/global/homes/d/drsmith/scratch-ml/data/labeled_elm_events.hdf5',
         # data_file='/Users/drsmith/Documents/repos/bes-ml/bes_ml/small_elm_data.hdf5',
         max_elms=max_elms,
         batch_size_per_rank=batch_size_per_rank,
         fraction_test=fraction_test,
+        fraction_validation=fraction_validation,
         num_workers=num_workers,
         quantile_min=quantile_min,
         quantile_max=quantile_max,
+        contrastive_learing=contrastive_learning,
     )
 
     ### loggers
@@ -788,7 +823,7 @@ if __name__=='__main__':
         max_epochs = max_epochs,
         max_steps = max_steps,
         max_time = None,
-        gradient_clip_val = None,
+        gradient_clip_val = gradient_clip_val,
         gradient_clip_algorithm = None,
         logger = loggers,
         log_every_n_steps = log_freq,
