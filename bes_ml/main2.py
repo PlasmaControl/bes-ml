@@ -445,7 +445,6 @@ class Data(_Base_Class, LightningDataModule):
         self.elm_indices: dict[str,tuple] = {cat: () for cat in ['all','train','validation','test']}
         self.time_to_elm_quantiles: dict[float, float] = {}
 
-        self.is_distributed: bool|Any = None
         self.trainer: Trainer|Any = None
         self.raw_signal_mean: float|Any = None
         self.raw_signal_stdev: float|Any = None
@@ -466,12 +465,10 @@ class Data(_Base_Class, LightningDataModule):
     def setup(self, stage: str):
         assert stage in ['fit', 'test','predict']
 
-        self.is_distributed = self.trainer.world_size > 1
-        assert self.is_global_zero == self.trainer.is_global_zero
-        if self.is_global_zero:
-            self.trainer.global_rank == 0
         print(f"Rank {self.trainer.global_rank} (world size {self.trainer.world_size})")
+        assert self.is_global_zero == self.trainer.is_global_zero
         if self.is_global_zero: 
+            assert self.trainer.global_rank == 0
             print(f"Batch size per rank: {self.batch_size_per_rank}")
 
         if not self.elm_indices['all']:
@@ -708,17 +705,18 @@ class Data(_Base_Class, LightningDataModule):
         # ]
 
     def _train_val_test_dataloaders(self, stage: str) -> torch.utils.data.DataLoader:
+        is_distributed = self.trainer.world_size > 1
         shuffle = True if stage=='train' else False
         sampler = torch.utils.data.DistributedSampler(
             dataset=self.datasets[stage],
             shuffle=shuffle,
-        ) if self.is_distributed else None
+        ) if is_distributed else None
         return torch.utils.data.DataLoader(
             dataset=self.datasets[stage],
             sampler=sampler,
             batch_size=self.batch_size_per_rank,
             num_workers=self.num_workers,
-            shuffle=None if self.is_distributed else shuffle,
+            shuffle=None if is_distributed else shuffle,
             # prefetch_factor=2 if self.num_workers else None,
             # persistent_workers=bool(self.num_workers),
             pin_memory=True,
