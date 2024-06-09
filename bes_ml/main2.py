@@ -48,13 +48,11 @@ def print_fields(obj):
 @dataclasses.dataclass(eq=False)
 class _Base_Class:
     signal_window_size: int = 1024
-    global_rank: int = 0
-    global_size: int = 1
+    is_global_zero: bool = False
 
     def __post_init__(self):
         assert np.log2(self.signal_window_size).is_integer(), \
             'Signal window must be power of 2'
-        self.is_global_zero: bool = self.global_rank == 0
 
 
 @dataclasses.dataclass(eq=False)
@@ -74,7 +72,6 @@ class Model(LightningModule, _Base_Class):
         super(LightningModule, self).__post_init__()
 
         self.save_hyperparameters()
-        print(f"Module on global_rank {self.global_rank} (global_size {self.global_size})")
         if self.is_global_zero:
             print_fields(self)
 
@@ -350,6 +347,8 @@ class Model(LightningModule, _Base_Class):
 
     def setup(self, stage=None):  # fit, validate, test, or predict
         assert self.is_global_zero == self.trainer.is_global_zero
+        if self.is_global_zero:
+            assert self.global_rank == 0
 
 
 @dataclasses.dataclass(eq=False)
@@ -451,7 +450,6 @@ class Data(_Base_Class, LightningDataModule):
         self.raw_signal_mean: float|Any = None
         self.raw_signal_stdev: float|Any = None
 
-        print(f"DataModule on global_rank {self.global_rank} (global_size {self.global_size})")
         if self.is_global_zero:
             print_fields(self)
 
@@ -465,27 +463,16 @@ class Data(_Base_Class, LightningDataModule):
         for item in self.state_items:
             assert hasattr(self, item)
 
-    def get_state_dict(self) -> dict:
-        state_dict = {
-            item: getattr(self, item) for item in self.state_items
-        }
-        return state_dict
-
-    def load_state_dict(self, state: dict) -> None:
-        for item in self.state_items:
-            setattr(self, item, state[item])
-            if self.is_global_zero:
-                print(f"Loading state item {item} = {getattr(self, item)}")
-
     def setup(self, stage: str):
         assert stage in ['fit', 'test','predict']
 
         self.is_distributed = self.trainer.world_size > 1
         assert self.is_global_zero == self.trainer.is_global_zero
-        assert self.global_rank == self.trainer.global_rank
-        assert self.global_size == self.trainer.world_size
+        if self.is_global_zero:
+            self.trainer.global_rank == 0
+        print(f"Rank {self.trainer.global_rank} (world size {self.trainer.world_size})")
         if self.is_global_zero: 
-            print(f"Batch size per rank: {self.batch_size_per_rank}  (global size {self.trainer.world_size})")
+            print(f"Batch size per rank: {self.batch_size_per_rank}")
 
         if not self.elm_indices['all']:
             self._get_elm_indices_and_split()
@@ -605,12 +592,11 @@ class Data(_Base_Class, LightningDataModule):
                     quantile_min=self.quantile_min,
                     quantile_max=self.quantile_max,
                     contrastive_learning=self.contrastive_learing,
+                    is_global_zero=self.is_global_zero,
                     time_to_elm_quantiles=self.time_to_elm_quantiles,
-                    global_rank=self.global_rank,
-                    global_size=self.global_size
                 )
                 window_count = len(self.datasets[st])
-                batches_per_step = len(self.datasets[st]) / (self.batch_size_per_rank * self.global_size)
+                batches_per_step = len(self.datasets[st]) / (self.batch_size_per_rank * self.trainer.world_size)
                 if self.is_global_zero:
                     print(f"  Signal window count: {window_count:,d}  Batches/step: {batches_per_step:,.1f}")
                 if st == 'train':
@@ -634,7 +620,7 @@ class Data(_Base_Class, LightningDataModule):
         if self.is_global_zero: 
             print(f"Total ELMs in dataset: {len(elms)}")
             print(f"Total shots in dataset: {len(shots)}")
-        print(f"Shuffling ELMs with seed={self.seed} (global rank {self.trainer.global_rank})")
+        print(f"Shuffling ELMs with seed={self.seed} (rank {self.trainer.global_rank})")
         np.random.default_rng(self.seed).shuffle(elms)
         # limit number of ELM events
         if self.max_elms:
@@ -654,43 +640,6 @@ class Data(_Base_Class, LightningDataModule):
             if stage != 'all':
                 tmp += f" ({len(elm_indices)/len(self.elm_indices['all'])*1e2:.1f}%)"
             if self.is_global_zero: print(tmp)
-
-    def _train_val_test_dataloaders(self, stage: str) -> torch.utils.data.DataLoader:
-        shuffle = True if stage=='train' else False
-        sampler = torch.utils.data.DistributedSampler(
-            dataset=self.datasets[stage],
-            shuffle=shuffle,
-        ) if self.is_distributed else None
-        return torch.utils.data.DataLoader(
-            dataset=self.datasets[stage],
-            sampler=sampler,
-            batch_size=self.batch_size_per_rank,
-            num_workers=self.num_workers,
-            shuffle=None if self.is_distributed else shuffle,
-            # prefetch_factor=2 if self.num_workers else None,
-            # persistent_workers=bool(self.num_workers),
-            pin_memory=True,
-        )
-
-    def train_dataloader(self) -> torch.utils.data.DataLoader:
-        return self._train_val_test_dataloaders('train')
-
-    def val_dataloader(self) -> torch.utils.data.DataLoader:
-        return self._train_val_test_dataloaders('validation')
-
-    def test_dataloader(self) -> torch.utils.data.DataLoader:
-        return self._train_val_test_dataloaders('test')
-
-    def predict_dataloader(self) -> None:
-        pass
-        # return [
-        #     torch.utils.data.DataLoader(
-        #         dataset=dataset,
-        #         batch_size=self.batch_size_per_rank,
-        #         num_workers=self.num_workers,
-        #         persistent_workers=True,
-        #     ) for dataset in self.datasets['predict']
-        # ]
 
     def _get_statistics(
             self, 
@@ -726,6 +675,55 @@ class Data(_Base_Class, LightningDataModule):
             'exkurt': exkurt.item(),
         }
 
+    def get_state_dict(self) -> dict:
+        state_dict = {
+            item: getattr(self, item) for item in self.state_items
+        }
+        return state_dict
+
+    def load_state_dict(self, state: dict) -> None:
+        for item in self.state_items:
+            setattr(self, item, state[item])
+            if self.is_global_zero:
+                print(f"Loading state item {item} = {getattr(self, item)}")
+
+    def train_dataloader(self) -> torch.utils.data.DataLoader:
+        return self._train_val_test_dataloaders('train')
+
+    def val_dataloader(self) -> torch.utils.data.DataLoader:
+        return self._train_val_test_dataloaders('validation')
+
+    def test_dataloader(self) -> torch.utils.data.DataLoader:
+        return self._train_val_test_dataloaders('test')
+
+    def predict_dataloader(self) -> None:
+        pass
+        # return [
+        #     torch.utils.data.DataLoader(
+        #         dataset=dataset,
+        #         batch_size=self.batch_size_per_rank,
+        #         num_workers=self.num_workers,
+        #         persistent_workers=True,
+        #     ) for dataset in self.datasets['predict']
+        # ]
+
+    def _train_val_test_dataloaders(self, stage: str) -> torch.utils.data.DataLoader:
+        shuffle = True if stage=='train' else False
+        sampler = torch.utils.data.DistributedSampler(
+            dataset=self.datasets[stage],
+            shuffle=shuffle,
+        ) if self.is_distributed else None
+        return torch.utils.data.DataLoader(
+            dataset=self.datasets[stage],
+            sampler=sampler,
+            batch_size=self.batch_size_per_rank,
+            num_workers=self.num_workers,
+            shuffle=None if self.is_distributed else shuffle,
+            # prefetch_factor=2 if self.num_workers else None,
+            # persistent_workers=bool(self.num_workers),
+            pin_memory=True,
+        )
+
 
 def main(
         data_file: str|Path,
@@ -757,15 +755,15 @@ def main(
 
     # SLURM/MPI environment
     num_nodes = int(os.getenv('SLURM_NNODES', default=1))
-    global_size = int(os.getenv("SLURM_NTASKS", default=1))
-    global_rank = int(os.getenv("SLURM_PROCID", default=0))
+    world_size = int(os.getenv("SLURM_NTASKS", default=1))
+    rank = int(os.getenv("SLURM_PROCID", default=0))
     local_rank = int(os.getenv("SLURM_LOCALID", default=0))
     node_rank = int(os.getenv("SLURM_NODEID", default=0))
 
-    is_global_zero = global_rank == 0
+    is_global_zero = rank == 0
     if is_global_zero:
-        print(f"Global size {global_size} on {num_nodes} node(s)")
-    print(f"Global rank {global_rank} of size {global_size} (local rank {local_rank} on node {node_rank})")
+        print(f"World size {world_size} on {num_nodes} node(s)")
+    print(f"Rank {rank} of world size {world_size} (local rank {local_rank} on node {node_rank})")
 
     ### model
     lit_model = Model(
@@ -773,8 +771,7 @@ def main(
         initial_max_lr=initial_max_lr,
         layerwise_lr_decrement=layerwise_lr_decrement,
         weight_decay=weight_decay,
-        global_rank=global_rank,
-        global_size=global_size,
+        is_global_zero=is_global_zero,
     )
     if is_global_zero:
         print("Model Summary:")
@@ -846,15 +843,15 @@ def main(
         strategy = DDPStrategy(
             gradient_as_bucket_view=True,
             static_graph=True,
-        ) if global_size>1 else 'auto',
-        use_distributed_sampler = global_size>1,
+        ) if world_size>1 else 'auto',
+        use_distributed_sampler = world_size>1,
         num_nodes = num_nodes,
     )
 
     assert trainer.node_rank == node_rank
-    assert trainer.world_size == global_size
+    assert trainer.world_size == world_size
     assert trainer.local_rank == local_rank
-    assert trainer.global_rank == global_rank
+    assert trainer.global_rank == rank
     assert trainer.is_global_zero == is_global_zero
 
     ### data
@@ -869,8 +866,7 @@ def main(
         quantile_min=quantile_min,
         quantile_max=quantile_max,
         contrastive_learing=contrastive_learning,
-        global_rank=global_rank,
-        global_size=global_size,
+        is_global_zero=is_global_zero,
     )
 
     trainer.fit(lit_model, datamodule=lit_datamodule)
@@ -883,6 +879,7 @@ def main(
 
 if __name__=='__main__':
     main(
-        data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
+        # data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
+        data_file='/Users/drsmith/Documents/repos/bes-ml/bes_ml/small_elm_data.hdf5',
         max_elms=50,
     )
