@@ -30,6 +30,8 @@ from lightning.pytorch.callbacks import \
 from lightning.pytorch.utilities.model_summary.model_summary import ModelSummary
 
 torch.set_float32_matmul_precision('medium')
+torch.set_default_dtype(torch.float32)
+
 
 def print_fields(obj):
     print(f"{obj.__class__.__name__} fields:")
@@ -46,18 +48,11 @@ def print_fields(obj):
 @dataclasses.dataclass(eq=False)
 class _Base_Class:
     signal_window_size: int = 1024
+    is_global_zero: bool = False
 
     def __post_init__(self):
         assert np.log2(self.signal_window_size).is_integer(), \
             'Signal window must be power of 2'
-
-
-# class _LitWrapper(LightningModule):
-#     def __init__(self, torch_model):
-#         super().__init__()
-#         self.torch_model = torch_model
-#     def forward(self, inputs):
-#         return self.torch_model(inputs)
 
 
 @dataclasses.dataclass(eq=False)
@@ -77,17 +72,14 @@ class Model(LightningModule, _Base_Class):
         super(LightningModule, self).__post_init__()
 
         self.save_hyperparameters()
-        print_fields(self)
-        self.is_global_zero: bool = False
+        if self.is_global_zero:
+            print_fields(self)
 
         # input data shape
         self.input_data_shape = (1, 1, self.signal_window_size, 8, 8)
 
         # feature space sub-model
         self.feature_model, self.feature_space_size = self.make_feature_model()
-        # self.feature_model_layers = {
-        #     mod_name: mod for mod_name, mod in self.feature_model.named_children()
-        # }
 
         # task sub-models and metrics
         self.task_models = torch.nn.ModuleDict()
@@ -97,53 +89,43 @@ class Model(LightningModule, _Base_Class):
         # binary classifier task
         task_name = 'median_classifier'
         self.task_models[task_name] = self.make_mlp_classifier()
-        # self.task_models_layers[task_name] = {
-        #     mod_name: mod for mod_name, mod in self.task_models[task_name].named_children()
-        # }
         self.task_metrics[task_name] = {
             'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
             'f1_score': sklearn.metrics.f1_score,
         }
 
         self.total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        print(f"Total model parameters: {self.total_parameters:,}")
+        if self.is_global_zero: print(f"Total model parameters: {self.total_parameters:,}")
 
-        print("Initializing model to uniform random weights and biases=0")
+        if self.is_global_zero: print("Initializing model to uniform random weights and biases=0")
         for name, param in self.named_parameters():
             if 'bn' in name: continue
             if name.endswith("bias"):
-                print(f"  {name}: initialized to zeros (numel {param.data.numel()})")
+                if self.is_global_zero: print(f"  {name}: initialized to zeros (numel {param.data.numel()})")
                 param.data.fill_(0)
             elif name.endswith("weight"):
                 n_in = np.prod(param.shape[1:])
                 sqrt_k = np.sqrt(3. / n_in)
                 param.data.uniform_(-sqrt_k, sqrt_k)
-                print(f"  {name}: initialized to uniform +- {sqrt_k:.1e} n*var: {n_in*torch.var(param.data):.3f} (n {param.data.numel()})")
+                if self.is_global_zero: print(f"  {name}: initialized to uniform +- {sqrt_k:.1e} n*var: {n_in*torch.var(param.data):.3f} (n {param.data.numel()})")
             else:
                 raise ValueError
 
-        print("Batch evaluation (batch_size=128) with randn() data")
-        self.example_batch_data = torch.randn(
-            size=[128]+list(self.input_data_shape[1:]),
-            dtype=torch.float32,
-        )
-        example_batch_output = self(self.example_batch_data)
-        for task_name, task_output in example_batch_output.items():
-            print(f"  {task_name} output shape: {task_output.shape}  mean: {torch.mean(task_output):.3e}  var: {torch.var(task_output):.3e}")
+        if self.is_global_zero: 
+            print("Batch evaluation (batch_size=128) with randn() data")
+            self.example_batch_data = torch.randn(
+                size=[128]+list(self.input_data_shape[1:]),
+                dtype=torch.float32,
+            )
+            example_batch_output = self(self.example_batch_data)
+            for task_name, task_output in example_batch_output.items():
+                print(f"  {task_name} output shape: {task_output.shape}  mean: {torch.mean(task_output):.3e}  var: {torch.var(task_output):.3e}")
 
     def make_feature_model(self) -> tuple[torch.nn.Module, int]:
 
-        print("Feature space sub-model")
+        if self.is_global_zero: print("Feature space sub-model")
 
         feature_layer_dict = OrderedDict()
-
-        # conv_layers = {
-        #     'conv_0_time_1d':  {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
-        #     'conv_1_space_2d': {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1},
-        #     'conv_2_time_1d':  {'out_channels': 8, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
-        #     'conv_3_space_2d': {'out_channels': 8, 'kernel': (1, 3, 3), 'stride': 1},
-        #     'conv_4_space_2d': {'out_channels': 8, 'kernel': (1, 4, 4), 'stride': 1},
-        # }
 
         conv_layers = (
             {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
@@ -154,10 +136,9 @@ class Model(LightningModule, _Base_Class):
         )
 
         data_shape = self.input_data_shape
-        print(f"  Data shape: {data_shape}  (size {np.prod(data_shape)})")
+        if self.is_global_zero: print(f"  Data shape: {data_shape}  (size {np.prod(data_shape)})")
         out_channels: int|Any = None
         for i_layer, layer in enumerate(conv_layers):
-        # for layer_name, layer in conv_layers.items():
             if i_layer != 0:
                 feature_layer_dict[f"bn_{i_layer:02d}"] = torch.nn.BatchNorm3d(
                     num_features=out_channels,
@@ -172,24 +153,25 @@ class Model(LightningModule, _Base_Class):
             )
             n_params = sum(p.numel() for p in conv.parameters() if p.requires_grad)
             data_shape = tuple(conv(torch.zeros(data_shape)).shape)
-            print(f"  {layer_name} kern {conv.kernel_size}  stride {conv.stride}  out_ch {conv.out_channels}  param {n_params:,d}  output {data_shape} (size {np.prod(data_shape)})")
+            if self.is_global_zero: 
+                print(f"  {layer_name} kern {conv.kernel_size}  stride {conv.stride}  out_ch {conv.out_channels}  param {n_params:,d}  output {data_shape} (size {np.prod(data_shape)})")
             out_channels = conv.out_channels
             feature_layer_dict[layer_name] = conv
 
         feature_model = torch.nn.Sequential(feature_layer_dict)
 
         output_size = feature_model(torch.zeros(self.input_data_shape)).numel()
-        print(f"  Feature space size: {output_size}")
+        if self.is_global_zero: print(f"  Feature space size: {output_size}")
         assert output_size == 128
 
         n_params = sum(p.numel() for p in feature_model.parameters() if p.requires_grad)
-        print(f"  Feature sub-model parameters: {n_params:,d}")
+        if self.is_global_zero: print(f"  Feature sub-model parameters: {n_params:,d}")
 
         return feature_model, output_size
 
     def make_mlp_classifier(self) -> torch.nn.Module:
 
-        print("MLP classifier sub-model")
+        if self.is_global_zero: print("MLP classifier sub-model")
 
         mlp_layer_dict = OrderedDict()
 
@@ -208,20 +190,21 @@ class Model(LightningModule, _Base_Class):
                 bias=False,
             )
             n_params = sum(p.numel() for p in fc_layer.parameters() if p.requires_grad)
-            print(f"  {layer_name}  in_features {fc_layer.in_features}  out_features {fc_layer.out_features}  parameters {n_params:,d}")
+            if self.is_global_zero: 
+                print(f"  {layer_name}  in_features {fc_layer.in_features}  out_features {fc_layer.out_features}  parameters {n_params:,d}")
             mlp_layer_dict[layer_name] = fc_layer
 
         mlp_classifier = torch.nn.Sequential(mlp_layer_dict)
 
         n_params = n_params = sum(p.numel() for p in mlp_classifier.parameters() if p.requires_grad)
-        print(f"  MLP sub-model parameters: {n_params:,d}")
+        if self.is_global_zero: print(f"  MLP sub-model parameters: {n_params:,d}")
 
         return mlp_classifier
 
     def configure_optimizers(self):
         parameter_group = []
         lr = self.initial_max_lr
-        print("Initial layer-wise learning rates")
+        if self.is_global_zero: print("Initial layer-wise learning rates")
         for layer_name, layer in self.feature_model.named_children():
             if 'bn' in layer_name:
                 for param_name, param in layer.named_parameters():
@@ -237,7 +220,7 @@ class Model(LightningModule, _Base_Class):
                         'params': param,
                         'lr': param_lr,
                     })
-                    print(f"  {layer_name} {param_name} {param_lr:.3e}")
+                    if self.is_global_zero: print(f"  {layer_name} {param_name} {param_lr:.3e}")
                 lr /= self.layerwise_lr_decrement
         lr_after_feature_model = lr
         for task_name, task_model in self.task_models.items():
@@ -257,11 +240,10 @@ class Model(LightningModule, _Base_Class):
                             'params': param,
                             'lr': param_lr,
                         })
-                        print(f"  {task_name} {layer_name} {param_name} {param_lr:.3e}")
+                        if self.is_global_zero: print(f"  {task_name} {layer_name} {param_name} {param_lr:.3e}")
                     lr /= self.layerwise_lr_decrement
 
         self.optimizer = torch.optim.Adam(
-            # self.parameters(), 
             parameter_group,
             lr=self.initial_max_lr,
             weight_decay=self.weight_decay,
@@ -298,11 +280,9 @@ class Model(LightningModule, _Base_Class):
         return results
 
     def training_step(self, batch, batch_idx) -> torch.Tensor:
-        # print(f"  train step batch size: {batch[1].numel()} (global rank {self.global_rank})")
         return self.update_step(batch, batch_idx, stage='train')
 
     def validation_step(self, batch, batch_idx) -> None:
-        # print(f"  val step batch size: {batch[1].numel()} (global rank {self.global_rank})")
         self.update_step(batch, batch_idx, stage='val')
 
     def test_step(self, batch, batch_idx) -> None:
@@ -341,29 +321,34 @@ class Model(LightningModule, _Base_Class):
 
     def on_fit_start(self):
         self.t_fit_start = time.time()
-        if self.trainer.is_global_zero:
-            print("Fit start")
-
-    def on_train_epoch_start(self):
-        self.t_train_epoch_start = time.time()
-
-    def on_train_epoch_end(self):
-        delt = time.time() - self.t_train_epoch_start
-        if self.is_global_zero and self.global_step > 0:
-            logged_metrics = self.trainer.logged_metrics
-            line =  f"  Epoch {self.current_epoch:03d}  time: {delt/60:.1f} min  " 
-            # line += f"steps {self.global_step:,d}  "
-            line += f"train loss {logged_metrics['sum_loss/train']:.3f}  "
-            line += f"val loss {logged_metrics['sum_loss/val']:.3f}  "
-            print(line)
+        if self.is_global_zero:
+            print(f"Fit start with global step")
 
     def on_fit_end(self) -> None:
         delt = time.time() - self.t_fit_start
         if self.is_global_zero:
             print(f"Fit time: {delt/60:0.1f} min")
 
+    def on_train_epoch_start(self):
+        self.t_train_epoch_start = time.time()
+        self.s_train_epoch_start = self.global_step
+
+    def on_train_epoch_end(self):
+        epoch_time = time.time() - self.t_train_epoch_start
+        global_time = time.time() - self.t_fit_start
+        epoch_steps = self.global_step-self.s_train_epoch_start
+        if self.is_global_zero and self.global_step > 0:
+            logged_metrics = self.trainer.logged_metrics
+            line =  f"  Ep {self.current_epoch:03d}  "
+            line += f"train/val loss {logged_metrics['sum_loss/train']:.3f}/{logged_metrics['sum_loss/val']:.3f}  "
+            line += f"ep/gl steps {epoch_steps:,d}/{self.global_step:,d}  "
+            line += f"ep/gl time (min): {epoch_time/60:.1f}/{global_time/60:.1f}  " 
+            print(line)
+
     def setup(self, stage=None):  # fit, validate, test, or predict
-        self.is_global_zero = self.trainer.is_global_zero
+        assert self.is_global_zero == self.trainer.is_global_zero
+        if self.is_global_zero:
+            assert self.global_rank == 0
 
 
 @dataclasses.dataclass(eq=False)
@@ -374,6 +359,7 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
     quantile_min: float|Any = None
     quantile_max: float|Any = None
     contrastive_learning: bool = False
+    time_to_elm_quantiles: dict[float, float]|Any = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -381,33 +367,44 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
         self.signals = torch.from_numpy(self.signals[np.newaxis, ...])
         self.t0_indices = list(self.t0_and_time_to_elm_labels.keys())
         self.time_to_elm_labels = list(self.t0_and_time_to_elm_labels.values())
-        print(f"  Full data signal windows: {len(self):,d}")
-        quantiles = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
-        quantile_values = np.quantile(self.time_to_elm_labels, quantiles)
-        self.time_to_elm_quantiles = {q: qval.item() for q, qval in zip(quantiles, quantile_values)}
-        print(f"  Full data time-to-ELM quantiles:")
-        for q, qval in self.time_to_elm_quantiles.items():
-            print(f"    Quantile {q:.2f}: {qval:.1f} ms")
+        if self.is_global_zero: 
+            print(f"  Full data signal windows: {len(self):,d}")
+        if self.time_to_elm_quantiles:
+            if self.is_global_zero:
+                print("  Using input time-to-ELM quantiles")
+        else:
+            if self.is_global_zero:
+                print("  Calculating time-to-ELM quantiles")
+            quantiles = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
+            quantile_values = np.quantile(self.time_to_elm_labels, quantiles)
+            self.time_to_elm_quantiles = {q: qval.item() for q, qval in zip(quantiles, quantile_values)}
+        if self.is_global_zero: 
+            print(f"  Time-to-ELM quantiles for binary labels:")
+            for q, qval in self.time_to_elm_quantiles.items():
+                print(f"    Quantile {q:.2f}: {qval:.1f} ms")
 
         # restrict quantile range
         if self.quantile_min is not None and self.quantile_max is not None:
             qmin_val, qmax_val = np.quantile(self.time_to_elm_labels, (self.quantile_min, self.quantile_max))
             if not self.contrastive_learning:
-                print(f"  Restricting time-to-ELM labels to quantile range: {self.quantile_min:.2f}-{self.quantile_max:.2f}")
+                if self.is_global_zero: 
+                    print(f"  Restricting time-to-ELM labels to quantile range: {self.quantile_min:.2f}-{self.quantile_max:.2f}")
                 mask = np.logical_and(
                     self.time_to_elm_labels >= qmin_val,
                     self.time_to_elm_labels <= qmax_val,
                 )
             else:
-                print(f"  Contrastive learning with time-to-ELM quantiles 0.0-{self.quantile_min:.2f} and {self.quantile_max:.2f}-1.0")
+                if self.is_global_zero: 
+                    print(f"  Contrastive learning with time-to-ELM quantiles 0.0-{self.quantile_min:.2f} and {self.quantile_max:.2f}-1.0")
                 mask = np.logical_or(
                     self.time_to_elm_labels <= qmin_val,
                     self.time_to_elm_labels >= qmax_val,
                 )
             self.time_to_elm_labels = np.array(self.time_to_elm_labels)[mask].tolist()
             self.t0_indices = np.array(self.t0_indices, dtype=int)[mask].tolist()
-            print(f"  Restricted data signal windows: {len(self):,d}")
-            print(f"  Restricted time-to-ELM min/max: {np.min(self.time_to_elm_labels):.1f}-{np.max(self.time_to_elm_labels):.1f} ms")
+            if self.is_global_zero:
+                print(f"  Restricted time-to-ELM min/max: {np.min(self.time_to_elm_labels):.1f}-{np.max(self.time_to_elm_labels):.1f} ms")
+                print(f"  Restricted data signal windows: {len(self):,d}")
 
     def __len__(self) -> int:
         return len(self.t0_indices)
@@ -446,11 +443,13 @@ class Data(_Base_Class, LightningDataModule):
 
         self.datasets: dict[str, ELM_TrainValTest_Dataset] = {}
         self.elm_indices: dict[str,tuple] = {cat: () for cat in ['all','train','validation','test']}
-        self.time_to_elm_quantiles: dict[float, int] = {}
+        self.time_to_elm_quantiles: dict[float, float] = {}
 
-        self.is_distributed = None
+        self.is_distributed: bool|Any = None
+        self.trainer: Trainer|Any = None
 
-        print_fields(self)
+        if self.is_global_zero:
+            print_fields(self)
 
         # datamodule state, to reproduce pre-processing
         self.state_items = [
@@ -462,6 +461,8 @@ class Data(_Base_Class, LightningDataModule):
         for item in self.state_items:
             if not hasattr(self, item):
                 setattr(self, item, None)
+                if self.is_global_zero:
+                    print(f"Setting state item {item} = None")
 
     def get_state_dict(self) -> dict:
         state_dict = {
@@ -472,16 +473,16 @@ class Data(_Base_Class, LightningDataModule):
     def load_state_dict(self, state: dict) -> None:
         for item in self.state_items:
             setattr(self, item, state[item])
+            if self.is_global_zero:
+                print(f"Loading state item {item} = {getattr(self, item)}")
 
     def setup(self, stage: str):
         assert stage in ['fit', 'test','predict']
 
-        device = torch.cuda.get_device_name() if torch.cuda.is_available() else 'cpu'
-        print(f"Global rank {self.trainer.global_rank} device: {device}")
-
         self.is_distributed = self.trainer.world_size > 1
-        self.is_global_zero = self.trainer.is_global_zero
-        if self.is_global_zero: print(f"Batch size per rank: {self.batch_size_per_rank}  (world size {self.trainer.world_size})")
+        assert self.is_global_zero == self.trainer.is_global_zero
+        if self.is_global_zero: 
+            print(f"Batch size per rank: {self.batch_size_per_rank}  (world size {self.trainer.world_size})")
 
         if not self.elm_indices['all']:
             self._get_elm_indices_and_split()
@@ -494,20 +495,21 @@ class Data(_Base_Class, LightningDataModule):
             assert self.elm_indices[st] is not None
             indices = self.elm_indices[st]
             n_indices = len(indices)
-            if self.is_global_zero: print(f"Reading {n_indices} ELMs for stage {st}")
+            if self.is_global_zero: 
+                print(f"Reading {n_indices} ELMs for stage {st}")
             elm_data = []
             with h5py.File(self.data_file, 'r') as h5_file:
                 elms: h5py.Group = h5_file['elms']
                 for i_elm, elm_index in enumerate(indices):
-                    if i_elm%100 == 0:
-                        if self.is_global_zero: print(f"  Reading ELM event {i_elm:04d}/{n_indices:04d}")
+                    if i_elm%100 == 0 and self.is_global_zero:
+                        print(f"  Reading ELM event {i_elm:04d}/{n_indices:04d}")
                     elm_event: h5py.Group = elms[f"{elm_index:06d}"]
                     signals = np.array(elm_event["bes_signals"], dtype=np.float32)  # (64, <time>)
                     signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (time, pol, rad)
                     time = np.array(elm_event['bes_time'], dtype=np.float32)
                     assert time.size == signals.shape[0]
-                    t_start = elm_event.attrs['t_start']
-                    t_stop = elm_event.attrs['t_stop'] - 0.05
+                    t_start: float = elm_event.attrs['t_start']
+                    t_stop: float = elm_event.attrs['t_stop'] - 0.05
                     t_mask = (time >= t_start) & (time <= t_stop)
                     signals = signals[t_mask, ...]
                     time_to_elm = (time[t_mask] - time[t_mask][-1]) * -1
@@ -545,7 +547,8 @@ class Data(_Base_Class, LightningDataModule):
                 for i_t0, is_valid_t0 in enumerate(concat_valid_t0) if is_valid_t0
             }
 
-            if self.is_global_zero: print(f"  Initial signal window count: {len(t0_and_time_to_elm_labels):,d}")
+            if self.is_global_zero: 
+                print(f"  Initial signal window count: {len(t0_and_time_to_elm_labels):,d}")
 
             # remove signal windows with outliers
             if self.outlier_value:
@@ -555,20 +558,22 @@ class Data(_Base_Class, LightningDataModule):
                     if np.abs(signal_window).max() > self.outlier_value:
                         del t0_and_time_to_elm_labels[i_t0]
                         outlier_count += 1
-                if self.is_global_zero: print(f"  Outlier signal windows removed: {outlier_count:,d}")
+                if self.is_global_zero: 
+                    print(f"  Outlier signal windows removed: {outlier_count:,d}")
             
             # Window and batch counts
             window_count = len(t0_and_time_to_elm_labels)
-            total_batches = window_count / self.batch_size_per_rank
-            batches_per_rank = total_batches / self.trainer.world_size
-            if self.is_global_zero: print(f"  Signal window count: {window_count:,d}  Batches: {total_batches:,.1f}  Batches/rank: {batches_per_rank:,.1f}")
+            batches_per_step = window_count / (self.batch_size_per_rank * self.trainer.world_size)
+            if self.is_global_zero: 
+                print(f"  Signal window count: {window_count:,d}")
 
             # Raw signal stats
             raw_stats = self._get_statistics(
                 signals=concat_signals,
                 sample_indices=np.array(list(t0_and_time_to_elm_labels.keys()), dtype=int),
             )
-            if self.is_global_zero: print(f"  Raw signals min {raw_stats['min']:.2f} max {raw_stats['max']:.2f} mean {raw_stats['mean']:.2f} stdev {raw_stats['stdev']:.2f} exkurt {raw_stats['exkurt']:.2f}")
+            if self.is_global_zero: 
+                print(f"  Raw signals min {raw_stats['min']:.2f} max {raw_stats['max']:.2f} mean {raw_stats['mean']:.2f} stdev {raw_stats['stdev']:.2f} exkurt {raw_stats['exkurt']:.2f}")
             if st == 'train':
                 self.raw_signal_mean = raw_stats['mean']
                 self.raw_signal_stdev = raw_stats['stdev']
@@ -585,7 +590,8 @@ class Data(_Base_Class, LightningDataModule):
                 signals=concat_signals,
                 sample_indices=np.array(list(t0_and_time_to_elm_labels.keys()), dtype=int),
             )
-            if self.is_global_zero: print(f"  Normalized signals min {norm_stats['min']:.2f} max {norm_stats['max']:.2f} mean {norm_stats['mean']:.2f} stdev {norm_stats['stdev']:.2f} exkurt {norm_stats['exkurt']:.2f}")
+            if self.is_global_zero: 
+                print(f"  Normalized signals min {norm_stats['min']:.2f} max {norm_stats['max']:.2f} mean {norm_stats['mean']:.2f} stdev {norm_stats['stdev']:.2f} exkurt {norm_stats['exkurt']:.2f}")
 
             # create datasets
             if st in ['train', 'validation', 'test']:
@@ -596,7 +602,13 @@ class Data(_Base_Class, LightningDataModule):
                     quantile_min=self.quantile_min,
                     quantile_max=self.quantile_max,
                     contrastive_learning=self.contrastive_learing,
+                    is_global_zero=self.is_global_zero,
+                    time_to_elm_quantiles=self.time_to_elm_quantiles,
                 )
+                window_count = len(self.datasets[st])
+                batches_per_step = len(self.datasets[st]) / (self.batch_size_per_rank * self.trainer.world_size)
+                if self.is_global_zero:
+                    print(f"  Signal window count: {window_count:,d}  Batches/step: {batches_per_step:,.1f}")
                 if st == 'train':
                     self.time_to_elm_quantiles = self.datasets[st].time_to_elm_quantiles
                     self.save_hyperparameters({
@@ -615,9 +627,10 @@ class Data(_Base_Class, LightningDataModule):
             assert len(shots ^ shots_from_elms) == 0
             elms = [int(elm_key) for elm_key in root['elms']]
         # shuffle ELM indices
-        if self.is_global_zero: print(f"Total ELMs in dataset: {len(elms)}")
-        if self.is_global_zero: print(f"Total shots in dataset: {len(shots)}")
-        if self.is_global_zero: print(f"Shuffling ELMs with seed={self.seed}")
+        if self.is_global_zero: 
+            print(f"Total ELMs in dataset: {len(elms)}")
+            print(f"Total shots in dataset: {len(shots)}")
+        print(f"Shuffling ELMs with seed={self.seed} (global rank {self.trainer.global_rank})")
         np.random.default_rng(self.seed).shuffle(elms)
         # limit number of ELM events
         if self.max_elms:
@@ -650,10 +663,9 @@ class Data(_Base_Class, LightningDataModule):
             batch_size=self.batch_size_per_rank,
             num_workers=self.num_workers,
             shuffle=None if self.is_distributed else shuffle,
-            prefetch_factor=2 if self.num_workers else None,
-            persistent_workers=bool(self.num_workers),
-            # pin_memory=False,
-            # pin_memory_device="",
+            # prefetch_factor=2 if self.num_workers else None,
+            # persistent_workers=bool(self.num_workers),
+            pin_memory=True,
         )
 
     def train_dataloader(self) -> torch.utils.data.DataLoader:
@@ -665,15 +677,16 @@ class Data(_Base_Class, LightningDataModule):
     def test_dataloader(self) -> torch.utils.data.DataLoader:
         return self._train_val_test_dataloaders('test')
 
-    def predict_dataloader(self) -> list[torch.utils.data.DataLoader]:
-        return [
-            torch.utils.data.DataLoader(
-                dataset=dataset,
-                batch_size=self.batch_size_per_rank,
-                num_workers=self.num_workers,
-                persistent_workers=True,
-            ) for dataset in self.datasets['predict']
-        ]
+    def predict_dataloader(self) -> None:
+        pass
+        # return [
+        #     torch.utils.data.DataLoader(
+        #         dataset=dataset,
+        #         batch_size=self.batch_size_per_rank,
+        #         num_workers=self.num_workers,
+        #         persistent_workers=True,
+        #     ) for dataset in self.datasets['predict']
+        # ]
 
     def _get_statistics(
             self, 
@@ -710,40 +723,45 @@ class Data(_Base_Class, LightningDataModule):
         }
 
 
+def main(
+        data_file: str|Path,
+        signal_window_size = 1024,
+        experiment_name = 'experiment_default',
+        # model
+        initial_max_lr = 1e-3,
+        layerwise_lr_decrement = 1.5,
+        weight_decay = 1e-4,
+        # loggers
+        log_freq = 50,
+        use_wandb = False,
+        # callbacks
+        early_stopping_min_delta = 1e-3,
+        early_stopping_patience = 5,
+        # trainer
+        max_epochs = 2,
+        gradient_clip_val = 500,
+        batch_size_per_rank = 64,
+        # data
+        max_elms = 100,
+        fraction_validation = 0.1,
+        fraction_test = 0,
+        num_workers = 0,
+        quantile_min = 0.4,
+        quantile_max = 0.6,
+        contrastive_learning = True,
+):
 
-if __name__=='__main__':
+    # SLURM/MPI environment
+    num_nodes = int(os.getenv('SLURM_NNODES', default=1))
+    world_size = int(os.getenv("SLURM_NTASKS", default=1))
+    world_rank = int(os.getenv("SLURM_PROCID", default=0))
+    local_rank = int(os.getenv("SLURM_LOCALID", default=0))
+    node_rank = int(os.getenv("SLURM_NODEID", default=0))
 
-    # world_size = int(os.getenv('WORLD_SIZE', default=0))
-    world_size = 0
-    batch_size_per_rank = 8
-    signal_window_size = 1024
-    max_epochs = 4
-    max_steps = -1
-    max_elms = 500
-    fraction_validation = 0.1
-    fraction_test = 0
-    initial_max_lr = 2e-3
-    log_freq = 50
-    num_workers = 2
-    early_stopping_min_delta = 1e-3
-    early_stopping_patience = 5
-    use_wandb = True
-    quantile_min = 0.4
-    quantile_max = 0.6
-    contrastive_learning = True
-    layerwise_lr_decrement = 1.5
-    weight_decay = 1e-4
-    gradient_clip_val = 500
-
-    experiment_name = 'experiment_default'
-    experiment_dir = Path(experiment_name).absolute()
-    experiment_dir.mkdir(parents=True, exist_ok=True)
-
-    datetime_str = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-    slurm_identifier = os.getenv('UNIQUE_IDENTIFIER', None)
-    trial_name = f"r{slurm_identifier}_{datetime_str}" if slurm_identifier else f"r{datetime_str}"
-
-    torch.set_default_dtype(torch.float32)
+    is_global_zero = world_rank == 0
+    if is_global_zero:
+        print(f"World size {world_size} on {num_nodes} node(s)")
+    print(f"World rank {world_rank} of size {world_size} (local rank {local_rank} on node {node_rank})")
 
     ### model
     lit_model = Model(
@@ -751,51 +769,11 @@ if __name__=='__main__':
         initial_max_lr=initial_max_lr,
         layerwise_lr_decrement=layerwise_lr_decrement,
         weight_decay=weight_decay,
+        is_global_zero=is_global_zero,
     )
-    print("Model Summary:")
-    print(ModelSummary(lit_model, max_depth=-1))
-
-    ### data
-    lit_datamodule = Data(
-        signal_window_size=signal_window_size,
-        # data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
-        data_file='/global/homes/d/drsmith/scratch-ml/data/labeled_elm_events.hdf5',
-        # data_file='/Users/drsmith/Documents/repos/bes-ml/bes_ml/small_elm_data.hdf5',
-        max_elms=max_elms,
-        batch_size_per_rank=batch_size_per_rank,
-        fraction_test=fraction_test,
-        fraction_validation=fraction_validation,
-        num_workers=num_workers,
-        quantile_min=quantile_min,
-        quantile_max=quantile_max,
-        contrastive_learing=contrastive_learning,
-    )
-
-    ### loggers
-    loggers = []
-    tb_logger = TensorBoardLogger(
-        save_dir=experiment_dir.parent,
-        name=experiment_name,
-        version=trial_name,
-        default_hp_metric=False,
-    )
-    loggers.append(tb_logger)
-    trial_dir = Path(tb_logger.log_dir).absolute()
-    print(f"Trial directory: {trial_dir}")
-
-    if use_wandb:
-        wandb.login()
-        wandb_logger = WandbLogger(
-            save_dir=experiment_dir,
-            project=experiment_name,
-            name=trial_name,
-        )
-        wandb_logger.watch(
-            model=lit_model, 
-            log='all', 
-            log_freq=log_freq,
-        )
-        loggers.append(wandb_logger)
+    if is_global_zero:
+        print("Model Summary:")
+        print(ModelSummary(lit_model, max_depth=-1))
 
     ### callbacks
     monitor_metric = lit_model.monitor_metric
@@ -818,13 +796,41 @@ if __name__=='__main__':
         ),
     ]
 
+    ### loggers
+    loggers = []
+    experiment_dir = Path(experiment_name).absolute()
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    datetime_str = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+    slurm_identifier = os.getenv('UNIQUE_IDENTIFIER', None)
+    trial_name = f"r{slurm_identifier}_{datetime_str}" if slurm_identifier else f"r{datetime_str}"
+    tb_logger = TensorBoardLogger(
+        save_dir=experiment_dir.parent,
+        name=experiment_name,
+        version=trial_name,
+        default_hp_metric=False,
+    )
+    loggers.append(tb_logger)
+    trial_dir = Path(tb_logger.log_dir).absolute()
+    if is_global_zero:
+        print(f"Trial directory: {trial_dir}")
+    if use_wandb:
+        wandb.login()
+        wandb_logger = WandbLogger(
+            save_dir=experiment_dir,
+            project=experiment_name,
+            name=trial_name,
+        )
+        wandb_logger.watch(
+            model=lit_model, 
+            log='all', 
+            log_freq=log_freq,
+        )
+        loggers.append(wandb_logger)
+
     ### initialize trainer
     trainer = Trainer(
         max_epochs = max_epochs,
-        max_steps = max_steps,
-        max_time = None,
         gradient_clip_val = gradient_clip_val,
-        gradient_clip_algorithm = None,
         logger = loggers,
         log_every_n_steps = log_freq,
         callbacks = callbacks,
@@ -835,11 +841,28 @@ if __name__=='__main__':
         strategy = DDPStrategy(
             gradient_as_bucket_view=True,
             static_graph=True,
-        ) if world_size else 'auto',
-        use_distributed_sampler = bool(world_size),
-        devices = world_size if world_size else "auto",
-        num_nodes = int(os.getenv('SLURM_NNODES', default=1)),
+        ) if world_size>1 else 'auto',
+        use_distributed_sampler = world_size>1,
+        num_nodes = num_nodes,
     )
+
+    assert trainer.is_global_zero == is_global_zero
+
+    ### data
+    lit_datamodule = Data(
+        signal_window_size=signal_window_size,
+        data_file=data_file,
+        max_elms=max_elms,
+        batch_size_per_rank=batch_size_per_rank,
+        fraction_test=fraction_test,
+        fraction_validation=fraction_validation,
+        num_workers=num_workers,
+        quantile_min=quantile_min,
+        quantile_max=quantile_max,
+        contrastive_learing=contrastive_learning,
+        is_global_zero=is_global_zero,
+    )
+    lit_datamodule.prepare_data_per_node = False
 
     trainer.fit(lit_model, datamodule=lit_datamodule)
 
@@ -848,3 +871,8 @@ if __name__=='__main__':
 
     if use_wandb:
         wandb.finish()
+
+if __name__=='__main__':
+    main(
+        data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
+    )
