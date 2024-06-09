@@ -3,7 +3,7 @@ import dataclasses
 from datetime import datetime, timedelta
 from logging import Logger
 from typing import \
-    OrderedDict, Iterable, Mapping, Callable, Any, Sized
+    OrderedDict, Iterable, Mapping, Callable, Any, Sequence, Sized
 import os
 import time
 
@@ -48,11 +48,13 @@ def print_fields(obj):
 @dataclasses.dataclass(eq=False)
 class _Base_Class:
     signal_window_size: int = 1024
-    is_global_zero: bool = False
+    global_rank: int = 0
+    global_size: int = 1
 
     def __post_init__(self):
         assert np.log2(self.signal_window_size).is_integer(), \
             'Signal window must be power of 2'
+        self.is_global_zero: bool = self.global_rank == 0
 
 
 @dataclasses.dataclass(eq=False)
@@ -72,6 +74,7 @@ class Model(LightningModule, _Base_Class):
         super(LightningModule, self).__post_init__()
 
         self.save_hyperparameters()
+        print(f"Module on global_rank {self.global_rank} (global_size {self.global_size})")
         if self.is_global_zero:
             print_fields(self)
 
@@ -347,8 +350,6 @@ class Model(LightningModule, _Base_Class):
 
     def setup(self, stage=None):  # fit, validate, test, or predict
         assert self.is_global_zero == self.trainer.is_global_zero
-        if self.is_global_zero:
-            assert self.global_rank == 0
 
 
 @dataclasses.dataclass(eq=False)
@@ -447,7 +448,10 @@ class Data(_Base_Class, LightningDataModule):
 
         self.is_distributed: bool|Any = None
         self.trainer: Trainer|Any = None
+        self.raw_signal_mean: float|Any = None
+        self.raw_signal_stdev: float|Any = None
 
+        print(f"DataModule on global_rank {self.global_rank} (global_size {self.global_size})")
         if self.is_global_zero:
             print_fields(self)
 
@@ -459,10 +463,7 @@ class Data(_Base_Class, LightningDataModule):
             'time_to_elm_quantiles',
         ]
         for item in self.state_items:
-            if not hasattr(self, item):
-                setattr(self, item, None)
-                if self.is_global_zero:
-                    print(f"Setting state item {item} = None")
+            assert hasattr(self, item)
 
     def get_state_dict(self) -> dict:
         state_dict = {
@@ -481,8 +482,10 @@ class Data(_Base_Class, LightningDataModule):
 
         self.is_distributed = self.trainer.world_size > 1
         assert self.is_global_zero == self.trainer.is_global_zero
+        assert self.global_rank == self.trainer.global_rank
+        assert self.global_size == self.trainer.world_size
         if self.is_global_zero: 
-            print(f"Batch size per rank: {self.batch_size_per_rank}  (world size {self.trainer.world_size})")
+            print(f"Batch size per rank: {self.batch_size_per_rank}  (global size {self.trainer.world_size})")
 
         if not self.elm_indices['all']:
             self._get_elm_indices_and_split()
@@ -602,11 +605,12 @@ class Data(_Base_Class, LightningDataModule):
                     quantile_min=self.quantile_min,
                     quantile_max=self.quantile_max,
                     contrastive_learning=self.contrastive_learing,
-                    is_global_zero=self.is_global_zero,
                     time_to_elm_quantiles=self.time_to_elm_quantiles,
+                    global_rank=self.global_rank,
+                    global_size=self.global_size
                 )
                 window_count = len(self.datasets[st])
-                batches_per_step = len(self.datasets[st]) / (self.batch_size_per_rank * self.trainer.world_size)
+                batches_per_step = len(self.datasets[st]) / (self.batch_size_per_rank * self.global_size)
                 if self.is_global_zero:
                     print(f"  Signal window count: {window_count:,d}  Batches/step: {batches_per_step:,.1f}")
                 if st == 'train':
@@ -753,15 +757,15 @@ def main(
 
     # SLURM/MPI environment
     num_nodes = int(os.getenv('SLURM_NNODES', default=1))
-    world_size = int(os.getenv("SLURM_NTASKS", default=1))
-    world_rank = int(os.getenv("SLURM_PROCID", default=0))
+    global_size = int(os.getenv("SLURM_NTASKS", default=1))
+    global_rank = int(os.getenv("SLURM_PROCID", default=0))
     local_rank = int(os.getenv("SLURM_LOCALID", default=0))
     node_rank = int(os.getenv("SLURM_NODEID", default=0))
 
-    is_global_zero = world_rank == 0
+    is_global_zero = global_rank == 0
     if is_global_zero:
-        print(f"World size {world_size} on {num_nodes} node(s)")
-    print(f"World rank {world_rank} of size {world_size} (local rank {local_rank} on node {node_rank})")
+        print(f"Global size {global_size} on {num_nodes} node(s)")
+    print(f"Global rank {global_rank} of size {global_size} (local rank {local_rank} on node {node_rank})")
 
     ### model
     lit_model = Model(
@@ -769,7 +773,8 @@ def main(
         initial_max_lr=initial_max_lr,
         layerwise_lr_decrement=layerwise_lr_decrement,
         weight_decay=weight_decay,
-        is_global_zero=is_global_zero,
+        global_rank=global_rank,
+        global_size=global_size,
     )
     if is_global_zero:
         print("Model Summary:")
@@ -841,11 +846,15 @@ def main(
         strategy = DDPStrategy(
             gradient_as_bucket_view=True,
             static_graph=True,
-        ) if world_size>1 else 'auto',
-        use_distributed_sampler = world_size>1,
+        ) if global_size>1 else 'auto',
+        use_distributed_sampler = global_size>1,
         num_nodes = num_nodes,
     )
 
+    assert trainer.node_rank == node_rank
+    assert trainer.world_size == global_size
+    assert trainer.local_rank == local_rank
+    assert trainer.global_rank == global_rank
     assert trainer.is_global_zero == is_global_zero
 
     ### data
@@ -860,9 +869,9 @@ def main(
         quantile_min=quantile_min,
         quantile_max=quantile_max,
         contrastive_learing=contrastive_learning,
-        is_global_zero=is_global_zero,
+        global_rank=global_rank,
+        global_size=global_size,
     )
-    lit_datamodule.prepare_data_per_node = False
 
     trainer.fit(lit_model, datamodule=lit_datamodule)
 
