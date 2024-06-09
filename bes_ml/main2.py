@@ -884,4 +884,5 @@ def main(
 if __name__=='__main__':
     main(
         data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
+        max_elms=50,
     )
