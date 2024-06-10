@@ -353,35 +353,35 @@ class Model(LightningModule, _Base_Class):
 
 @dataclasses.dataclass(eq=False)
 class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
-    signals: np.ndarray|Any = None
-    t0_and_time_to_elm_labels: dict[int, float]|Any = None
+    # signals: np.ndarray|Any = None
+    # t0_and_time_to_elm_labels: dict[int, float]|Any = None
+    elm_data: dict|Any = None
     signal_window_size: int|Any = None
     quantile_min: float|Any = None
     quantile_max: float|Any = None
     contrastive_learning: bool = False
     time_to_elm_quantiles: dict[float, float]|Any = None
+    rank: int = 0
 
     def __post_init__(self):
         super().__post_init__()
         super(_Base_Class, self).__init__()
-        self.signals = torch.from_numpy(self.signals[np.newaxis, ...])
+        # self.signals = torch.from_numpy(self.signals[np.newaxis, ...])
         self.t0_indices = list(self.t0_and_time_to_elm_labels.keys())
         self.time_to_elm_labels = list(self.t0_and_time_to_elm_labels.values())
-        if self.is_global_zero: 
-            print(f"  Full data signal windows: {len(self):,d}")
-        if self.time_to_elm_quantiles:
-            if self.is_global_zero:
-                print("  Using input time-to-ELM quantiles")
-        else:
-            if self.is_global_zero:
-                print("  Calculating time-to-ELM quantiles")
-            quantiles = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
-            quantile_values = np.quantile(self.time_to_elm_labels, quantiles)
-            self.time_to_elm_quantiles = {q: qval.item() for q, qval in zip(quantiles, quantile_values)}
-        if self.is_global_zero: 
-            print(f"  Time-to-ELM quantiles for binary labels:")
-            for q, qval in self.time_to_elm_quantiles.items():
-                print(f"    Quantile {q:.2f}: {qval:.1f} ms")
+        # if self.time_to_elm_quantiles:
+        #     if self.is_global_zero:
+        #         print("  Using input time-to-ELM quantiles")
+        # else:
+        #     if self.is_global_zero:
+        #         print("  Calculating time-to-ELM quantiles")
+        #     quantiles = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
+        #     quantile_values = np.quantile(self.time_to_elm_labels, quantiles)
+        #     self.time_to_elm_quantiles = {q: qval.item() for q, qval in zip(quantiles, quantile_values)}
+        # if self.is_global_zero: 
+        #     print(f"  Time-to-ELM quantiles for binary labels:")
+        #     for q, qval in self.time_to_elm_quantiles.items():
+        #         print(f"    Quantile {q:.2f}: {qval:.1f} ms")
 
         # restrict quantile range
         if self.quantile_min is not None and self.quantile_max is not None:
@@ -463,9 +463,9 @@ class Data(_Base_Class, LightningDataModule):
             assert hasattr(self, item)
 
     def setup(self, stage: str):
-        assert stage in ['fit', 'test','predict']
+        assert stage in ['fit', 'test', 'predict']
 
-        print(f"Rank {self.trainer.global_rank} (world size {self.trainer.world_size})")
+        print(f"Data `setup` on rank {self.trainer.global_rank} (world size {self.trainer.world_size})")
         assert self.is_global_zero == self.trainer.is_global_zero
         if self.is_global_zero: 
             assert self.trainer.global_rank == 0
@@ -479,128 +479,83 @@ class Data(_Base_Class, LightningDataModule):
             assert st in ['train', 'validation','test','predict']
             if st in self.datasets and isinstance(self.datasets[st], torch.utils.data.Dataset):
                 continue
-            assert self.elm_indices[st] is not None
             indices = self.elm_indices[st]
-            n_indices = len(indices)
+            assert indices is not None
             if self.is_global_zero: 
-                print(f"Reading {n_indices} ELMs for stage {st}")
+                print(f"Reading {len(indices)} ELMs for stage {st}")
             elm_data = []
+            outliers = 0
             with h5py.File(self.data_file, 'r') as h5_file:
                 elms: h5py.Group = h5_file['elms']
                 for i_elm, elm_index in enumerate(indices):
                     if i_elm%100 == 0 and self.is_global_zero:
-                        print(f"  Reading ELM event {i_elm:04d}/{n_indices:04d}")
+                        print(f"  Reading ELM event {i_elm:04d}/{len(indices):04d}")
                     elm_event: h5py.Group = elms[f"{elm_index:06d}"]
+                    assert elm_event["bes_signals"].shape[0] == 64
+                    assert elm_event['bes_time'].size == elm_event["bes_signals"].shape[1]
+                    time = np.array(elm_event['bes_time'], dtype=np.float32)
+                    t_start: float = elm_event.attrs['t_start']
+                    i_start: int = np.flatnonzero(time >= t_start)[0]
+                    t_stop: float = elm_event.attrs['t_stop'] - 0.05
+                    i_stop: int = np.flatnonzero(time <= t_stop)[-1]
+                    # i_t0_and_time_to_elm: dict[int, float] = {}
+                    i_window_stop = i_stop
                     signals = np.array(elm_event["bes_signals"], dtype=np.float32)  # (64, <time>)
                     signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (time, pol, rad)
-                    time = np.array(elm_event['bes_time'], dtype=np.float32)
-                    assert time.size == signals.shape[0]
-                    t_start: float = elm_event.attrs['t_start']
-                    t_stop: float = elm_event.attrs['t_stop'] - 0.05
-                    t_mask = (time >= t_start) & (time <= t_stop)
-                    signals = signals[t_mask, ...]
-                    time_to_elm = (time[t_mask] - time[t_mask][-1]) * -1
-                    valid_t0 = np.zeros(time_to_elm.size, dtype=int)
-                    s_end = len(time_to_elm)
                     while True:
-                        s_start = s_end - self.signal_window_size
-                        if s_start < 0: break
-                        valid_t0[s_start] = 1
-                        s_end -= self.signal_window_size // self.stride_factor
-                    assert signals.shape[0] == time_to_elm.size
-                    assert time_to_elm.size == valid_t0.size
-                    elm_data.append({
-                        'signals': signals,
-                        'time_to_elm': time_to_elm,
-                        'valid_t0': valid_t0,
-                        'elm_index': elm_index,
-                        'shot': elm_event.attrs['shot'],
-                        'time_t0': time[t_mask][0],
-                    })
+                        i_window_start = i_window_stop - self.signal_window_size
+                        if i_window_start < i_start: break
+                        if self.outlier_value:
+                            signal_window = signals[i_window_start:i_window_stop, ...]
+                            assert signal_window.shape[0] == self.signal_window_size
+                            if np.abs(signal_window).max() > self.outlier_value:
+                                i_window_stop -= self.signal_window_size // self.stride_factor
+                                outliers += 1
+                                continue
+                        elm_data.append({
+                            'elm_index': elm_index,
+                            'i_t0': i_window_start,
+                            'time_to_elm': time[i_stop] - time[i_window_stop]
+                        })
+                        # i_t0_and_time_to_elm[i_window_start] = time[i_stop] - time[i_window_stop]
+                        i_window_stop -= self.signal_window_size // self.stride_factor
+                    # elm_data[elm_index] = {
+                    #     # 'shot': elm_event.attrs['shot'],
+                    #     'i_t0_and_time_to_elm': i_t0_and_time_to_elm,
+                    #     # 'pre_elm_tstart': time[i_start],
+                    #     # 'pre_elm_tstop': time[i_stop],
+                    # }
             
-            concat_signals = np.concatenate(
-                [elm['signals'] for elm in elm_data],
-                axis=0,
-            )
-            concat_time_to_elm = np.concatenate(
-                [elm['time_to_elm'] for elm in elm_data],
-            )
-            concat_valid_t0 = np.concatenate(
-                [elm['valid_t0'] for elm in elm_data],
-            )
-
-            t0_and_time_to_elm_labels = {
-                i_t0: concat_time_to_elm[i_t0 + self.signal_window_size - 1]
-                for i_t0, is_valid_t0 in enumerate(concat_valid_t0) if is_valid_t0
-            }
-
+            # n_signal_windows = np.sum([len(e['i_t0_and_time_to_elm']) for e in elm_data.values()])
+            n_signal_windows = len(elm_data)
             if self.is_global_zero: 
-                print(f"  Initial signal window count: {len(t0_and_time_to_elm_labels):,d}")
-
-            # remove signal windows with outliers
-            if self.outlier_value:
-                outlier_count = 0
-                for i_t0 in list(t0_and_time_to_elm_labels.keys()):
-                    signal_window = concat_signals[..., i_t0 : i_t0 + self.signal_window_size, :, :]
-                    if np.abs(signal_window).max() > self.outlier_value:
-                        del t0_and_time_to_elm_labels[i_t0]
-                        outlier_count += 1
-                if self.is_global_zero: 
-                    print(f"  Outlier signal windows removed: {outlier_count:,d}")
-            
-            # Window and batch counts
-            window_count = len(t0_and_time_to_elm_labels)
-            batches_per_step = window_count / (self.batch_size_per_rank * self.trainer.world_size)
-            if self.is_global_zero: 
-                print(f"  Signal window count: {window_count:,d}")
+                print(f"  Signal windows: {n_signal_windows:,d}  ({outliers:,d} outliers removed)")
+                print(f"  Batch size (per rank) {self.batch_size_per_rank:d}")
+                print(f"  Global steps {n_signal_windows/self.trainer.world_size/self.batch_size_per_rank:,.1f}")
 
             # Raw signal stats
-            raw_stats = self._get_statistics(
-                signals=concat_signals,
-                sample_indices=np.array(list(t0_and_time_to_elm_labels.keys()), dtype=int),
-            )
-            if self.is_global_zero: 
-                print(f"  Raw signals min {raw_stats['min']:.2f} max {raw_stats['max']:.2f} mean {raw_stats['mean']:.2f} stdev {raw_stats['stdev']:.2f} exkurt {raw_stats['exkurt']:.2f}")
+            self._get_statistics(elm_data=elm_data)
+            assert self.raw_signal_mean and self.raw_signal_stdev and self.time_to_elm_quantiles
             if st == 'train':
-                self.raw_signal_mean = raw_stats['mean']
-                self.raw_signal_stdev = raw_stats['stdev']
                 self.save_hyperparameters({
                     'raw_signal_mean': self.raw_signal_mean,
                     'raw_signal_stdev': self.raw_signal_stdev,
+                    'time_to_elm_quantiles': self.time_to_elm_quantiles,
                 })
-            else:
-                assert self.raw_signal_mean and self.raw_signal_stdev
-
-            # normalize signals
-            concat_signals = (concat_signals-self.raw_signal_mean) / self.raw_signal_stdev
-            norm_stats = self._get_statistics(
-                signals=concat_signals,
-                sample_indices=np.array(list(t0_and_time_to_elm_labels.keys()), dtype=int),
-            )
-            if self.is_global_zero: 
-                print(f"  Normalized signals min {norm_stats['min']:.2f} max {norm_stats['max']:.2f} mean {norm_stats['mean']:.2f} stdev {norm_stats['stdev']:.2f} exkurt {norm_stats['exkurt']:.2f}")
 
             # create datasets
             if st in ['train', 'validation', 'test']:
                 self.datasets[st] = ELM_TrainValTest_Dataset(
-                    signals=concat_signals,
-                    t0_and_time_to_elm_labels=t0_and_time_to_elm_labels,
+                    # signals=concat_signals,
+                    # t0_and_time_to_elm_labels=t0_and_time_to_elm_labels,
                     signal_window_size=self.signal_window_size,
                     quantile_min=self.quantile_min,
                     quantile_max=self.quantile_max,
                     contrastive_learning=self.contrastive_learing,
-                    is_global_zero=self.is_global_zero,
                     time_to_elm_quantiles=self.time_to_elm_quantiles,
+                    is_global_zero=self.is_global_zero,
+                    rank=self.trainer.global_rank,
                 )
-                window_count = len(self.datasets[st])
-                batches_per_step = len(self.datasets[st]) / (self.batch_size_per_rank * self.trainer.world_size)
-                if self.is_global_zero:
-                    print(f"  Signal window count: {window_count:,d}  Batches/step: {batches_per_step:,.1f}")
-                if st == 'train':
-                    self.time_to_elm_quantiles = self.datasets[st].time_to_elm_quantiles
-                    self.save_hyperparameters({
-                        'time_to_elm_quantiles': self.time_to_elm_quantiles,
-                    })
             
             if st in ['test', 'predict']:
                 pass
@@ -640,37 +595,48 @@ class Data(_Base_Class, LightningDataModule):
 
     def _get_statistics(
             self, 
-            signals: np.ndarray,
-            sample_indices: np.ndarray, 
+            elm_data: list[dict],
+            stage: str,
     ) -> dict:
         signal_min = np.array(np.inf)
         signal_max = np.array(-np.inf)
         n_bins = 200
         cummulative_hist = np.zeros(n_bins, dtype=int)
-        stat_samples = int(100e3)
-        stat_interval = np.max([1, sample_indices.size//stat_samples])
-        for i in sample_indices[::stat_interval]:
-            signal_window = signals[i: i + self.signal_window_size, :, :]
-            signal_min = np.min([signal_min, signal_window.min()])
-            signal_max = np.max([signal_max, signal_window.max()])
-            hist, bin_edges = np.histogram(
-                signal_window,
-                bins=n_bins,
-                range=(-10.4, 10.4),
-            )
-            cummulative_hist += hist
+        stat_interval = np.max([self.stride_factor, len(elm_data)//int(50e3)])
+        last_elm_index = -1
+        with h5py.File(self.data_file) as root:
+            for elm_dict in elm_data[::stat_interval]:
+                elm_index = elm_dict['elm_index']
+                if elm_index != last_elm_index:
+                    elm_event = root['elms'][f'{elm_index:06d}']
+                    signals = np.array(elm_event["bes_signals"], dtype=np.float32)  # (64, <time>)
+                    signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (time, pol, rad)
+                last_elm_index = elm_index
+                i_t0 = elm_dict['i_t0']
+                signal_window = signals[i_t0: i_t0 + self.signal_window_size, :, :]
+                assert signal_window.shape[0] == self.signal_window_size
+                signal_min = np.min([signal_min, signal_window.min()])
+                signal_max = np.max([signal_max, signal_window.max()])
+                hist, bin_edges = np.histogram(
+                    signal_window,
+                    bins=n_bins,
+                    range=(-10.4, 10.4),
+                )
+                cummulative_hist += hist
         bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
         mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
         stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
         exkurt = np.sum(cummulative_hist * ((bin_center - mean)/stdev) ** 4) / np.sum(cummulative_hist) - 3
-        return {
-            'count': sample_indices.size,
-            'min': signal_min.item(),
-            'max': signal_max.item(),
-            'mean': mean.item(),
-            'stdev': stdev.item(),
-            'exkurt': exkurt.item(),
-        }
+        if self.is_global_zero: 
+            print(f"  Raw signals min {signal_min:.2f} max {signal_max:.2f} mean {mean:.2f} stdev {stdev:.2f} exkurt {exkurt:.2f}")
+        # time-to-ELM quantiles
+        time_to_elm_list = [e['time_to_elm'] for e in elm_data]
+        quantiles = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
+        quantile_values = np.quantile(time_to_elm_list, quantiles)
+        if stage == 'train':
+            self.raw_signal_mean = mean.item()
+            self.raw_signal_stdev = stdev.item()
+            self.time_to_elm_quantiles = {q: qval.item() for q, qval in zip(quantiles, quantile_values)}
 
     def get_state_dict(self) -> dict:
         state_dict = {
