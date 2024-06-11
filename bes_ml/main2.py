@@ -432,7 +432,6 @@ class Data(_Base_Class, LightningDataModule):
     quantile_min: float|Any = None
     quantile_max: float|Any = None
     contrastive_learing: bool = False
-    # is_distributed: bool = False
 
     def __post_init__(self):
         super().__post_init__()
@@ -442,8 +441,11 @@ class Data(_Base_Class, LightningDataModule):
         assert self.data_file.exists()
 
         self.datasets: dict[str, ELM_TrainValTest_Dataset] = {}
-        self.elm_indices: dict[str,tuple] = {cat: () for cat in ['all','train','validation','test']}
-        self.time_to_elm_quantiles: dict[float, float] = {}
+        self.shot_split: dict[str,tuple] = {}
+        self.shot_split_by_rank: dict[str,tuple] = {}
+        self.elm_split: dict[str,tuple] = {}
+        self.elm_split_by_rank: dict[str,tuple] = {}
+        self.time_to_elm_quantiles: dict[float,float] = {}
 
         self.trainer: Trainer|Any = None
         self.raw_signal_mean: float|Any = None
@@ -456,7 +458,8 @@ class Data(_Base_Class, LightningDataModule):
         self.state_items = [
             'raw_signal_mean',
             'raw_signal_stdev',
-            'elm_indices',
+            'shot_split',
+            'elm_split',
             'time_to_elm_quantiles',
         ]
         for item in self.state_items:
@@ -471,15 +474,21 @@ class Data(_Base_Class, LightningDataModule):
             assert self.trainer.global_rank == 0
             print(f"Batch size per rank: {self.batch_size_per_rank}")
 
-        if not self.elm_indices['all']:
+        if 'train' not in self.elm_split or not self.elm_split['train']:
             self._get_elm_indices_and_split()
+
+        # if st == 'train':
+        #     self.save_hyperparameters({
+        #         'shot_split': self.shot_split,
+        #         'elm_index_split': self.elm_index_split,
+        #     })
 
         stages = ['train', 'validation'] if stage == 'fit' else [stage]
         for st in stages:
             assert st in ['train', 'validation','test','predict']
             if st in self.datasets and isinstance(self.datasets[st], torch.utils.data.Dataset):
                 continue
-            indices = self.elm_indices[st]
+            indices = self.elm_split[st]
             assert indices is not None
             if self.is_global_zero: 
                 print(f"Reading {len(indices)} ELMs for stage {st}")
@@ -498,7 +507,6 @@ class Data(_Base_Class, LightningDataModule):
                     i_start: int = np.flatnonzero(time >= t_start)[0]
                     t_stop: float = elm_event.attrs['t_stop'] - 0.05
                     i_stop: int = np.flatnonzero(time <= t_stop)[-1]
-                    # i_t0_and_time_to_elm: dict[int, float] = {}
                     i_window_stop = i_stop
                     signals = np.array(elm_event["bes_signals"], dtype=np.float32)  # (64, <time>)
                     signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (time, pol, rad)
@@ -519,12 +527,6 @@ class Data(_Base_Class, LightningDataModule):
                         })
                         # i_t0_and_time_to_elm[i_window_start] = time[i_stop] - time[i_window_stop]
                         i_window_stop -= self.signal_window_size // self.stride_factor
-                    # elm_data[elm_index] = {
-                    #     # 'shot': elm_event.attrs['shot'],
-                    #     'i_t0_and_time_to_elm': i_t0_and_time_to_elm,
-                    #     # 'pre_elm_tstart': time[i_start],
-                    #     # 'pre_elm_tstop': time[i_stop],
-                    # }
             
             # n_signal_windows = np.sum([len(e['i_t0_and_time_to_elm']) for e in elm_data.values()])
             n_signal_windows = len(elm_data)
@@ -562,36 +564,55 @@ class Data(_Base_Class, LightningDataModule):
 
     def _get_elm_indices_and_split(self):
         with h5py.File(self.data_file, 'r') as root:
-            shots = [int(shot_key) for shot_key in root['shots']]
+            shots = sorted([int(shot_key) for shot_key in root['shots']])
             assert len(shots) == len(set(shots))
             shots = set(shots)
+            # elms_with_shots = {int(elm_key): elm_group.attrs['shot'] for elm_key, elm_group in root['elms'].items()}
             shots_from_elms = set([int(elm_group.attrs['shot']) for elm_group in root['elms'].values()])
             assert len(shots ^ shots_from_elms) == 0
             elms = [int(elm_key) for elm_key in root['elms']]
+            # shuffle shots in dataset
+            print(f"Shuffling sorted shots with seed={self.seed} (rank {self.trainer.global_rank})")
+            shots = np.array(list(shots), dtype=int)
+            np.random.default_rng(self.seed).shuffle(shots)
+            # split shots
+            n_test_shots = int(self.fraction_test * shots.size)
+            n_validation_shots = int(self.fraction_validation * shots.size)
+            self.shot_split['test'], self.shot_split['validation'], self.shot_split['train'] = \
+                np.split(shots, [n_test_shots, n_test_shots+n_validation_shots])
+            for stage in ['train', 'validation', 'test']:
+                print(f" Stage {stage} with {self.shot_split[stage].size} shots ({self.shot_split[stage].size/shots.size*1e2:.1f}%)")
+                self.shot_split_by_rank[stage] = np.array_split(self.shot_split[stage], self.trainer.world_size)
+                assert len(self.shot_split_by_rank[stage]) == self.trainer.world_size
+                self.elm_split[stage] = [int(key) for key, value in root['elms'].items() if value.attrs['shot'] in self.shot_split[stage]]
+                self.elm_split_by_rank[stage] = [
+                    [int(key) for key, value in root['elms'].items() if value.attrs['shot'] in shot_list] 
+                    for shot_list in self.shot_split_by_rank[stage]
+                ]
+                assert len(self.elm_split_by_rank[stage]) == self.trainer.world_size
         # shuffle ELM indices
         if self.is_global_zero: 
-            print(f"Total ELMs in dataset: {len(elms)}")
             print(f"Total shots in dataset: {len(shots)}")
+            print(f"Total ELMs in dataset: {len(elms)}")
         print(f"Shuffling ELMs with seed={self.seed} (rank {self.trainer.global_rank})")
         np.random.default_rng(self.seed).shuffle(elms)
         # limit number of ELM events
         if self.max_elms:
-            elms = elms[:self.max_elms]
+            elms = tuple(elms[:self.max_elms])
         # split ELM indicies
-        self.elm_indices['all'] = tuple(elms)
-        n_elms = len(self.elm_indices['all'])
+        n_elms = len(elms)
         n_test_elms = int(self.fraction_test * n_elms)
         n_validation_elms = int(self.fraction_validation * n_elms)
-        self.elm_indices['test'] = tuple(self.elm_indices['all'][:n_test_elms])
-        train_val_elm_indices = self.elm_indices['all'][n_test_elms:]
-        self.elm_indices['validation'] = train_val_elm_indices[:n_validation_elms]
-        self.elm_indices['train'] = train_val_elm_indices[n_validation_elms:]
-        if self.is_global_zero: print("ELMs for analysis")
-        for stage, elm_indices in self.elm_indices.items():
-            tmp = f"  {stage.capitalize()} ELMs: {len(elm_indices)}"
-            if stage != 'all':
-                tmp += f" ({len(elm_indices)/len(self.elm_indices['all'])*1e2:.1f}%)"
-            if self.is_global_zero: print(tmp)
+        self.elm_split['test'] = elms[:n_test_elms]
+        train_val_elm_indices = elms[n_test_elms:]
+        self.elm_split['validation'] = train_val_elm_indices[:n_validation_elms]
+        self.elm_split['train'] = train_val_elm_indices[n_validation_elms:]
+        if self.is_global_zero: 
+            print("ELMs for analysis")
+        for stage, elm_indices in self.elm_split.items():
+            if self.is_global_zero: 
+                print(f"  {stage} ELMs: {len(elm_indices)}  ({len(elm_indices)/len(elms)*1e2:.1f}%)")
+        self.elm_indices_by_rank = {}
 
     def _get_statistics(
             self, 
