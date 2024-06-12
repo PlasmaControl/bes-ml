@@ -353,11 +353,12 @@ class Model(LightningModule, _Base_Class):
 
 @dataclasses.dataclass(eq=False)
 class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
-    signal_windows: dict|Any = None # global signal window data mapping to dataset index
+    global_signal_window_list: list|Any = None # global signal window data mapping to dataset index
+    global_elm_to_shot_mapping: dict|Any = None
     signal_window_size: int = 0
-    elm_split_for_rank: Iterable = () # rank-wise ELM indices
-    shot_split_for_rank: Iterable = () # rank-wise shots
-    signals_for_rank: dict|Any = None # rank-wise signals (map to ELM indices)
+    elm_list_for_rank: Iterable = () # rank-wise ELM indices
+    shot_list_for_rank: Iterable = () # rank-wise shots
+    signal_mapping_for_rank: dict|Any = None # rank-wise signals (map to ELM indices)
     quantile_min: float|Any = None
     quantile_max: float|Any = None
     contrastive_learning: bool = False
@@ -366,21 +367,12 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
     def __post_init__(self):
         super().__post_init__()
         super(_Base_Class, self).__init__()
+        shots_from_elms = set([self.global_elm_to_shot_mapping[i] for i in self.elm_list_for_rank])
+        assert len(set(self.shot_list_for_rank) ^ shots_from_elms) == 0
+        assert len(self.signal_mapping_for_rank) == len(self.shot_list_for_rank)
+
         # self.t0_indices = list(self.t0_and_time_to_elm_labels.keys())
         # self.time_to_elm_labels = list(self.t0_and_time_to_elm_labels.values())
-        # if self.time_to_elm_quantiles:
-        #     if self.is_global_zero:
-        #         print("  Using input time-to-ELM quantiles")
-        # else:
-        #     if self.is_global_zero:
-        #         print("  Calculating time-to-ELM quantiles")
-        #     quantiles = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
-        #     quantile_values = np.quantile(self.time_to_elm_labels, quantiles)
-        #     self.time_to_elm_quantiles = {q: qval.item() for q, qval in zip(quantiles, quantile_values)}
-        # if self.is_global_zero: 
-        #     print(f"  Time-to-ELM quantiles for binary labels:")
-        #     for q, qval in self.time_to_elm_quantiles.items():
-        #         print(f"    Quantile {q:.2f}: {qval:.1f} ms")
 
         # restrict quantile range
         if self.quantile_min is not None and self.quantile_max is not None:
@@ -485,10 +477,11 @@ class Data(_Base_Class, LightningDataModule):
             if st in self.datasets and isinstance(self.datasets[st], torch.utils.data.Dataset):
                 continue
             indices = self.elm_split[st]
-            assert indices is not None
+            assert indices
             if self.is_global_zero: 
                 print(f"Reading {len(indices)} ELMs for stage {st}")
-            signal_windows = []
+            global_signal_window_list = []
+            global_elm_to_shot_mapping = {}
             outliers = 0
             with h5py.File(self.data_file, 'r') as h5_file:
                 elms: h5py.Group = h5_file['elms']
@@ -499,6 +492,7 @@ class Data(_Base_Class, LightningDataModule):
                     shot = int(elm_event.attrs['shot'])
                     assert elm_event["bes_signals"].shape[0] == 64
                     assert elm_event['bes_time'].size == elm_event["bes_signals"].shape[1]
+                    global_elm_to_shot_mapping[elm_index] = shot
                     time = np.array(elm_event['bes_time'], dtype=np.float32)
                     t_start: float = elm_event.attrs['t_start']
                     i_start: int = np.flatnonzero(time >= t_start)[0]
@@ -517,27 +511,39 @@ class Data(_Base_Class, LightningDataModule):
                                 i_window_stop -= self.signal_window_size // self.stride_factor
                                 outliers += 1
                                 continue
-                        signal_windows.append({
+                        global_signal_window_list.append({
                             'elm_index': elm_index,
                             'shot': shot,
                             'i_t0': i_window_start,
                             'time_to_elm': time[i_stop] - time[i_window_stop]
                         })
                         i_window_stop -= self.signal_window_size // self.stride_factor
-            
-            n_signal_windows = len(signal_windows)
+
+            n_signal_windows = len(global_signal_window_list)
             if self.is_global_zero: 
                 print(f"  Signal windows: {n_signal_windows:,d}  ({outliers:,d} outliers removed)")
                 print(f"  Steps per epoch {n_signal_windows/self.batch_size:,.1f}")
 
+            if st == 'train':
+                if self.is_global_zero:
+                    print("  Calculating time-to-ELM quantiles")
+                quantiles = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
+                time_to_elm_labels = [sig_win['time_to_elm'] for sig_win in global_signal_window_list]
+                quantile_values = np.quantile(time_to_elm_labels, quantiles)
+                self.time_to_elm_quantiles = {q: qval.item() for q, qval in zip(quantiles, quantile_values)}
+                self.save_hyperparameters({'time_to_elm_quantiles': self.time_to_elm_quantiles})
+                if self.is_global_zero: 
+                    print(f"  Time-to-ELM quantiles for binary labels:")
+                    for q, qval in self.time_to_elm_quantiles.items():
+                        print(f"    Quantile {q:.2f}: {qval:.1f} ms")
+
             # Raw signal stats
-            self._get_statistics(signal_windows=signal_windows, stage=st)
+            self._get_statistics(signal_windows=global_signal_window_list, stage=st)
             assert self.raw_signal_mean and self.raw_signal_stdev and self.time_to_elm_quantiles
             if st == 'train':
                 self.save_hyperparameters({
                     'raw_signal_mean': self.raw_signal_mean,
                     'raw_signal_stdev': self.raw_signal_stdev,
-                    'time_to_elm_quantiles': self.time_to_elm_quantiles,
                 })
 
             # get rank-wise shot signals
@@ -554,12 +560,12 @@ class Data(_Base_Class, LightningDataModule):
             # rank-wise datasets
             if st in ['train', 'validation', 'test']:
                 self.datasets[st] = ELM_TrainValTest_Dataset(
-                    signal_windows=signal_windows,
+                    global_signal_window_list=global_signal_window_list,
+                    global_elm_to_shot_mapping=global_elm_to_shot_mapping,
                     signal_window_size=self.signal_window_size,
-                    elm_split_for_rank=self.elm_split_by_rank[st][self.trainer.global_rank],
-                    shot_split_for_rank=self.shot_split_by_rank[st][self.trainer.global_rank],
-                    signals_for_rank=signals_for_rank,
-                    # rank=self.trainer.global_rank,
+                    elm_list_for_rank=self.elm_split_by_rank[st][self.trainer.global_rank],
+                    shot_list_for_rank=self.shot_split_by_rank[st][self.trainer.global_rank],
+                    signal_mapping_for_rank=signals_for_rank,
                     quantile_min=self.quantile_min,
                     quantile_max=self.quantile_max,
                     contrastive_learning=self.contrastive_learing,
