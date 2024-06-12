@@ -421,7 +421,7 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
 class Data(_Base_Class, LightningDataModule):
     data_file: str|Path|Any = None
     max_elms: int|Any = None
-    batch_size_per_rank: int = 128
+    batch_size: int = 128
     stride_factor: int = 8
     num_workers: int = 0
     outlier_value: float = 6
@@ -442,7 +442,6 @@ class Data(_Base_Class, LightningDataModule):
 
         self.datasets: dict[str, ELM_TrainValTest_Dataset] = {}
         self.shot_split: dict[str,tuple] = {}
-        self.shot_split_by_rank: dict[str,tuple] = {}
         self.elm_split: dict[str,tuple] = {}
         self.elm_split_by_rank: dict[str,tuple] = {}
         self.time_to_elm_quantiles: dict[float,float] = {}
@@ -465,6 +464,10 @@ class Data(_Base_Class, LightningDataModule):
         for item in self.state_items:
             assert hasattr(self, item)
 
+    def prepare_data(self):
+        assert self.batch_size % self.trainer.world_size == 0
+        self.batch_size_per_rank = self.batch_size//self.trainer.world_size
+
     def setup(self, stage: str):
         assert stage in ['fit', 'test', 'predict']
 
@@ -472,7 +475,7 @@ class Data(_Base_Class, LightningDataModule):
         assert self.is_global_zero == self.trainer.is_global_zero
         if self.is_global_zero: 
             assert self.trainer.global_rank == 0
-            print(f"Batch size per rank: {self.batch_size_per_rank}")
+            print(f"Batch size: {self.batch_size} ({self.batch_size_per_rank} per rank)")
 
         if 'train' not in self.elm_split or not self.elm_split['train']:
             self._get_elm_indices_and_split()
@@ -532,11 +535,11 @@ class Data(_Base_Class, LightningDataModule):
             n_signal_windows = len(elm_data)
             if self.is_global_zero: 
                 print(f"  Signal windows: {n_signal_windows:,d}  ({outliers:,d} outliers removed)")
-                print(f"  Batch size (per rank) {self.batch_size_per_rank:d}")
-                print(f"  Global steps {n_signal_windows/self.trainer.world_size/self.batch_size_per_rank:,.1f}")
+                # print(f"  Batch size {self.batch_size:d}")
+                print(f"  Steps per epoch {n_signal_windows/self.batch_size:,.1f}")
 
             # Raw signal stats
-            self._get_statistics(elm_data=elm_data)
+            self._get_statistics(elm_data=elm_data, stage=st)
             assert self.raw_signal_mean and self.raw_signal_stdev and self.time_to_elm_quantiles
             if st == 'train':
                 self.save_hyperparameters({
@@ -563,6 +566,7 @@ class Data(_Base_Class, LightningDataModule):
                 pass
 
     def _get_elm_indices_and_split(self):
+        rng = np.random.default_rng(self.seed)
         with h5py.File(self.data_file, 'r') as root:
             shots = sorted([int(shot_key) for shot_key in root['shots']])
             assert len(shots) == len(set(shots))
@@ -571,48 +575,53 @@ class Data(_Base_Class, LightningDataModule):
             shots_from_elms = set([int(elm_group.attrs['shot']) for elm_group in root['elms'].values()])
             assert len(shots ^ shots_from_elms) == 0
             elms = [int(elm_key) for elm_key in root['elms']]
+            # shuffle ELM indices
+            if self.is_global_zero: 
+                print(f"Total ELMs in dataset: {len(elms)}")
+                print(f"Total shots in dataset: {len(shots)}")
+            # limit max ELMs
+            if self.max_elms and len(elms) > self.max_elms:
+                elms = elms[:self.max_elms]
+                shots = set([int(root['elms'][f"{elm_index:06d}"].attrs['shot']) for elm_index in elms])
+                if self.is_global_zero:
+                    print(f"ELMs in use: {len(elms)}")
+                    print(f"Shots in use: {len(shots)}")
             # shuffle shots in dataset
             print(f"Shuffling sorted shots with seed={self.seed} (rank {self.trainer.global_rank})")
             shots = np.array(list(shots), dtype=int)
-            np.random.default_rng(self.seed).shuffle(shots)
+            rng.shuffle(shots)
             # split shots
             n_test_shots = int(self.fraction_test * shots.size)
             n_validation_shots = int(self.fraction_validation * shots.size)
             self.shot_split['test'], self.shot_split['validation'], self.shot_split['train'] = \
                 np.split(shots, [n_test_shots, n_test_shots+n_validation_shots])
+            shot_split_by_rank = {}
             for stage in ['train', 'validation', 'test']:
                 print(f" Stage {stage} with {self.shot_split[stage].size} shots ({self.shot_split[stage].size/shots.size*1e2:.1f}%)")
-                self.shot_split_by_rank[stage] = np.array_split(self.shot_split[stage], self.trainer.world_size)
-                assert len(self.shot_split_by_rank[stage]) == self.trainer.world_size
-                self.elm_split[stage] = [int(key) for key, value in root['elms'].items() if value.attrs['shot'] in self.shot_split[stage]]
+                shot_split_by_rank[stage] = np.array_split(self.shot_split[stage], self.trainer.world_size)
+                assert len(shot_split_by_rank[stage]) == self.trainer.world_size
                 self.elm_split_by_rank[stage] = [
-                    [int(key) for key, value in root['elms'].items() if value.attrs['shot'] in shot_list] 
-                    for shot_list in self.shot_split_by_rank[stage]
+                    [int(key) for key, value in root['elms'].items() if value.attrs['shot'] in rank_shot_list]
+                    for rank_shot_list in shot_split_by_rank[stage]
                 ]
                 assert len(self.elm_split_by_rank[stage]) == self.trainer.world_size
-        # shuffle ELM indices
-        if self.is_global_zero: 
-            print(f"Total shots in dataset: {len(shots)}")
-            print(f"Total ELMs in dataset: {len(elms)}")
-        print(f"Shuffling ELMs with seed={self.seed} (rank {self.trainer.global_rank})")
-        np.random.default_rng(self.seed).shuffle(elms)
-        # limit number of ELM events
-        if self.max_elms:
-            elms = tuple(elms[:self.max_elms])
-        # split ELM indicies
-        n_elms = len(elms)
-        n_test_elms = int(self.fraction_test * n_elms)
-        n_validation_elms = int(self.fraction_validation * n_elms)
-        self.elm_split['test'] = elms[:n_test_elms]
-        train_val_elm_indices = elms[n_test_elms:]
-        self.elm_split['validation'] = train_val_elm_indices[:n_validation_elms]
-        self.elm_split['train'] = train_val_elm_indices[n_validation_elms:]
+                self.elm_split[stage] = list(set().union(*self.elm_split_by_rank[stage]))
+                for i_rank in range(len(self.elm_split_by_rank[stage])):
+                    rng.shuffle(self.elm_split_by_rank[stage][i_rank])
+        # # split ELM indicies
+        # n_elms = len(elms)
+        # n_test_elms = int(self.fraction_test * n_elms)
+        # n_validation_elms = int(self.fraction_validation * n_elms)
+        # self.elm_split['test'] = elms[:n_test_elms]
+        # train_val_elm_indices = elms[n_test_elms:]
+        # self.elm_split['validation'] = train_val_elm_indices[:n_validation_elms]
+        # self.elm_split['train'] = train_val_elm_indices[n_validation_elms:]
         if self.is_global_zero: 
             print("ELMs for analysis")
         for stage, elm_indices in self.elm_split.items():
             if self.is_global_zero: 
                 print(f"  {stage} ELMs: {len(elm_indices)}  ({len(elm_indices)/len(elms)*1e2:.1f}%)")
-        self.elm_indices_by_rank = {}
+        # self.elm_indices_by_rank = {}
 
     def _get_statistics(
             self, 
@@ -701,7 +710,7 @@ class Data(_Base_Class, LightningDataModule):
         return torch.utils.data.DataLoader(
             dataset=self.datasets[stage],
             sampler=sampler,
-            batch_size=self.batch_size_per_rank,
+            batch_size=self.batch_size_per_rank,  # batch size per rank
             num_workers=self.num_workers,
             shuffle=None if is_distributed else shuffle,
             # prefetch_factor=2 if self.num_workers else None,
@@ -727,7 +736,7 @@ def main(
         # trainer
         max_epochs = 2,
         gradient_clip_val = 500,
-        batch_size_per_rank = 64,
+        batch_size = 64,
         # data
         max_elms = 100,
         fraction_validation = 0.1,
@@ -844,7 +853,7 @@ def main(
         signal_window_size=signal_window_size,
         data_file=data_file,
         max_elms=max_elms,
-        batch_size_per_rank=batch_size_per_rank,
+        batch_size=batch_size,
         fraction_test=fraction_test,
         fraction_validation=fraction_validation,
         num_workers=num_workers,
@@ -866,5 +875,4 @@ if __name__=='__main__':
     main(
         # data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
         data_file='/Users/drsmith/Documents/repos/bes-ml/bes_ml/small_elm_data.hdf5',
-        max_elms=50,
     )
