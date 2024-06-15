@@ -372,7 +372,7 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
         assert len(self.signal_mapping_for_rank) == len(self.elm_list_for_rank)
         for elm_index in self.signal_mapping_for_rank:
             self.signal_mapping_for_rank[elm_index] = torch.from_numpy(
-                self.signal_mapping_for_rank[elm_index][np.newaxis, ...]
+                self.signal_mapping_for_rank[elm_index]
             )
 
         # restrict quantile range
@@ -562,7 +562,7 @@ class Data(_Base_Class, LightningDataModule):
                 for elm_index in elm_list_for_rank:
                     elm_group = root['elms'][f"{elm_index:06d}"]
                     signals = np.array(elm_group["bes_signals"], dtype=np.float32)  # (64, <time>)
-                    signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (time, pol, rad)
+                    signals = np.transpose(signals).reshape(1, -1, 8, 8)  # reshape to (time, pol, rad)
                     # normalized signals
                     signals_for_rank[elm_index] = (signals - self.raw_signal_mean) / self.raw_signal_stdev
 
@@ -711,20 +711,28 @@ class Data(_Base_Class, LightningDataModule):
         pass
 
     def _train_val_test_dataloaders(self, stage: str) -> torch.utils.data.DataLoader:
-        is_distributed = self.trainer.world_size > 1
-        shuffle = True if stage=='train' else False
-        sampler = torch.utils.data.DistributedSampler(
-            dataset=self.datasets[stage],
-            shuffle=shuffle,
-        ) if is_distributed else None
-        # sampler = torch.utils.data.RandomSampler()
+        # is_distributed = self.trainer.world_size > 1
+        # shuffle = True if stage=='train' else False
+        # sampler = torch.utils.data.DistributedSampler(
+        #     dataset=self.datasets[stage],
+        #     shuffle=shuffle,
+        # ) if is_distributed else None
+        if stage == 'train':
+            sampler = torch.utils.data.RandomSampler(
+                data_source=self.datasets[stage],
+            )
+        else:
+            sampler = torch.utils.data.SequentialSampler(
+                data_source=self.datasets[stage],
+            )
         # sampler = torch.utils.data.SubsetRandomSampler()
         return torch.utils.data.DataLoader(
             dataset=self.datasets[stage],
             sampler=sampler,
             batch_size=self.batch_size_per_rank,  # batch size per rank
             num_workers=self.num_workers,
-            shuffle=None if is_distributed else shuffle,
+            # shuffle=None if is_distributed else shuffle,
+            # shuffle=shuffle,
             # prefetch_factor=2 if self.num_workers else None,
             # persistent_workers=bool(self.num_workers),
             pin_memory=True,
