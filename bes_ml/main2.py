@@ -369,7 +369,11 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
         super(_Base_Class, self).__init__()
         shots_from_elms = set([self.elm_to_shot_mapping[i] for i in self.elm_list_for_rank])
         assert len(set(self.shot_list_for_rank) ^ shots_from_elms) == 0
-        assert len(self.signal_mapping_for_rank) == len(self.shot_list_for_rank)
+        assert len(self.signal_mapping_for_rank) == len(self.elm_list_for_rank)
+        for elm_index in self.signal_mapping_for_rank:
+            self.signal_mapping_for_rank[elm_index] = torch.from_numpy(
+                self.signal_mapping_for_rank[elm_index][np.newaxis, ...]
+            )
 
         # restrict quantile range
         if self.quantile_min is not None and self.quantile_max is not None:
@@ -395,12 +399,17 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
                 print(f"  Restricted data signal windows: {len(self):,d}")
 
     def __len__(self) -> int:
-        return len(self.t0_indices)
+        return len(self.signal_window_list)
     
     def __getitem__(self, i: int) -> tuple:
-        i_t0 = self.t0_indices[i]
-        time_to_elm = self.time_to_elm_labels[i]
-        signal_window = self.signals[:, i_t0 : i_t0 + self.signal_window_size, :, :]
+        signal_window_data = self.signal_window_list[i]
+        i_t0 = signal_window_data['i_t0']
+        time_to_elm = signal_window_data['time_to_elm']
+        elm_index = signal_window_data['elm_index']
+        assert signal_window_data['shot'] in self.shot_list_for_rank
+        assert elm_index in self.elm_list_for_rank
+        signals = self.signal_mapping_for_rank[elm_index]
+        signal_window = signals[..., i_t0 : i_t0 + self.signal_window_size, :, :]
         quantile_binary_label = {q: int(time_to_elm<=qval) for q, qval in self.time_to_elm_quantiles.items()}
         return signal_window, time_to_elm, quantile_binary_label
 
@@ -497,6 +506,8 @@ class Data(_Base_Class, LightningDataModule):
                     i_window_stop = i_stop
                     signals = np.array(elm_event["bes_signals"], dtype=np.float32)  # (64, <time>)
                     signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (time, pol, rad)
+                    assert signals.shape[0] == time.size
+                    assert (signals.shape[1] == 8) and (signals.shape[2] == 8)
                     while True:
                         i_window_start = i_window_stop - self.signal_window_size
                         if i_window_start < i_start: break
@@ -569,6 +580,7 @@ class Data(_Base_Class, LightningDataModule):
                     contrastive_learning=self.contrastive_learing,
                     time_to_elm_quantiles=self.time_to_elm_quantiles,
                 )
+                print(f"  Rank {self.trainer.global_rank}: {st} dataset size: {len(self.datasets[st]):,d}")
             
             if st in ['test', 'predict']:
                 pass
@@ -697,14 +709,6 @@ class Data(_Base_Class, LightningDataModule):
 
     def predict_dataloader(self) -> None:
         pass
-        # return [
-        #     torch.utils.data.DataLoader(
-        #         dataset=dataset,
-        #         batch_size=self.batch_size_per_rank,
-        #         num_workers=self.num_workers,
-        #         persistent_workers=True,
-        #     ) for dataset in self.datasets['predict']
-        # ]
 
     def _train_val_test_dataloaders(self, stage: str) -> torch.utils.data.DataLoader:
         is_distributed = self.trainer.world_size > 1
@@ -713,8 +717,8 @@ class Data(_Base_Class, LightningDataModule):
             dataset=self.datasets[stage],
             shuffle=shuffle,
         ) if is_distributed else None
-        sampler = torch.utils.data.RandomSampler()
-        sampler = torch.utils.data.SubsetRandomSampler()
+        # sampler = torch.utils.data.RandomSampler()
+        # sampler = torch.utils.data.SubsetRandomSampler()
         return torch.utils.data.DataLoader(
             dataset=self.datasets[stage],
             sampler=sampler,
