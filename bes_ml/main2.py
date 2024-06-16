@@ -280,9 +280,13 @@ class Model(LightningModule, _Base_Class):
         return results
 
     def training_step(self, batch, batch_idx) -> torch.Tensor:
+        if self.is_global_zero and self.global_step%50==0:
+            print(f"  Train step {self.global_step}")
         return self.update_step(batch, batch_idx, stage='train')
 
     def validation_step(self, batch, batch_idx) -> None:
+        # if self.is_global_zero and self.global_step%50==0:
+        #     print(f"  Val step {self.global_step}")
         self.update_step(batch, batch_idx, stage='val')
 
     def test_step(self, batch, batch_idx) -> None:
@@ -330,20 +334,33 @@ class Model(LightningModule, _Base_Class):
             print(f"Fit time: {delt/60:0.1f} min")
 
     def on_train_epoch_start(self):
+        if self.is_global_zero:
+            print(f"Train epoch {self.current_epoch} start (step {self.global_step})")
         self.t_train_epoch_start = time.time()
         self.s_train_epoch_start = self.global_step
 
     def on_train_epoch_end(self):
+        if self.is_global_zero:
+            print(f"Train epoch {self.current_epoch} end (step {self.global_step})")
         epoch_time = time.time() - self.t_train_epoch_start
         global_time = time.time() - self.t_fit_start
         epoch_steps = self.global_step-self.s_train_epoch_start
         if self.is_global_zero and self.global_step > 0:
             logged_metrics = self.trainer.logged_metrics
             line =  f"  Ep {self.current_epoch:03d}  "
-            line += f"train/val loss {logged_metrics['sum_loss/train']:.3f}/{logged_metrics['sum_loss/val']:.3f}  "
+            line += f"train/val loss {logged_metrics['sum_loss/train']:.3f}/"
+            line += f"{logged_metrics['sum_loss/val']:.3f}  "
             line += f"ep/gl steps {epoch_steps:,d}/{self.global_step:,d}  "
             line += f"ep/gl time (min): {epoch_time/60:.1f}/{global_time/60:.1f}  " 
             print(line)
+
+    def on_validation_epoch_start(self):
+        if self.is_global_zero:
+            print(f"Validation epoch {self.current_epoch} start (step {self.global_step})")
+
+    def on_validation_epoch_end(self):
+        if self.is_global_zero:
+            print(f"Validation epoch {self.current_epoch} end (step {self.global_step})")
 
     def setup(self, stage=None):  # fit, validate, test, or predict
         assert self.is_global_zero == self.trainer.is_global_zero
@@ -353,12 +370,12 @@ class Model(LightningModule, _Base_Class):
 
 @dataclasses.dataclass(eq=False)
 class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
-    signal_window_list: list|Any = None # global signal window data mapping to dataset index
-    elm_to_shot_mapping: dict|Any = None
+    global_sw_metadata: list|Any = None # global signal window data mapping to dataset index
+    global_elm_to_shot_mapping: dict|Any = None
     signal_window_size: int = 0
-    elm_list_for_rank: Iterable = () # rank-wise ELM indices
-    shot_list_for_rank: Iterable = () # rank-wise shots
-    signal_mapping_for_rank: dict|Any = None # rank-wise signals (map to ELM indices)
+    rank_elm_list: Sequence = () # rank-wise ELM indices
+    rank_shot_list: Sequence = () # rank-wise shots
+    rank_signals: dict|Any = None # rank-wise signals (map to ELM indices)
     quantile_min: float|Any = None
     quantile_max: float|Any = None
     contrastive_learning: bool = False
@@ -367,13 +384,24 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
     def __post_init__(self):
         super().__post_init__()
         super(_Base_Class, self).__init__()
-        shots_from_elms = set([self.elm_to_shot_mapping[i] for i in self.elm_list_for_rank])
-        assert len(set(self.shot_list_for_rank) ^ shots_from_elms) == 0
-        assert len(self.signal_mapping_for_rank) == len(self.elm_list_for_rank)
-        for elm_index in self.signal_mapping_for_rank:
-            self.signal_mapping_for_rank[elm_index] = torch.from_numpy(
-                self.signal_mapping_for_rank[elm_index]
+        shots_from_elms = set([self.global_elm_to_shot_mapping[i] for i in self.rank_elm_list])
+        assert len(set(self.rank_shot_list) ^ shots_from_elms) == 0
+        assert len(self.rank_signals) == len(self.rank_elm_list)
+        for elm_index in self.rank_signals:
+            self.rank_signals[elm_index] = torch.from_numpy(
+                self.rank_signals[elm_index]
             )
+        self.rank_sw_metadata = []
+        for meta in self.global_sw_metadata:
+            if meta['shot'] in self.rank_shot_list:
+                assert meta['elm_index'] in self.rank_elm_list
+            else:
+                continue
+            if meta['elm_index'] in self.rank_elm_list:
+                assert meta['shot'] in self.rank_shot_list
+            else:
+                continue
+            self.rank_sw_metadata.append(meta)
 
         # restrict quantile range
         if self.quantile_min is not None and self.quantile_max is not None:
@@ -399,16 +427,16 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
                 print(f"  Restricted data signal windows: {len(self):,d}")
 
     def __len__(self) -> int:
-        return len(self.signal_window_list)
+        return len(self.rank_sw_metadata)
     
     def __getitem__(self, i: int) -> tuple:
-        signal_window_data = self.signal_window_list[i]
-        i_t0 = signal_window_data['i_t0']
-        time_to_elm = signal_window_data['time_to_elm']
-        elm_index = signal_window_data['elm_index']
-        assert signal_window_data['shot'] in self.shot_list_for_rank
-        assert elm_index in self.elm_list_for_rank
-        signals = self.signal_mapping_for_rank[elm_index]
+        sw_metadata = self.rank_sw_metadata[i]
+        i_t0 = sw_metadata['i_t0']
+        time_to_elm = sw_metadata['time_to_elm']
+        elm_index = sw_metadata['elm_index']
+        assert sw_metadata['shot'] in self.rank_shot_list
+        assert elm_index in self.rank_elm_list
+        signals = self.rank_signals[elm_index]
         signal_window = signals[..., i_t0 : i_t0 + self.signal_window_size, :, :]
         quantile_binary_label = {q: int(time_to_elm<=qval) for q, qval in self.time_to_elm_quantiles.items()}
         return signal_window, time_to_elm, quantile_binary_label
@@ -422,8 +450,8 @@ class Data(_Base_Class, LightningDataModule):
     stride_factor: int = 8
     num_workers: int = 0
     outlier_value: float = 6
-    fraction_validation: float = 0.2
-    fraction_test: float = 0.2
+    fraction_validation: float = 0.12
+    fraction_test: float = 0.0
     use_random_data: bool = False
     seed: int = 0  # seed for ELM index shuffling; must be same across processes
     quantile_min: float|Any = None
@@ -438,10 +466,10 @@ class Data(_Base_Class, LightningDataModule):
         assert self.data_file.exists()
 
         self.datasets: dict = {}
-        self.shot_split: dict[str,Sequence] = {}
-        self.shot_split_by_rank: dict[str,Sequence] = {}
-        self.elm_split: dict[str,Sequence] = {}
-        self.elm_split_by_rank: dict[str,Sequence] = {}
+        self.global_shot_split: dict[str,np.ndarray] = {}
+        self.rankwise_shot_split: dict[str,Sequence] = {}
+        self.global_elm_split: dict[str,Sequence] = {}
+        self.rankwise_elm_split: dict[str,Sequence] = {}
         self.time_to_elm_quantiles: dict[float,float] = {}
 
         self.trainer: Trainer|Any = None
@@ -455,7 +483,7 @@ class Data(_Base_Class, LightningDataModule):
         self.state_items = [
             'raw_signal_mean',
             'raw_signal_stdev',
-            'shot_split',
+            'global_shot_split',
             'time_to_elm_quantiles',
         ]
         for item in self.state_items:
@@ -463,41 +491,45 @@ class Data(_Base_Class, LightningDataModule):
 
     def prepare_data(self):
         assert self.batch_size % self.trainer.world_size == 0
-        self.batch_size_per_rank = self.batch_size//self.trainer.world_size
+        print(f"Batch size: {self.batch_size}")
 
     def setup(self, stage: str):
         assert stage in ['fit', 'test', 'predict']
         assert self.is_global_zero == self.trainer.is_global_zero
 
-        print(f"Data setup on rank {self.trainer.global_rank} (world size {self.trainer.world_size})")
-        if self.is_global_zero: 
-            print(f"Batch size: {self.batch_size} ({self.batch_size_per_rank} per rank)")
+        print(f"Stage {stage}: data setup on rank {self.trainer.global_rank} (world size {self.trainer.world_size})")
 
-        if 'train' not in self.shot_split or len(self.shot_split['train'])==0:
+        self.batch_size_per_rank = self.batch_size // self.trainer.world_size
+
+        if 'train' not in self.global_shot_split or len(self.global_shot_split['train'])==0:
             self._make_data_split()
 
         stages = ['train', 'validation'] if stage == 'fit' else [stage]
         for st in stages:
             assert st in ['train', 'validation', 'test', 'predict']
             if st in self.datasets and isinstance(self.datasets[st], torch.utils.data.Dataset):
+                if self.is_global_zero:
+                    print(f"  Stage {stage}: Using saved dataset")
                 continue
-            indices = self.elm_split[st]
-            assert len(indices) > 0
+            else:
+                if self.is_global_zero:
+                    print(f"  Stage {stage}: Creating dataset")
+            global_elm_indices = self.global_elm_split[st]
             if self.is_global_zero: 
-                print(f"Reading {len(indices)} ELMs for stage {st}")
-            signal_window_list = []
-            elm_to_shot_mapping = {}
-            outliers = 0
+                print(f"  Stage {stage}: Global ELM count: {len(global_elm_indices)}")
+            assert len(global_elm_indices) > 0
+            global_sw_metadata_list = []
+            global_elm_to_shot_mapping = {}
+            global_outliers = 0
             with h5py.File(self.data_file, 'r') as h5_file:
                 elms: h5py.Group = h5_file['elms']
-                for i_elm, elm_index in enumerate(indices):
+                for i_elm, elm_index in enumerate(global_elm_indices):
                     if i_elm%100 == 0 and self.is_global_zero:
-                        print(f"  Reading ELM event {i_elm:04d}/{len(indices):04d}")
+                        print(f"  Reading ELM event {i_elm:04d}/{len(global_elm_indices):04d}")
                     elm_event: h5py.Group = elms[f"{elm_index:06d}"]
                     shot = int(elm_event.attrs['shot'])
                     assert elm_event["bes_signals"].shape[0] == 64
                     assert elm_event['bes_time'].size == elm_event["bes_signals"].shape[1]
-                    elm_to_shot_mapping[elm_index] = shot
                     time = np.array(elm_event['bes_time'], dtype=np.float32)
                     t_start: float = elm_event.attrs['t_start']
                     i_start: int = np.flatnonzero(time >= t_start)[0]
@@ -508,6 +540,7 @@ class Data(_Base_Class, LightningDataModule):
                     signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (time, pol, rad)
                     assert signals.shape[0] == time.size
                     assert (signals.shape[1] == 8) and (signals.shape[2] == 8)
+                    global_elm_to_shot_mapping[elm_index] = shot
                     while True:
                         i_window_start = i_window_stop - self.signal_window_size
                         if i_window_start < i_start: break
@@ -516,9 +549,9 @@ class Data(_Base_Class, LightningDataModule):
                             assert signal_window.shape[0] == self.signal_window_size
                             if np.abs(signal_window).max() > self.outlier_value:
                                 i_window_stop -= self.signal_window_size // self.stride_factor
-                                outliers += 1
+                                global_outliers += 1
                                 continue
-                        signal_window_list.append({
+                        global_sw_metadata_list.append({
                             'elm_index': elm_index,
                             'shot': shot,
                             'i_t0': i_window_start,
@@ -526,17 +559,17 @@ class Data(_Base_Class, LightningDataModule):
                         })
                         i_window_stop -= self.signal_window_size // self.stride_factor
 
-            n_signal_windows = len(signal_window_list)
+            n_signal_windows = len(global_sw_metadata_list)
             if self.is_global_zero: 
-                print(f"  Signal windows: {n_signal_windows:,d}  ({outliers:,d} outliers removed)")
-                print(f"  Steps per epoch {n_signal_windows/self.batch_size:,.1f}")
+                print(f"  Stage {stage}: Global signal windows: {n_signal_windows:,d}  ({global_outliers:,d} outliers removed)")
+                print(f"  Stage {stage}: Global steps per epoch {n_signal_windows/self.batch_size:,.1f}")
 
             # time-to-ELM quantiles
             if st == 'train':
                 if self.is_global_zero:
                     print("  Calculating time-to-ELM quantiles")
                 quantiles = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
-                time_to_elm_labels = [sig_win['time_to_elm'] for sig_win in signal_window_list]
+                time_to_elm_labels = [sig_win['time_to_elm'] for sig_win in global_sw_metadata_list]
                 quantile_values = np.quantile(time_to_elm_labels, quantiles)
                 self.time_to_elm_quantiles = {q: qval.item() for q, qval in zip(quantiles, quantile_values)}
                 self.save_hyperparameters({'time_to_elm_quantiles': self.time_to_elm_quantiles})
@@ -547,7 +580,7 @@ class Data(_Base_Class, LightningDataModule):
             assert self.time_to_elm_quantiles
 
             # Raw signal stats
-            self._get_statistics(signal_windows=signal_window_list, stage=st)
+            self._get_statistics(signal_windows=global_sw_metadata_list, stage=st)
             assert self.raw_signal_mean and self.raw_signal_stdev and self.time_to_elm_quantiles
             if st == 'train':
                 self.save_hyperparameters({
@@ -558,9 +591,11 @@ class Data(_Base_Class, LightningDataModule):
             # get rank-wise shot signals
             signals_for_rank = {}
             with h5py.File(self.data_file) as root:
-                elm_list_for_rank = self.elm_split_by_rank[st][self.trainer.global_rank]
+                elm_list_for_rank = self.rankwise_elm_split[st][self.trainer.global_rank]
+                print(f"  Stage {stage} rank {self.trainer.global_rank}:  ELM count: {len(elm_list_for_rank):,d}")
+                assert len(elm_list_for_rank) > 0
                 for elm_index in elm_list_for_rank:
-                    elm_group = root['elms'][f"{elm_index:06d}"]
+                    elm_group: h5py.Group = root['elms'][f"{elm_index:06d}"]
                     signals = np.array(elm_group["bes_signals"], dtype=np.float32)  # (64, <time>)
                     signals = np.transpose(signals).reshape(1, -1, 8, 8)  # reshape to (time, pol, rad)
                     # normalized signals
@@ -569,18 +604,18 @@ class Data(_Base_Class, LightningDataModule):
             # rank-wise datasets
             if st in ['train', 'validation', 'test']:
                 self.datasets[st] = ELM_TrainValTest_Dataset(
-                    signal_window_list=signal_window_list,
-                    elm_to_shot_mapping=elm_to_shot_mapping,
+                    global_sw_metadata=global_sw_metadata_list,
+                    global_elm_to_shot_mapping=global_elm_to_shot_mapping,
                     signal_window_size=self.signal_window_size,
-                    elm_list_for_rank=self.elm_split_by_rank[st][self.trainer.global_rank],
-                    shot_list_for_rank=self.shot_split_by_rank[st][self.trainer.global_rank],
-                    signal_mapping_for_rank=signals_for_rank,
+                    rank_elm_list=self.rankwise_elm_split[st][self.trainer.global_rank],
+                    rank_shot_list=self.rankwise_shot_split[st][self.trainer.global_rank],
+                    rank_signals=signals_for_rank,
                     quantile_min=self.quantile_min,
                     quantile_max=self.quantile_max,
                     contrastive_learning=self.contrastive_learing,
                     time_to_elm_quantiles=self.time_to_elm_quantiles,
                 )
-                print(f"  Rank {self.trainer.global_rank}: {st} dataset size: {len(self.datasets[st]):,d}")
+                print(f"  Rank {self.trainer.global_rank} stage {st}: Dataset size: {len(self.datasets[st]):,d}")
             
             if st in ['test', 'predict']:
                 pass
@@ -589,51 +624,54 @@ class Data(_Base_Class, LightningDataModule):
 
     def _make_data_split(self):
         with h5py.File(self.data_file, 'r') as root:
-            shots = sorted([int(shot_key) for shot_key in root['shots']])
-            assert len(shots) == len(set(shots))
-            shots = set(shots)
+            global_shots = sorted([int(shot_key) for shot_key in root['shots']])
+            assert len(global_shots) == len(set(global_shots))
+            global_shots = set(global_shots)
             shots_from_elms = set([int(elm_group.attrs['shot']) for elm_group in root['elms'].values()])
-            assert len(shots ^ shots_from_elms) == 0
+            assert len(global_shots ^ shots_from_elms) == 0
             elms = [int(elm_key) for elm_key in root['elms']]
             if self.is_global_zero: 
-                print(f"Total shots in dataset: {len(shots)}")
-                print(f"Total ELMs in dataset: {len(elms)}")
-            if self.shot_split:
+                print(f"Shots in HDF5 file: {len(global_shots)}")
+                print(f"ELMs in HDF5 file: {len(elms)}")
+            if self.global_shot_split:
                 print(f"Reusing shot split from saved state")
             else:
                 # limit max ELMs
                 if self.max_elms and len(elms) > self.max_elms:
                     elms = elms[:self.max_elms]
-                    shots = set([int(root['elms'][f"{elm_index:06d}"].attrs['shot']) for elm_index in elms])
+                    global_shots = set([int(root['elms'][f"{elm_index:06d}"].attrs['shot']) for elm_index in elms])
                     if self.is_global_zero:
-                        print(f"ELMs in use: {len(elms)}")
-                        print(f"Shots in use: {len(shots)}")
+                        print(f"Shots for analysis: {len(global_shots)}")
+                        print(f"ELMs for analysis: {len(elms)}")
                 # shuffle shots in dataset
-                print(f"Shuffling sorted shots with seed={self.seed} (rank {self.trainer.global_rank})")
-                shots = np.array(list(shots), dtype=int)
-                np.random.default_rng(self.seed).shuffle(shots)
+                print(f"  Rank {self.trainer.global_rank}: Shuffling global shots with seed={self.seed}")
+                global_shots = np.array(list(global_shots), dtype=int)
+                np.random.default_rng(self.seed).shuffle(global_shots)
+                print(f"  Rank {self.trainer.global_rank}: Initial shuffled shots: "+', '.join(map(str, global_shots[:5])))
                 # split shots
-                n_test_shots = int(self.fraction_test * shots.size)
-                n_validation_shots = int(self.fraction_validation * shots.size)
-                self.shot_split['test'], self.shot_split['validation'], self.shot_split['train'] = \
-                    np.split(shots, [n_test_shots, n_test_shots+n_validation_shots])
-            print("Using shot split to split shots and ELMs across ranks")
-            for stage, shot_split in self.shot_split.items():
-                self.elm_split[stage] = [
+                n_test_shots = int(self.fraction_test * global_shots.size)
+                n_validation_shots = int(self.fraction_validation * global_shots.size)
+                self.global_shot_split['test'], self.global_shot_split['validation'], self.global_shot_split['train'] = \
+                    np.split(global_shots, [n_test_shots, n_test_shots+n_validation_shots])
+            for stage, shot_split in self.global_shot_split.items():
+                print(f"  Rank {self.trainer.global_rank} stage {stage}: Global shot count {self.global_shot_split[stage].size} ({self.global_shot_split[stage].size/global_shots.size*1e2:.1f}%)")
+                self.global_elm_split[stage] = [
                     int(key) 
                     for key, value in root['elms'].items() 
                     if value.attrs['shot'] in shot_split
                 ]
-                print(f"  Stage {stage} with {self.shot_split[stage].size} shots ({self.shot_split[stage].size/shots.size*1e2:.1f}%) and {len(self.elm_split[stage]):,d} ELMs ({len(self.elm_split[stage])/len(elms)*1e2:.1f}%)")
-                self.shot_split_by_rank[stage] = np.array_split(shot_split, self.trainer.world_size)
-                self.elm_split_by_rank[stage] = [
+                print(f"  Rank {self.trainer.global_rank} stage {stage}: Global ELM count {len(self.global_elm_split[stage]):,d} ({len(self.global_elm_split[stage])/len(elms)*1e2:.1f}%)")
+                self.rankwise_shot_split[stage] = np.array_split(shot_split, self.trainer.world_size)
+                print(f"  Rank {self.trainer.global_rank} stage {stage}: Rank shot count {self.rankwise_shot_split[stage][self.trainer.global_rank].size}")
+                self.rankwise_elm_split[stage] = [
                     [
                         int(key) 
                         for key, value in root['elms'].items() 
                         if value.attrs['shot'] in rank_shot_list
                     ]
-                    for rank_shot_list in self.shot_split_by_rank[stage]
+                    for rank_shot_list in self.rankwise_shot_split[stage]
                 ]
+                print(f"  Rank {self.trainer.global_rank} stage {stage}: Rank ELM count {len(self.rankwise_elm_split[stage][self.trainer.global_rank])}")
 
         # if self.is_global_zero: 
         #     print("ELMs for analysis")
@@ -645,7 +683,7 @@ class Data(_Base_Class, LightningDataModule):
             self, 
             signal_windows: list[dict],
             stage: str,
-    ) -> dict:
+    ):
         signal_min = np.array(np.inf)
         signal_max = np.array(-np.inf)
         n_bins = 200
@@ -656,7 +694,7 @@ class Data(_Base_Class, LightningDataModule):
             for elm_dict in signal_windows[::stat_interval]:
                 elm_index = elm_dict['elm_index']
                 if elm_index != last_elm_index:
-                    elm_event = root['elms'][f'{elm_index:06d}']
+                    elm_event: h5py.Group = root['elms'][f'{elm_index:06d}']
                     signals = np.array(elm_event["bes_signals"], dtype=np.float32)  # (64, <time>)
                     signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (time, pol, rad)
                 last_elm_index = elm_index
@@ -741,6 +779,7 @@ class Data(_Base_Class, LightningDataModule):
 
 def main(
         data_file: str|Path,
+        max_elms: int,
         signal_window_size = 1024,
         experiment_name = 'experiment_default',
         # model
@@ -748,7 +787,7 @@ def main(
         layerwise_lr_decrement = 1.5,
         weight_decay = 1e-4,
         # loggers
-        log_freq = 50,
+        log_freq = 100,
         use_wandb = False,
         # callbacks
         early_stopping_min_delta = 1e-3,
@@ -758,9 +797,8 @@ def main(
         gradient_clip_val = 500,
         batch_size = 64,
         # data
-        max_elms = 100,
-        fraction_validation = 0.1,
-        fraction_test = 0,
+        fraction_validation = 0.12,
+        fraction_test = 0.0,
         num_workers = 0,
         quantile_min = None,
         quantile_max = None,
@@ -858,8 +896,11 @@ def main(
             gradient_as_bucket_view=True,
             static_graph=True,
         ) if world_size>1 else 'auto',
-        use_distributed_sampler = world_size>1,
+        # use_distributed_sampler = world_size>1,
         num_nodes = num_nodes,
+        use_distributed_sampler=False,
+        check_val_every_n_epoch=None,
+        val_check_interval=200,
     )
 
     assert trainer.node_rank == node_rank
@@ -893,6 +934,7 @@ def main(
 
 if __name__=='__main__':
     main(
-        # data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
-        data_file='/Users/drsmith/Documents/repos/bes-ml/bes_ml/small_elm_data.hdf5',
+        data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
+        # data_file='/Users/drsmith/Documents/repos/bes-ml/bes_ml/small_elm_data.hdf5',
+        max_elms=100,
     )
