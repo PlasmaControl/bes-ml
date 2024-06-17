@@ -1,32 +1,27 @@
 from pathlib import Path
 import dataclasses
-from datetime import datetime, timedelta
-from logging import Logger
-from typing import \
-    OrderedDict, Iterable, Mapping, Callable, Any, Sequence, Sized
+from datetime import datetime
+from typing import OrderedDict, Any, Sequence
 import os
 import time
 
-
 import numpy as np
-import scipy.stats
-import scipy.signal
 import sklearn.metrics
 import h5py
 import wandb
 
 import torch
 import torch.nn
-import torch.utils.data
 import torch.cuda
 import torch.optim
 import torch.optim.lr_scheduler
+import torch.utils.data
 
-from lightning.pytorch import Trainer, LightningModule, LightningDataModule, Callback
-from lightning.pytorch.strategies import Strategy, DDPStrategy
+from lightning.pytorch import Trainer, LightningModule, LightningDataModule
+from lightning.pytorch.strategies import DDPStrategy
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from lightning.pytorch.callbacks import \
-    LearningRateMonitor, EarlyStopping, ModelCheckpoint, DeviceStatsMonitor
+    LearningRateMonitor, EarlyStopping, ModelCheckpoint
 from lightning.pytorch.utilities.model_summary.model_summary import ModelSummary
 
 torch.set_float32_matmul_precision('medium')
@@ -369,86 +364,12 @@ class Model(LightningModule, _Base_Class):
 
 
 @dataclasses.dataclass(eq=False)
-class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
-    global_sw_metadata: list|Any = None # global signal window data mapping to dataset index
-    global_elm_to_shot_mapping: dict|Any = None
-    signal_window_size: int = 0
-    rank_elm_list: Sequence = () # rank-wise ELM indices
-    rank_shot_list: Sequence = () # rank-wise shots
-    rank_signals: dict|Any = None # rank-wise signals (map to ELM indices)
-    quantile_min: float|Any = None
-    quantile_max: float|Any = None
-    contrastive_learning: bool = False
-    time_to_elm_quantiles: dict[float, float]|Any = None
-
-    def __post_init__(self):
-        super().__post_init__()
-        super(_Base_Class, self).__init__()
-        shots_from_elms = set([self.global_elm_to_shot_mapping[i] for i in self.rank_elm_list])
-        assert len(set(self.rank_shot_list) ^ shots_from_elms) == 0
-        assert len(self.rank_signals) == len(self.rank_elm_list)
-        for elm_index in self.rank_signals:
-            self.rank_signals[elm_index] = torch.from_numpy(
-                self.rank_signals[elm_index]
-            )
-        self.rank_sw_metadata = []
-        for meta in self.global_sw_metadata:
-            if meta['shot'] in self.rank_shot_list:
-                assert meta['elm_index'] in self.rank_elm_list
-            else:
-                continue
-            if meta['elm_index'] in self.rank_elm_list:
-                assert meta['shot'] in self.rank_shot_list
-            else:
-                continue
-            self.rank_sw_metadata.append(meta)
-
-        # restrict quantile range
-        if self.quantile_min is not None and self.quantile_max is not None:
-            qmin_val, qmax_val = np.quantile(self.time_to_elm_labels, (self.quantile_min, self.quantile_max))
-            if not self.contrastive_learning:
-                if self.is_global_zero: 
-                    print(f"  Restricting time-to-ELM labels to quantile range: {self.quantile_min:.2f}-{self.quantile_max:.2f}")
-                mask = np.logical_and(
-                    self.time_to_elm_labels >= qmin_val,
-                    self.time_to_elm_labels <= qmax_val,
-                )
-            else:
-                if self.is_global_zero: 
-                    print(f"  Contrastive learning with time-to-ELM quantiles 0.0-{self.quantile_min:.2f} and {self.quantile_max:.2f}-1.0")
-                mask = np.logical_or(
-                    self.time_to_elm_labels <= qmin_val,
-                    self.time_to_elm_labels >= qmax_val,
-                )
-            self.time_to_elm_labels = np.array(self.time_to_elm_labels)[mask].tolist()
-            self.t0_indices = np.array(self.t0_indices, dtype=int)[mask].tolist()
-            if self.is_global_zero:
-                print(f"  Restricted time-to-ELM min/max: {np.min(self.time_to_elm_labels):.1f}-{np.max(self.time_to_elm_labels):.1f} ms")
-                print(f"  Restricted data signal windows: {len(self):,d}")
-
-    def __len__(self) -> int:
-        return len(self.rank_sw_metadata)
-    
-    def __getitem__(self, i: int) -> tuple:
-        sw_metadata = self.rank_sw_metadata[i]
-        i_t0 = sw_metadata['i_t0']
-        time_to_elm = sw_metadata['time_to_elm']
-        elm_index = sw_metadata['elm_index']
-        assert sw_metadata['shot'] in self.rank_shot_list
-        assert elm_index in self.rank_elm_list
-        signals = self.rank_signals[elm_index]
-        signal_window = signals[..., i_t0 : i_t0 + self.signal_window_size, :, :]
-        quantile_binary_label = {q: int(time_to_elm<=qval) for q, qval in self.time_to_elm_quantiles.items()}
-        return signal_window, time_to_elm, quantile_binary_label
-
-
-@dataclasses.dataclass(eq=False)
 class Data(_Base_Class, LightningDataModule):
     data_file: str|Path|Any = None
     max_elms: int|Any = None
     batch_size: int = 128
     stride_factor: int = 8
-    num_workers: int = 0
+    num_workers: int|Any = None
     outlier_value: float = 6
     fraction_validation: float = 0.12
     fraction_test: float = 0.0
@@ -465,7 +386,7 @@ class Data(_Base_Class, LightningDataModule):
         self.data_file = Path(self.data_file).absolute()
         assert self.data_file.exists()
 
-        self.datasets: dict = {}
+        self.datasets: dict[str,torch.utils.data.Dataset] = {}
         self.global_shot_split: dict[str,np.ndarray] = {}
         self.rankwise_shot_split: dict[str,Sequence] = {}
         self.global_elm_split: dict[str,Sequence] = {}
@@ -475,6 +396,7 @@ class Data(_Base_Class, LightningDataModule):
         self.trainer: Trainer|Any = None
         self.raw_signal_mean: float|Any = None
         self.raw_signal_stdev: float|Any = None
+        self.batch_size_per_rank: int = 0
 
         if self.is_global_zero:
             print_fields(self)
@@ -755,26 +677,96 @@ class Data(_Base_Class, LightningDataModule):
         #     dataset=self.datasets[stage],
         #     shuffle=shuffle,
         # ) if is_distributed else None
-        if stage == 'train':
-            sampler = torch.utils.data.RandomSampler(
-                data_source=self.datasets[stage],
-            )
-        else:
-            sampler = torch.utils.data.SequentialSampler(
-                data_source=self.datasets[stage],
-            )
-        # sampler = torch.utils.data.SubsetRandomSampler()
+        sampler = (
+            torch.utils.data.RandomSampler(data_source=self.datasets[stage])
+            if stage == 'train'
+            else torch.utils.data.SequentialSampler(data_source=self.datasets[stage])
+        )
+        if self.num_workers is None:
+            self.num_workers = 2 if self.trainer.world_size==1 else 0
         return torch.utils.data.DataLoader(
             dataset=self.datasets[stage],
             sampler=sampler,
             batch_size=self.batch_size_per_rank,  # batch size per rank
             num_workers=self.num_workers,
-            # shuffle=None if is_distributed else shuffle,
-            # shuffle=shuffle,
-            # prefetch_factor=2 if self.num_workers else None,
-            # persistent_workers=bool(self.num_workers),
+            prefetch_factor=2 if self.num_workers else None,
             pin_memory=True,
+            # persistent_workers=bool(self.num_workers),
         )
+
+
+@dataclasses.dataclass(eq=False)
+class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
+    global_sw_metadata: list|Any = None # global signal window data mapping to dataset index
+    global_elm_to_shot_mapping: dict|Any = None
+    signal_window_size: int = 0
+    rank_elm_list: Sequence = () # rank-wise ELM indices
+    rank_shot_list: Sequence = () # rank-wise shots
+    rank_signals: dict|Any = None # rank-wise signals (map to ELM indices)
+    quantile_min: float|Any = None
+    quantile_max: float|Any = None
+    contrastive_learning: bool = False
+    time_to_elm_quantiles: dict[float, float]|Any = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        super(_Base_Class, self).__init__()
+        shots_from_elms = set([self.global_elm_to_shot_mapping[i] for i in self.rank_elm_list])
+        assert len(set(self.rank_shot_list) ^ shots_from_elms) == 0
+        assert len(self.rank_signals) == len(self.rank_elm_list)
+        for elm_index in self.rank_signals:
+            self.rank_signals[elm_index] = torch.from_numpy(
+                self.rank_signals[elm_index]
+            )
+        self.rank_sw_metadata = []
+        for meta in self.global_sw_metadata:
+            if meta['shot'] in self.rank_shot_list:
+                assert meta['elm_index'] in self.rank_elm_list
+            else:
+                continue
+            if meta['elm_index'] in self.rank_elm_list:
+                assert meta['shot'] in self.rank_shot_list
+            else:
+                continue
+            self.rank_sw_metadata.append(meta)
+
+        # restrict quantile range
+        if self.quantile_min is not None and self.quantile_max is not None:
+            qmin_val, qmax_val = np.quantile(self.time_to_elm_labels, (self.quantile_min, self.quantile_max))
+            if not self.contrastive_learning:
+                if self.is_global_zero: 
+                    print(f"  Restricting time-to-ELM labels to quantile range: {self.quantile_min:.2f}-{self.quantile_max:.2f}")
+                mask = np.logical_and(
+                    self.time_to_elm_labels >= qmin_val,
+                    self.time_to_elm_labels <= qmax_val,
+                )
+            else:
+                if self.is_global_zero: 
+                    print(f"  Contrastive learning with time-to-ELM quantiles 0.0-{self.quantile_min:.2f} and {self.quantile_max:.2f}-1.0")
+                mask = np.logical_or(
+                    self.time_to_elm_labels <= qmin_val,
+                    self.time_to_elm_labels >= qmax_val,
+                )
+            self.time_to_elm_labels = np.array(self.time_to_elm_labels)[mask].tolist()
+            self.t0_indices = np.array(self.t0_indices, dtype=int)[mask].tolist()
+            if self.is_global_zero:
+                print(f"  Restricted time-to-ELM min/max: {np.min(self.time_to_elm_labels):.1f}-{np.max(self.time_to_elm_labels):.1f} ms")
+                print(f"  Restricted data signal windows: {len(self):,d}")
+
+    def __len__(self) -> int:
+        return len(self.rank_sw_metadata)
+    
+    def __getitem__(self, i: int) -> tuple:
+        sw_metadata = self.rank_sw_metadata[i]
+        i_t0 = sw_metadata['i_t0']
+        time_to_elm = sw_metadata['time_to_elm']
+        elm_index = sw_metadata['elm_index']
+        assert sw_metadata['shot'] in self.rank_shot_list
+        assert elm_index in self.rank_elm_list
+        signals = self.rank_signals[elm_index]
+        signal_window = signals[..., i_t0 : i_t0 + self.signal_window_size, :, :]
+        quantile_binary_label = {q: int(time_to_elm<=qval) for q, qval in self.time_to_elm_quantiles.items()}
+        return signal_window, time_to_elm, quantile_binary_label
 
 
 def main(
