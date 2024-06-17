@@ -538,16 +538,13 @@ class Data(_Base_Class, LightningDataModule):
             # rank-wise datasets
             if st in ['train', 'validation', 'test']:
                 self.datasets[st] = ELM_TrainValTest_Dataset(
-                    global_sw_metadata=global_sw_metadata_list,
-                    global_elm_to_shot_mapping=global_elm_to_shot_mapping,
                     signal_window_size=self.signal_window_size,
-                    rank_elm_list=self.rankwise_elm_split[st][self.trainer.global_rank],
-                    rank_shot_list=self.rankwise_shot_split[st][self.trainer.global_rank],
-                    rank_signals=signals_for_rank,
+                    time_to_elm_quantiles=self.time_to_elm_quantiles,
+                    sw_list=sw_for_rank,
+                    signal_list=signals_for_rank,
                     quantile_min=self.quantile_min,
                     quantile_max=self.quantile_max,
                     contrastive_learning=self.contrastive_learing,
-                    time_to_elm_quantiles=self.time_to_elm_quantiles,
                 )
                 print(f"  Rank {self.trainer.global_rank} stage {st}: Dataset size: {len(self.datasets[st]):,d}")
             
@@ -712,38 +709,22 @@ class Data(_Base_Class, LightningDataModule):
 
 @dataclasses.dataclass(eq=False)
 class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
-    global_sw_metadata: list|Any = None # global signal window data mapping to dataset index
-    global_elm_to_shot_mapping: dict|Any = None
     signal_window_size: int = 0
-    rank_elm_list: Sequence = () # rank-wise ELM indices
-    rank_shot_list: Sequence = () # rank-wise shots
-    rank_signals: dict|Any = None # rank-wise signals (map to ELM indices)
+    sw_list: list|Any = None # global signal window data mapping to dataset index
+    signal_list: dict|Any = None # rank-wise signals (map to ELM indices)
+    time_to_elm_quantiles: dict[float, float]|Any = None
     quantile_min: float|Any = None
     quantile_max: float|Any = None
     contrastive_learning: bool = False
-    time_to_elm_quantiles: dict[float, float]|Any = None
 
     def __post_init__(self):
         super().__post_init__()
         super(_Base_Class, self).__init__()
-        shots_from_elms = set([self.global_elm_to_shot_mapping[i] for i in self.rank_elm_list])
-        assert len(set(self.rank_shot_list) ^ shots_from_elms) == 0
-        assert len(self.rank_signals) == len(self.rank_elm_list)
-        for elm_index in self.rank_signals:
-            self.rank_signals[elm_index] = torch.from_numpy(
-                self.rank_signals[elm_index]
+        # assert len(self.signal_list) == len(self.elm_list)
+        for elm_index in self.signal_list:
+            self.signal_list[elm_index] = torch.from_numpy(
+                self.signal_list[elm_index]
             )
-        self.rank_sw_metadata = []
-        for meta in self.global_sw_metadata:
-            if meta['shot'] in self.rank_shot_list:
-                assert meta['elm_index'] in self.rank_elm_list
-            else:
-                continue
-            if meta['elm_index'] in self.rank_elm_list:
-                assert meta['shot'] in self.rank_shot_list
-            else:
-                continue
-            self.rank_sw_metadata.append(meta)
 
         # restrict quantile range
         if self.quantile_min is not None and self.quantile_max is not None:
@@ -769,16 +750,14 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
                 print(f"  Restricted data signal windows: {len(self):,d}")
 
     def __len__(self) -> int:
-        return len(self.rank_sw_metadata)
+        return len(self.sw_list)
     
     def __getitem__(self, i: int) -> tuple:
-        sw_metadata = self.rank_sw_metadata[i]
+        sw_metadata = self.sw_list[i]
         i_t0 = sw_metadata['i_t0']
         time_to_elm = sw_metadata['time_to_elm']
         elm_index = sw_metadata['elm_index']
-        assert sw_metadata['shot'] in self.rank_shot_list
-        assert elm_index in self.rank_elm_list
-        signals = self.rank_signals[elm_index]
+        signals = self.signal_list[elm_index]
         signal_window = signals[..., i_t0 : i_t0 + self.signal_window_size, :, :]
         quantile_binary_label = {q: int(time_to_elm<=qval) for q, qval in self.time_to_elm_quantiles.items()}
         return signal_window, time_to_elm, quantile_binary_label
