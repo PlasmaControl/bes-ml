@@ -387,15 +387,16 @@ class Data(_Base_Class, LightningDataModule):
         assert self.data_file.exists()
 
         self.datasets: dict[str,torch.utils.data.Dataset] = {}
-        self.global_shot_split: dict[str,np.ndarray] = {}
-        self.rankwise_shot_split: dict[str,Sequence] = {}
         self.global_elm_split: dict[str,Sequence] = {}
+        self.global_shot_split: dict[str,np.ndarray] = {}
         self.rankwise_elm_split: dict[str,Sequence] = {}
+        self.rankwise_shot_split: dict[str,Sequence] = {}
+        self.rankwise_sw_split: dict[str,Sequence] = {}
         self.time_to_elm_quantiles: dict[float,float] = {}
-
-        self.trainer: Trainer|Any = None
         self.raw_signal_mean: float|Any = None
         self.raw_signal_stdev: float|Any = None
+
+        self.trainer: Trainer|Any = None
         self.batch_size_per_rank: int = 0
 
         if self.is_global_zero:
@@ -405,25 +406,28 @@ class Data(_Base_Class, LightningDataModule):
         self.state_items = [
             'raw_signal_mean',
             'raw_signal_stdev',
-            'global_shot_split',
+            'global_elm_split',
             'time_to_elm_quantiles',
         ]
         for item in self.state_items:
             assert hasattr(self, item)
 
-    def prepare_data(self):
-        assert self.batch_size % self.trainer.world_size == 0
-        print(f"Batch size: {self.batch_size}")
-
     def setup(self, stage: str):
         assert stage in ['fit', 'test', 'predict']
         assert self.is_global_zero == self.trainer.is_global_zero
 
-        print(f"Stage {stage}: data setup on rank {self.trainer.global_rank} (world size {self.trainer.world_size})")
-
+        assert self.batch_size % self.trainer.world_size == 0
         self.batch_size_per_rank = self.batch_size // self.trainer.world_size
+        if self.is_global_zero:
+            print(f"Batch size: {self.batch_size}")
+            print(f"Batch size per rank {self.batch_size_per_rank}")
 
-        if 'train' not in self.global_shot_split or len(self.global_shot_split['train'])==0:
+        if 'train' in self.global_elm_split and len(self.global_elm_split['train'])>0:
+            if self.is_global_zero:
+                print("Reusing saved global data split")
+        else:
+            if self.is_global_zero:
+                print("Creating global data split")
             self._make_data_split()
 
         stages = ['train', 'validation'] if stage == 'fit' else [stage]
@@ -431,14 +435,12 @@ class Data(_Base_Class, LightningDataModule):
             assert st in ['train', 'validation', 'test', 'predict']
             if st in self.datasets and isinstance(self.datasets[st], torch.utils.data.Dataset):
                 if self.is_global_zero:
-                    print(f"  Stage {stage}: Using saved dataset")
+                    print(f"Stage {st.upper()}: Using saved dataset")
                 continue
-            else:
-                if self.is_global_zero:
-                    print(f"  Stage {stage}: Creating dataset")
+            print(f"Rank {self.trainer.global_rank} Stage {st.upper()}: data setup")
             global_elm_indices = self.global_elm_split[st]
             if self.is_global_zero: 
-                print(f"  Stage {stage}: Global ELM count: {len(global_elm_indices)}")
+                print(f"  Global ELM count: {len(global_elm_indices)}")
             assert len(global_elm_indices) > 0
             global_sw_metadata_list = []
             global_elm_to_shot_mapping = {}
@@ -482,9 +484,8 @@ class Data(_Base_Class, LightningDataModule):
                         i_window_stop -= self.signal_window_size // self.stride_factor
 
             n_signal_windows = len(global_sw_metadata_list)
-            if self.is_global_zero: 
-                print(f"  Stage {stage}: Global signal windows: {n_signal_windows:,d}  ({global_outliers:,d} outliers removed)")
-                print(f"  Stage {stage}: Global steps per epoch {n_signal_windows/self.batch_size:,.1f}")
+            print(f"  Rank {self.trainer.global_rank} Stage {st.upper()}: Global signal windows: {n_signal_windows:,d}  ({global_outliers:,d} outliers removed)")
+            print(f"  Rank {self.trainer.global_rank} Stage {st.upper()}: Global steps per epoch {n_signal_windows/self.batch_size:,.1f}")
 
             # time-to-ELM quantiles
             if st == 'train':
@@ -510,18 +511,29 @@ class Data(_Base_Class, LightningDataModule):
                     'raw_signal_stdev': self.raw_signal_stdev,
                 })
 
-            # get rank-wise shot signals
+            # split signal windows by rank
+            rankwise_sw_split = np.array_split(global_sw_metadata_list, self.trainer.world_size)
+            sw_for_rank = list(rankwise_sw_split[self.trainer.global_rank])
+            elms_for_rank = np.unique(np.array(
+                [item['elm_index'] for item in sw_for_rank],
+                dtype=int,
+            ))
+            shots_for_rank = np.unique(np.array(
+                [item['shot'] for item in sw_for_rank],
+                dtype=int,
+            ))
+            print(f"  Rank {self.trainer.global_rank} Stage {st.upper()}:  Shots/ELMs/SigWin: {len(shots_for_rank):,d}/{len(elms_for_rank):,d}/{len(sw_for_rank):,d}")
+
+            # get rank-wise ELM signals
             signals_for_rank = {}
             with h5py.File(self.data_file) as root:
-                elm_list_for_rank = self.rankwise_elm_split[st][self.trainer.global_rank]
-                print(f"  Stage {stage} rank {self.trainer.global_rank}:  ELM count: {len(elm_list_for_rank):,d}")
-                assert len(elm_list_for_rank) > 0
-                for elm_index in elm_list_for_rank:
+                for elm_index in elms_for_rank:
                     elm_group: h5py.Group = root['elms'][f"{elm_index:06d}"]
                     signals = np.array(elm_group["bes_signals"], dtype=np.float32)  # (64, <time>)
                     signals = np.transpose(signals).reshape(1, -1, 8, 8)  # reshape to (time, pol, rad)
                     # normalized signals
                     signals_for_rank[elm_index] = (signals - self.raw_signal_mean) / self.raw_signal_stdev
+            assert len(signals_for_rank) == len(elms_for_rank)
 
             # rank-wise datasets
             if st in ['train', 'validation', 'test']:
@@ -545,55 +557,58 @@ class Data(_Base_Class, LightningDataModule):
         return
 
     def _make_data_split(self):
+        assert len(self.global_elm_split) == 0
+        print(f"Rank {self.trainer.global_rank}: Data split")
         with h5py.File(self.data_file, 'r') as root:
-            global_shots = sorted([int(shot_key) for shot_key in root['shots']])
-            assert len(global_shots) == len(set(global_shots))
-            global_shots = set(global_shots)
+            global_shots = set([int(shot_key) for shot_key in root['shots']])
             shots_from_elms = set([int(elm_group.attrs['shot']) for elm_group in root['elms'].values()])
             assert len(global_shots ^ shots_from_elms) == 0
-            elms = [int(elm_key) for elm_key in root['elms']]
+            global_elms = [int(elm_key) for elm_key in root['elms']]
+            global_shots = list(global_shots)
             if self.is_global_zero: 
-                print(f"Shots in HDF5 file: {len(global_shots)}")
-                print(f"ELMs in HDF5 file: {len(elms)}")
-            if self.global_shot_split:
-                print(f"Reusing shot split from saved state")
-            else:
-                # limit max ELMs
-                if self.max_elms and len(elms) > self.max_elms:
-                    elms = elms[:self.max_elms]
-                    global_shots = set([int(root['elms'][f"{elm_index:06d}"].attrs['shot']) for elm_index in elms])
-                    if self.is_global_zero:
-                        print(f"Shots for analysis: {len(global_shots)}")
-                        print(f"ELMs for analysis: {len(elms)}")
-                # shuffle shots in dataset
-                print(f"  Rank {self.trainer.global_rank}: Shuffling global shots with seed={self.seed}")
-                global_shots = np.array(list(global_shots), dtype=int)
-                np.random.default_rng(self.seed).shuffle(global_shots)
-                print(f"  Rank {self.trainer.global_rank}: Initial shuffled shots: "+', '.join(map(str, global_shots[:5])))
-                # split shots
-                n_test_shots = int(self.fraction_test * global_shots.size)
-                n_validation_shots = int(self.fraction_validation * global_shots.size)
-                self.global_shot_split['test'], self.global_shot_split['validation'], self.global_shot_split['train'] = \
-                    np.split(global_shots, [n_test_shots, n_test_shots+n_validation_shots])
-            for stage, shot_split in self.global_shot_split.items():
-                print(f"  Rank {self.trainer.global_rank} stage {stage}: Global shot count {self.global_shot_split[stage].size} ({self.global_shot_split[stage].size/global_shots.size*1e2:.1f}%)")
+                print(f"  ELMs/shots in HDF5 file: {len(global_elms):,d} / {len(global_shots):,d}")
+            # limit max ELMs
+            if self.max_elms and len(global_elms) > self.max_elms:
+                global_elms = global_elms[:self.max_elms]
+                global_shots = set([int(root['elms'][f"{elm_index:06d}"].attrs['shot']) for elm_index in global_elms])
+                global_shots = list(global_shots)
+                if self.is_global_zero:
+                    print(f"  ELMs/shots for analysis: {len(global_elms):,d} / {len(global_shots):,d}")
+            # shuffle shots in dataset
+            print(f"  Rank {self.trainer.global_rank}: Shuffling global shots with seed={self.seed}")
+            np.random.default_rng(self.seed).shuffle(global_shots)
+            print(f"  Rank {self.trainer.global_rank}: Shuffled shot order: " + ', '.join(map(str, global_shots[:5])))
+            # order ELMs by shuffled shots
+            print(f"  Rank {self.trainer.global_rank}: Ordering ELMs by shuffled shots")
+            new_global_elms = []
+            for shot in global_shots:
+                for elm_key in root['elms']:
+                    if root['elms'][elm_key].attrs['shot'] == shot:
+                        new_global_elms.append(int(elm_key))
+            global_elms = new_global_elms
+            # split shots
+            n_test_shots = int(self.fraction_test * len(global_shots))
+            n_validation_shots = int(self.fraction_validation * len(global_shots))
+            self.global_shot_split['test'], self.global_shot_split['validation'], self.global_shot_split['train'] = \
+                np.split(global_shots, [n_test_shots, n_test_shots+n_validation_shots])
+            
+            for stage in ['train','validation','test']:
                 self.global_elm_split[stage] = [
                     int(key) 
-                    for key, value in root['elms'].items() 
-                    if value.attrs['shot'] in shot_split
+                    for key, value in root['elms'].items()
+                    if value.attrs['shot'] in self.global_shot_split[stage]
                 ]
-                print(f"  Rank {self.trainer.global_rank} stage {stage}: Global ELM count {len(self.global_elm_split[stage]):,d} ({len(self.global_elm_split[stage])/len(elms)*1e2:.1f}%)")
-                self.rankwise_shot_split[stage] = np.array_split(shot_split, self.trainer.world_size)
-                print(f"  Rank {self.trainer.global_rank} stage {stage}: Rank shot count {self.rankwise_shot_split[stage][self.trainer.global_rank].size}")
-                self.rankwise_elm_split[stage] = [
-                    [
-                        int(key) 
-                        for key, value in root['elms'].items() 
-                        if value.attrs['shot'] in rank_shot_list
-                    ]
-                    for rank_shot_list in self.rankwise_shot_split[stage]
-                ]
-                print(f"  Rank {self.trainer.global_rank} stage {stage}: Rank ELM count {len(self.rankwise_elm_split[stage][self.trainer.global_rank])}")
+                print(f"  Rank {self.trainer.global_rank} Stage {stage.upper()}: Global ELM/shot count {len(self.global_elm_split[stage]):,d} ({len(self.global_elm_split[stage])/len(global_elms)*1e2:.1f}%) / {self.global_shot_split[stage].size} ({self.global_shot_split[stage].size/len(global_shots)*1e2:.1f}%)")
+                # self.rankwise_shot_split[stage] = np.array_split(shot_split, self.trainer.world_size)
+                # self.rankwise_elm_split[stage] = [
+                #     [
+                #         int(key) 
+                #         for key, value in root['elms'].items() 
+                #         if value.attrs['shot'] in rank_shot_list
+                #     ]
+                #     for rank_shot_list in self.rankwise_shot_split[stage]
+                # ]
+                # print(f"  Rank {self.trainer.global_rank} stage {stage.upper()}: Rank ELM/shot count {len(self.rankwise_elm_split[stage][self.trainer.global_rank])} / {self.rankwise_shot_split[stage][self.trainer.global_rank].size}")
 
         # if self.is_global_zero: 
         #     print("ELMs for analysis")
@@ -926,7 +941,8 @@ def main(
 
 if __name__=='__main__':
     main(
-        data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
-        # data_file='/Users/drsmith/Documents/repos/bes-ml/bes_ml/small_elm_data.hdf5',
+        # data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
+        data_file='/Users/drsmith/Documents/repos/bes-ml/bes_ml/small_elm_data.hdf5',
         max_elms=100,
+        batch_size=16,
     )
