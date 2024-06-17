@@ -704,6 +704,7 @@ class Data(_Base_Class, LightningDataModule):
             prefetch_factor=2 if self.num_workers else None,
             pin_memory=True,
             # persistent_workers=bool(self.num_workers),
+            drop_last=True,
         )
 
 
@@ -885,8 +886,8 @@ def main(
         # use_distributed_sampler = world_size>1,
         num_nodes = num_nodes,
         use_distributed_sampler=False,
-        check_val_every_n_epoch=None,
-        val_check_interval=200,
+        # check_val_every_n_epoch=None,
+        # val_check_interval=200,
     )
 
     assert trainer.node_rank == node_rank
