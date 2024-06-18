@@ -275,13 +275,11 @@ class Model(LightningModule, _Base_Class):
         return results
 
     def training_step(self, batch, batch_idx) -> torch.Tensor:
-        if self.is_global_zero and self.global_step%50==0:
-            print(f"  Train step {self.global_step}")
+        # if self.is_global_zero and self.global_step%50==0:
+        #     print(f"  Train step {self.global_step}")
         return self.update_step(batch, batch_idx, stage='train')
 
     def validation_step(self, batch, batch_idx) -> None:
-        # if self.is_global_zero and self.global_step%50==0:
-        #     print(f"  Val step {self.global_step}")
         self.update_step(batch, batch_idx, stage='val')
 
     def test_step(self, batch, batch_idx) -> None:
@@ -321,7 +319,7 @@ class Model(LightningModule, _Base_Class):
     def on_fit_start(self):
         self.t_fit_start = time.time()
         if self.is_global_zero:
-            print(f"Fit start with global step")
+            print(f"**** Fit start with global step {self.trainer.global_step} ****")
 
     def on_fit_end(self) -> None:
         delt = time.time() - self.t_fit_start
@@ -329,33 +327,33 @@ class Model(LightningModule, _Base_Class):
             print(f"Fit time: {delt/60:0.1f} min")
 
     def on_train_epoch_start(self):
-        if self.is_global_zero:
-            print(f"Train epoch {self.current_epoch} start (step {self.global_step})")
+        # if self.is_global_zero:
+        #     print(f"Train epoch {self.current_epoch} start (step {self.global_step})")
         self.t_train_epoch_start = time.time()
         self.s_train_epoch_start = self.global_step
 
     def on_train_epoch_end(self):
-        if self.is_global_zero:
-            print(f"Train epoch {self.current_epoch} end (step {self.global_step})")
+        # if self.is_global_zero:
+        #     print(f"Train epoch {self.current_epoch} end (step {self.global_step})")
         epoch_time = time.time() - self.t_train_epoch_start
         global_time = time.time() - self.t_fit_start
         epoch_steps = self.global_step-self.s_train_epoch_start
         if self.is_global_zero and self.global_step > 0:
             logged_metrics = self.trainer.logged_metrics
-            line =  f"  Ep {self.current_epoch:03d}  "
+            line =  f"Ep {self.current_epoch:03d}  "
             line += f"train/val loss {logged_metrics['sum_loss/train']:.3f}/"
             line += f"{logged_metrics['sum_loss/val']:.3f}  "
             line += f"ep/gl steps {epoch_steps:,d}/{self.global_step:,d}  "
             line += f"ep/gl time (min): {epoch_time/60:.1f}/{global_time/60:.1f}  " 
             print(line)
 
-    def on_validation_epoch_start(self):
-        if self.is_global_zero:
-            print(f"Validation epoch {self.current_epoch} start (step {self.global_step})")
+    # def on_validation_epoch_start(self):
+    #     if self.is_global_zero:
+    #         print(f"Validation epoch {self.current_epoch} start (step {self.global_step})")
 
-    def on_validation_epoch_end(self):
-        if self.is_global_zero:
-            print(f"Validation epoch {self.current_epoch} end (step {self.global_step})")
+    # def on_validation_epoch_end(self):
+    #     if self.is_global_zero:
+    #         print(f"Validation epoch {self.current_epoch} end (step {self.global_step})")
 
     def setup(self, stage=None):  # fit, validate, test, or predict
         assert self.is_global_zero == self.trainer.is_global_zero
