@@ -135,10 +135,10 @@ class Model(LightningModule, _Base_Class):
         out_channels: int|Any = None
         for i_layer, layer in enumerate(conv_layers):
             if i_layer != 0:
-                feature_layer_dict[f"bn_{i_layer:02d}"] = torch.nn.BatchNorm3d(
+                feature_layer_dict[f"L{i_layer:02d}_bn"] = torch.nn.BatchNorm3d(
                     num_features=out_channels,
                 )
-            layer_name = f"conv_{i_layer:02d}"
+            layer_name = f"L{i_layer:02d}_conv"
             conv = torch.nn.Conv3d(
                 in_channels=1 if out_channels is None else out_channels,
                 out_channels=layer['out_channels'],
@@ -174,10 +174,10 @@ class Model(LightningModule, _Base_Class):
         mlp_layers = (self.feature_space_size, 64, 32, 1)
 
         for i in range(len(mlp_layers)-1):
-            mlp_layer_dict[f"bn_{i:02d}"] = torch.nn.BatchNorm1d(
-                num_features=mlp_layers[i],
-            )
-            layer_name = f"fc_{i:02d}"
+            # mlp_layer_dict[f"L{i:02d}_bn"] = torch.nn.BatchNorm1d(
+            #     num_features=mlp_layers[i],
+            # )
+            layer_name = f"L{i:02d}_fc"
             fc_layer = torch.nn.Linear(
                 in_features=mlp_layers[i],
                 out_features=mlp_layers[i+1],
@@ -719,34 +719,33 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
     def __post_init__(self):
         super().__post_init__()
         super(_Base_Class, self).__init__()
-        # assert len(self.signal_list) == len(self.elm_list)
         for elm_index in self.signal_list:
             self.signal_list[elm_index] = torch.from_numpy(
                 self.signal_list[elm_index]
             )
 
         # restrict quantile range
-        if self.quantile_min is not None and self.quantile_max is not None:
-            qmin_val, qmax_val = np.quantile(self.time_to_elm_labels, (self.quantile_min, self.quantile_max))
-            if not self.contrastive_learning:
-                if self.is_global_zero: 
-                    print(f"  Restricting time-to-ELM labels to quantile range: {self.quantile_min:.2f}-{self.quantile_max:.2f}")
-                mask = np.logical_and(
-                    self.time_to_elm_labels >= qmin_val,
-                    self.time_to_elm_labels <= qmax_val,
-                )
-            else:
-                if self.is_global_zero: 
-                    print(f"  Contrastive learning with time-to-ELM quantiles 0.0-{self.quantile_min:.2f} and {self.quantile_max:.2f}-1.0")
-                mask = np.logical_or(
-                    self.time_to_elm_labels <= qmin_val,
-                    self.time_to_elm_labels >= qmax_val,
-                )
-            self.time_to_elm_labels = np.array(self.time_to_elm_labels)[mask].tolist()
-            self.t0_indices = np.array(self.t0_indices, dtype=int)[mask].tolist()
-            if self.is_global_zero:
-                print(f"  Restricted time-to-ELM min/max: {np.min(self.time_to_elm_labels):.1f}-{np.max(self.time_to_elm_labels):.1f} ms")
-                print(f"  Restricted data signal windows: {len(self):,d}")
+        # if self.quantile_min is not None and self.quantile_max is not None:
+        #     qmin_val, qmax_val = np.quantile(self.time_to_elm_labels, (self.quantile_min, self.quantile_max))
+        #     if self.contrastive_learning:
+        #         if self.is_global_zero: 
+        #             print(f"  Contrastive learning with time-to-ELM quantiles 0.0-{self.quantile_min:.2f} and {self.quantile_max:.2f}-1.0")
+        #         mask = np.logical_or(
+        #             self.time_to_elm_labels <= qmin_val,
+        #             self.time_to_elm_labels >= qmax_val,
+        #         )
+        #     else:
+        #         if self.is_global_zero: 
+        #             print(f"  Restricting time-to-ELM labels to quantile range: {self.quantile_min:.2f}-{self.quantile_max:.2f}")
+        #         mask = np.logical_and(
+        #             self.time_to_elm_labels >= qmin_val,
+        #             self.time_to_elm_labels <= qmax_val,
+        #         )
+        #     self.time_to_elm_labels = np.array(self.time_to_elm_labels)[mask].tolist()
+        #     self.t0_indices = np.array(self.t0_indices, dtype=int)[mask].tolist()
+        #     if self.is_global_zero:
+        #         print(f"  Restricted time-to-ELM min/max: {np.min(self.time_to_elm_labels):.1f}-{np.max(self.time_to_elm_labels):.1f} ms")
+        #         print(f"  Restricted data signal windows: {len(self):,d}")
 
     def __len__(self) -> int:
         return len(self.sw_list)
@@ -764,7 +763,7 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
 
 def main(
         data_file: str|Path,
-        max_elms: int,
+        max_elms: int|Any = None,
         signal_window_size = 1024,
         experiment_name = 'experiment_default',
         # model
@@ -810,10 +809,6 @@ def main(
         weight_decay=weight_decay,
         is_global_zero=is_global_zero,
     )
-    if is_global_zero:
-        print("Model Summary:")
-        print(ModelSummary(lit_model, max_depth=-1))
-
     ### callbacks
     monitor_metric = lit_model.monitor_metric
     metric_mode = 'min' if 'loss' in monitor_metric else 'max'
@@ -865,6 +860,10 @@ def main(
             log_freq=log_freq,
         )
         loggers.append(wandb_logger)
+
+    if is_global_zero:
+        print("Model Summary:")
+        print(ModelSummary(lit_model, max_depth=-1))
 
     ### initialize trainer
     trainer = Trainer(
@@ -919,8 +918,10 @@ def main(
 
 if __name__=='__main__':
     main(
-        # data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
-        data_file='/Users/drsmith/Documents/repos/bes-ml/bes_ml/small_elm_data.hdf5',
+        data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
+        # data_file='/Users/drsmith/Documents/repos/bes-ml/bes_ml/small_elm_data.hdf5',
         max_elms=100,
-        batch_size=16,
+        batch_size=32,
+        max_epochs=8,
+        num_workers=4,
     )
