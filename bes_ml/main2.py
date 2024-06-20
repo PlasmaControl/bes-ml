@@ -373,9 +373,9 @@ class Data(_Base_Class, LightningDataModule):
     fraction_test: float = 0.0
     use_random_data: bool = False
     seed: int = 0  # seed for ELM index shuffling; must be same across processes
-    quantile_min: float|Any = None
-    quantile_max: float|Any = None
-    contrastive_learing: bool = False
+    time_to_elm_quantile_min: float|Any = None
+    time_to_elm_quantile_max: float|Any = None
+    contrastive_learning: bool = False
 
     def __post_init__(self):
         super().__post_init__()
@@ -441,7 +441,6 @@ class Data(_Base_Class, LightningDataModule):
                 print(f"  Global ELM count: {len(global_elm_indices)}")
             assert len(global_elm_indices) > 0
             global_sw_metadata_list = []
-            global_elm_to_shot_mapping = {}
             global_outliers = 0
             with h5py.File(self.data_file, 'r') as h5_file:
                 elms: h5py.Group = h5_file['elms']
@@ -462,7 +461,6 @@ class Data(_Base_Class, LightningDataModule):
                     signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (time, pol, rad)
                     assert signals.shape[0] == time.size
                     assert (signals.shape[1] == 8) and (signals.shape[2] == 8)
-                    global_elm_to_shot_mapping[elm_index] = shot
                     while True:
                         i_window_start = i_window_stop - self.signal_window_size
                         if i_window_start < i_start: break
@@ -485,6 +483,15 @@ class Data(_Base_Class, LightningDataModule):
             print(f"  Rank {self.trainer.global_rank} Stage {st.upper()}: Global signal windows: {n_signal_windows:,d}  ({global_outliers:,d} outliers removed)")
             print(f"  Rank {self.trainer.global_rank} Stage {st.upper()}: Global steps per epoch {n_signal_windows/self.batch_size:,.1f}")
 
+            # Raw signal stats
+            self._get_statistics(signal_windows=global_sw_metadata_list, stage=st)
+            assert self.raw_signal_mean and self.raw_signal_stdev
+            if st == 'train':
+                self.save_hyperparameters({
+                    'raw_signal_mean': self.raw_signal_mean,
+                    'raw_signal_stdev': self.raw_signal_stdev,
+                })
+
             # time-to-ELM quantiles
             if st == 'train':
                 if self.is_global_zero:
@@ -500,14 +507,28 @@ class Data(_Base_Class, LightningDataModule):
                         print(f"    Quantile {q:.2f}: {qval:.1f} ms")
             assert self.time_to_elm_quantiles
 
-            # Raw signal stats
-            self._get_statistics(signal_windows=global_sw_metadata_list, stage=st)
-            assert self.raw_signal_mean and self.raw_signal_stdev and self.time_to_elm_quantiles
-            if st == 'train':
-                self.save_hyperparameters({
-                    'raw_signal_mean': self.raw_signal_mean,
-                    'raw_signal_stdev': self.raw_signal_stdev,
-                })
+            # restrict data according to quantiles
+            if self.time_to_elm_quantile_min is not None and self.time_to_elm_quantile_max is not None:
+                time_to_elm_labels = np.array([sig_win['time_to_elm'] for sig_win in global_sw_metadata_list])
+                time_to_elm_min, time_to_elm_max = np.quantile(time_to_elm_labels, (self.time_to_elm_quantile_min, self.time_to_elm_quantile_max))
+                if self.contrastive_learning:
+                    if self.is_global_zero: 
+                        print(f"  Contrastive learning with time-to-ELM quantiles 0.0-{self.time_to_elm_quantile_min:.2f} and {self.time_to_elm_quantile_max:.2f}-1.0")
+                    for i in np.arange(len(global_sw_metadata_list)-1, -1, -1, dtype=int):
+                        if (global_sw_metadata_list[i]['time_to_elm'] > time_to_elm_min) and \
+                            (global_sw_metadata_list[i]['time_to_elm'] < time_to_elm_max):
+                            global_sw_metadata_list.pop(i)
+                else:
+                    if self.is_global_zero: 
+                        print(f"  Restricting time-to-ELM labels to quantile range: {self.time_to_elm_quantile_min:.2f}-{self.time_to_elm_quantile_max:.2f}")
+                    for i in np.arange(len(global_sw_metadata_list)-1, -1, -1, dtype=int):
+                        if (global_sw_metadata_list[i]['time_to_elm'] < time_to_elm_min) or \
+                            (global_sw_metadata_list[i]['time_to_elm'] > time_to_elm_max):
+                            global_sw_metadata_list.pop(i)
+                if self.is_global_zero:
+                    n_signal_windows = len(global_sw_metadata_list)
+                    print(f"  Rank {self.trainer.global_rank} Stage {st.upper()}: Restricted global signal windows: {n_signal_windows:,d}")
+                    print(f"  Rank {self.trainer.global_rank} Stage {st.upper()}: Global steps per epoch {n_signal_windows/self.batch_size:,.1f}")
 
             # split signal windows by rank
             rankwise_sw_split = np.array_split(global_sw_metadata_list, self.trainer.world_size)
@@ -540,9 +561,9 @@ class Data(_Base_Class, LightningDataModule):
                     time_to_elm_quantiles=self.time_to_elm_quantiles,
                     sw_list=sw_for_rank,
                     signal_list=signals_for_rank,
-                    quantile_min=self.quantile_min,
-                    quantile_max=self.quantile_max,
-                    contrastive_learning=self.contrastive_learing,
+                    quantile_min=self.time_to_elm_quantile_min,
+                    quantile_max=self.time_to_elm_quantile_max,
+                    contrastive_learning=self.contrastive_learning,
                 )
                 print(f"  Rank {self.trainer.global_rank} stage {st}: Dataset size: {len(self.datasets[st]):,d}")
             
@@ -724,29 +745,6 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
                 self.signal_list[elm_index]
             )
 
-        # restrict quantile range
-        # if self.quantile_min is not None and self.quantile_max is not None:
-        #     qmin_val, qmax_val = np.quantile(self.time_to_elm_labels, (self.quantile_min, self.quantile_max))
-        #     if self.contrastive_learning:
-        #         if self.is_global_zero: 
-        #             print(f"  Contrastive learning with time-to-ELM quantiles 0.0-{self.quantile_min:.2f} and {self.quantile_max:.2f}-1.0")
-        #         mask = np.logical_or(
-        #             self.time_to_elm_labels <= qmin_val,
-        #             self.time_to_elm_labels >= qmax_val,
-        #         )
-        #     else:
-        #         if self.is_global_zero: 
-        #             print(f"  Restricting time-to-ELM labels to quantile range: {self.quantile_min:.2f}-{self.quantile_max:.2f}")
-        #         mask = np.logical_and(
-        #             self.time_to_elm_labels >= qmin_val,
-        #             self.time_to_elm_labels <= qmax_val,
-        #         )
-        #     self.time_to_elm_labels = np.array(self.time_to_elm_labels)[mask].tolist()
-        #     self.t0_indices = np.array(self.t0_indices, dtype=int)[mask].tolist()
-        #     if self.is_global_zero:
-        #         print(f"  Restricted time-to-ELM min/max: {np.min(self.time_to_elm_labels):.1f}-{np.max(self.time_to_elm_labels):.1f} ms")
-        #         print(f"  Restricted data signal windows: {len(self):,d}")
-
     def __len__(self) -> int:
         return len(self.sw_list)
     
@@ -770,6 +768,7 @@ def main(
         initial_max_lr = 1e-3,
         layerwise_lr_decrement = 1.5,
         weight_decay = 1e-4,
+        lr_scheduler_patience=8,
         # loggers
         log_freq = 100,
         use_wandb = False,
@@ -784,8 +783,8 @@ def main(
         fraction_validation = 0.12,
         fraction_test = 0.0,
         num_workers = 0,
-        quantile_min = None,
-        quantile_max = None,
+        time_to_elm_quantile_min = None,
+        time_to_elm_quantile_max = None,
         contrastive_learning = True,
 ):
 
@@ -808,6 +807,7 @@ def main(
         layerwise_lr_decrement=layerwise_lr_decrement,
         weight_decay=weight_decay,
         is_global_zero=is_global_zero,
+        lr_scheduler_patience=lr_scheduler_patience,
     )
     ### callbacks
     monitor_metric = lit_model.monitor_metric
@@ -880,11 +880,8 @@ def main(
             gradient_as_bucket_view=True,
             static_graph=True,
         ) if world_size>1 else 'auto',
-        # use_distributed_sampler = world_size>1,
         num_nodes = num_nodes,
         use_distributed_sampler=False,
-        # check_val_every_n_epoch=None,
-        # val_check_interval=200,
     )
 
     assert trainer.node_rank == node_rank
@@ -902,9 +899,9 @@ def main(
         fraction_test=fraction_test,
         fraction_validation=fraction_validation,
         num_workers=num_workers,
-        quantile_min=quantile_min,
-        quantile_max=quantile_max,
-        contrastive_learing=contrastive_learning,
+        time_to_elm_quantile_min=time_to_elm_quantile_min,
+        time_to_elm_quantile_max=time_to_elm_quantile_max,
+        contrastive_learning=contrastive_learning,
         is_global_zero=is_global_zero,
     )
 
@@ -922,6 +919,7 @@ if __name__=='__main__':
         # data_file='/Users/drsmith/Documents/repos/bes-ml/bes_ml/small_elm_data.hdf5',
         max_elms=100,
         batch_size=32,
-        max_epochs=8,
+        max_epochs=4,
         num_workers=4,
+
     )
