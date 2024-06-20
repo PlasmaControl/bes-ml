@@ -783,9 +783,9 @@ def main(
         fraction_validation = 0.12,
         fraction_test = 0.0,
         num_workers = 0,
-        time_to_elm_quantile_min = None,
-        time_to_elm_quantile_max = None,
-        contrastive_learning = True,
+        time_to_elm_quantile_min: float|Any = None,
+        time_to_elm_quantile_max: float|Any = None,
+        contrastive_learning: bool = True,
 ):
 
     # SLURM/MPI environment
@@ -921,5 +921,7 @@ if __name__=='__main__':
         batch_size=32,
         max_epochs=4,
         num_workers=4,
-
+        time_to_elm_quantile_min=0.4,
+        time_to_elm_quantile_max=0.6,
+        contrastive_learning=True,
     )
