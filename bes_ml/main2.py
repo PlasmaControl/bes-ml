@@ -769,6 +769,7 @@ def main(
         layerwise_lr_decrement = 1.5,
         weight_decay = 1e-4,
         lr_scheduler_patience=8,
+        monitor_metric='sum_loss/val',
         # loggers
         log_freq = 100,
         use_wandb = False,
@@ -808,9 +809,11 @@ def main(
         weight_decay=weight_decay,
         is_global_zero=is_global_zero,
         lr_scheduler_patience=lr_scheduler_patience,
+        monitor_metric=monitor_metric,
     )
     ### callbacks
-    monitor_metric = lit_model.monitor_metric
+    # monitor_metric = lit_model.monitor_metric
+    # monitor_metric = 'median_classifier/f1_score/val'
     metric_mode = 'min' if 'loss' in monitor_metric else 'max'
     callbacks = [
         LearningRateMonitor(),
@@ -924,4 +927,5 @@ if __name__=='__main__':
         time_to_elm_quantile_min=0.4,
         time_to_elm_quantile_max=0.6,
         contrastive_learning=True,
+        monitor_metric='median_classifier/f1_score/val'
     )
