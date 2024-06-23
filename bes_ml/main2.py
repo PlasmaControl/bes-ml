@@ -125,9 +125,9 @@ class Model(LightningModule, _Base_Class):
         conv_layers = (
             {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
             {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1},
-            {'out_channels': 8, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
-            {'out_channels': 8, 'kernel': (1, 3, 3), 'stride': 1},
-            {'out_channels': 8, 'kernel': (1, 4, 4), 'stride': 1},
+            {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
+            {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1},
+            {'out_channels': 4, 'kernel': (1, 4, 4), 'stride': 1},
         )
 
         data_shape = self.input_data_shape
@@ -157,7 +157,6 @@ class Model(LightningModule, _Base_Class):
 
         output_size = feature_model(torch.zeros(self.input_data_shape)).numel()
         if self.is_global_zero: print(f"  Feature space size: {output_size}")
-        assert output_size == 128
 
         n_params = sum(p.numel() for p in feature_model.parameters() if p.requires_grad)
         if self.is_global_zero: print(f"  Feature sub-model parameters: {n_params:,d}")
@@ -171,7 +170,7 @@ class Model(LightningModule, _Base_Class):
         mlp_layer_dict = OrderedDict()
 
         assert self.feature_space_size
-        mlp_layers = (self.feature_space_size, 64, 32, 1)
+        mlp_layers = (self.feature_space_size, 32, 1)
 
         for i in range(len(mlp_layers)-1):
             # mlp_layer_dict[f"L{i:02d}_bn"] = torch.nn.BatchNorm1d(
@@ -376,6 +375,7 @@ class Data(_Base_Class, LightningDataModule):
     time_to_elm_quantile_min: float|Any = None
     time_to_elm_quantile_max: float|Any = None
     contrastive_learning: bool = False
+    min_pre_elm_time: float|Any = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -442,6 +442,7 @@ class Data(_Base_Class, LightningDataModule):
             assert len(global_elm_indices) > 0
             global_sw_metadata_list = []
             global_outliers = 0
+            skipped_short_pre_elm_time = 0
             with h5py.File(self.data_file, 'r') as h5_file:
                 elms: h5py.Group = h5_file['elms']
                 for i_elm, elm_index in enumerate(global_elm_indices):
@@ -453,8 +454,11 @@ class Data(_Base_Class, LightningDataModule):
                     assert elm_event['bes_time'].size == elm_event["bes_signals"].shape[1]
                     time = np.array(elm_event['bes_time'], dtype=np.float32)
                     t_start: float = elm_event.attrs['t_start']
-                    i_start: int = np.flatnonzero(time >= t_start)[0]
                     t_stop: float = elm_event.attrs['t_stop'] - 0.05
+                    if self.min_pre_elm_time and (t_stop-t_start) < self.min_pre_elm_time:
+                        skipped_short_pre_elm_time += 1
+                        continue
+                    i_start: int = np.flatnonzero(time >= t_start)[0]
                     i_stop: int = np.flatnonzero(time <= t_stop)[-1]
                     i_window_stop = i_stop
                     signals = np.array(elm_event["bes_signals"], dtype=np.float32)  # (64, <time>)
@@ -478,6 +482,8 @@ class Data(_Base_Class, LightningDataModule):
                             'time_to_elm': time[i_stop] - time[i_window_stop]
                         })
                         i_window_stop -= self.signal_window_size // self.stride_factor
+
+            print(f"  Rank {self.trainer.global_rank} Stage {st.upper()}:  Skipped ELMs for short pre-ELM time: {skipped_short_pre_elm_time}")
 
             n_signal_windows = len(global_sw_metadata_list)
             print(f"  Rank {self.trainer.global_rank} Stage {st.upper()}: Global signal windows: {n_signal_windows:,d}  ({global_outliers:,d} outliers removed)")
@@ -787,6 +793,7 @@ def main(
         time_to_elm_quantile_min: float|Any = None,
         time_to_elm_quantile_max: float|Any = None,
         contrastive_learning: bool = True,
+        min_pre_elm_time: float|Any = None,
 ):
 
     # SLURM/MPI environment
@@ -868,6 +875,8 @@ def main(
         print("Model Summary:")
         print(ModelSummary(lit_model, max_depth=-1))
 
+    exit()
+
     ### initialize trainer
     trainer = Trainer(
         max_epochs = max_epochs,
@@ -906,6 +915,7 @@ def main(
         time_to_elm_quantile_max=time_to_elm_quantile_max,
         contrastive_learning=contrastive_learning,
         is_global_zero=is_global_zero,
+        min_pre_elm_time=min_pre_elm_time,
     )
 
     trainer.fit(lit_model, datamodule=lit_datamodule)
@@ -918,14 +928,16 @@ def main(
 
 if __name__=='__main__':
     main(
-        data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
+        data_file='/global/homes/d/drsmith/scratch-ml/data/labeled_elm_events.hdf5',
+        # data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
         # data_file='/Users/drsmith/Documents/repos/bes-ml/bes_ml/small_elm_data.hdf5',
-        max_elms=100,
-        batch_size=32,
-        max_epochs=4,
-        num_workers=4,
+        max_elms=300,
+        batch_size=128,
+        max_epochs=2,
+        num_workers=2,
         time_to_elm_quantile_min=0.4,
         time_to_elm_quantile_max=0.6,
         contrastive_learning=True,
-        monitor_metric='median_classifier/f1_score/val'
+        monitor_metric='median_classifier/f1_score/val',
+        min_pre_elm_time=20,
     )
