@@ -7,6 +7,7 @@ import time
 
 import numpy as np
 import sklearn.metrics
+import scipy.signal
 import h5py
 import wandb
 
@@ -390,6 +391,7 @@ class Data(_Base_Class, LightningDataModule):
     time_to_elm_quantile_max: float|Any = None
     contrastive_learning: bool = False
     min_pre_elm_time: float|Any = None
+    fir_hp_filter: float|Any = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -413,6 +415,17 @@ class Data(_Base_Class, LightningDataModule):
 
         if self.is_global_zero:
             print_fields(self)
+
+        self.a_coeffs = self.b_coeffs = None
+        if self.fir_hp_filter:
+            self.b_coeffs = scipy.signal.firwin(
+                numtaps=401,  # must be odd
+                cutoff=self.fir_hp_filter,  # transition width in kHz
+                pass_zero='highpass',
+                fs=1e3,  # f_sample in kHz
+            )
+            self.a_coeffs = np.zeros_like(self.b_coeffs)
+            self.a_coeffs[0] = 1
 
         # datamodule state, to reproduce pre-processing
         self.state_items = [
@@ -441,6 +454,9 @@ class Data(_Base_Class, LightningDataModule):
             if self.is_global_zero:
                 print("Creating global data split")
             self._make_data_split()
+
+        if self.is_global_zero and self.b_coeffs is not None:
+            print(f"  Applying HP filter with PB={self.fir_hp_filter:.1f} kHz")
 
         stages = ['train', 'validation'] if stage == 'fit' else [stage]
         for st in stages:
@@ -476,6 +492,15 @@ class Data(_Base_Class, LightningDataModule):
                     i_stop: int = np.flatnonzero(time <= t_stop)[-1]
                     i_window_stop = i_stop
                     signals = np.array(elm_event["bes_signals"], dtype=np.float32)  # (64, <time>)
+                    if self.b_coeffs is not None:
+                        signals = np.array(
+                            scipy.signal.lfilter(
+                                x=signals,
+                                a=self.a_coeffs,
+                                b=self.b_coeffs,
+                            ),
+                            dtype=np.float32,
+                        )
                     signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (time, pol, rad)
                     assert signals.shape[0] == time.size
                     assert (signals.shape[1] == 8) and (signals.shape[2] == 8)
@@ -811,6 +836,7 @@ def main(
         time_to_elm_quantile_max: float|Any = None,
         contrastive_learning: bool = True,
         min_pre_elm_time: float|Any = None,
+        fir_hp_filter: float|Any = None,
 ):
 
     # SLURM/MPI environment
@@ -934,6 +960,7 @@ def main(
         contrastive_learning=contrastive_learning,
         is_global_zero=is_global_zero,
         min_pre_elm_time=min_pre_elm_time,
+        fir_hp_filter=fir_hp_filter,
     )
 
     if skip_train is False:
@@ -959,4 +986,5 @@ if __name__=='__main__':
         min_pre_elm_time=20,
         skip_train=False,
         do_dropout=True,
+        fir_hp_filter=5.0,
     )
