@@ -58,7 +58,9 @@ class Model(LightningModule, _Base_Class):
     lr_scheduler_threshold: float = 1e-3
     weight_decay: float = 1e-6
     leaky_relu_slope: float = 1e-2
-    monitor_metric: str = 'sum_loss/val'
+    monitor_metric: str|Any = None #'sum_loss/val' f"{task}/{metric_name}/{stage}"
+    do_dropout: bool = False
+    dropout_percent: float = 0.05
 
     def __post_init__(self):
 
@@ -90,6 +92,9 @@ class Model(LightningModule, _Base_Class):
             'precision_score': sklearn.metrics.precision_score,
             'recall_score': sklearn.metrics.recall_score,
         }
+
+        if self.monitor_metric is None:
+            self.monitor_metric = "median_classifier/f1_score/val"
 
         self.total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
         if self.is_global_zero: print(f"Total model parameters: {self.total_parameters:,}")
@@ -258,8 +263,14 @@ class Model(LightningModule, _Base_Class):
             },
         }
 
-    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(
+            self, 
+            x: torch.Tensor, 
+            stage: str = '',
+    ) -> dict[str, torch.Tensor]:
         for layer in self.feature_model.children():
+            if self.do_dropout and stage=='train':
+                x = torch.nn.functional.dropout3d(x, p=self.dropout_percent)
             x = torch.nn.functional.leaky_relu(layer(x), negative_slope=self.leaky_relu_slope)
         features = x.flatten(1)
         results = {}
@@ -268,8 +279,10 @@ class Model(LightningModule, _Base_Class):
             children_layers = list(task_model.children())
             nlayers = len(children_layers)
             for i, layer in enumerate(children_layers):
+                if self.do_dropout and stage=='train' and i != nlayers-1:
+                    x = torch.nn.functional.dropout1d(x, p=self.dropout_percent)
                 x = layer(x)
-                if i+1 < nlayers:
+                if i != nlayers-1:
                     x = torch.nn.functional.leaky_relu(x, negative_slope=self.leaky_relu_slope)
             results[task_model_name] = x
         return results
@@ -287,7 +300,7 @@ class Model(LightningModule, _Base_Class):
 
     def update_step(self, batch, batch_idx, stage: str) -> torch.Tensor:
         signal_window, time_to_elm, quantiles = batch
-        task_results = self(signal_window)
+        task_results = self(signal_window, stage=stage)
         sum_loss = torch.Tensor([0.0])
         for task, task_metrics in self.task_metrics.items():
             results: torch.Tensor = task_results[task]
@@ -775,8 +788,10 @@ def main(
         initial_max_lr = 1e-3,
         layerwise_lr_decrement = 1.5,
         weight_decay = 1e-4,
-        lr_scheduler_patience=8,
-        monitor_metric='sum_loss/val',
+        lr_scheduler_patience = 8,
+        monitor_metric = None,
+        do_dropout = False,
+        dropout_percent = 0.05,
         # loggers
         log_freq = 100,
         use_wandb = False,
@@ -785,8 +800,9 @@ def main(
         early_stopping_patience = 5,
         # trainer
         max_epochs = 2,
-        gradient_clip_val = 500,
+        gradient_clip_val = 2000,
         batch_size = 64,
+        skip_train: bool = False,
         # data
         fraction_validation = 0.12,
         fraction_test = 0.0,
@@ -795,7 +811,6 @@ def main(
         time_to_elm_quantile_max: float|Any = None,
         contrastive_learning: bool = True,
         min_pre_elm_time: float|Any = None,
-        skip_train: bool = False,
 ):
 
     # SLURM/MPI environment
@@ -818,8 +833,11 @@ def main(
         weight_decay=weight_decay,
         is_global_zero=is_global_zero,
         lr_scheduler_patience=lr_scheduler_patience,
+        do_dropout=do_dropout,
+        dropout_percent=dropout_percent,
         monitor_metric=monitor_metric,
     )
+    monitor_metric = lit_model.monitor_metric
     ### callbacks
     metric_mode = 'min' if 'loss' in monitor_metric else 'max'
     callbacks = [
@@ -938,7 +956,7 @@ if __name__=='__main__':
         time_to_elm_quantile_min=0.4,
         time_to_elm_quantile_max=0.6,
         contrastive_learning=True,
-        monitor_metric='median_classifier/f1_score/val',
         min_pre_elm_time=20,
-        skip_train=True,
+        skip_train=False,
+        do_dropout=True,
     )
