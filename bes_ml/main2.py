@@ -62,6 +62,7 @@ class Model(LightningModule, _Base_Class):
     monitor_metric: str|Any = None #'sum_loss/val' f"{task}/{metric_name}/{stage}"
     do_dropout: bool = False
     dropout_percent: float = 0.05
+    use_optimizer: str = 'SGD'
 
     def __post_init__(self):
 
@@ -244,11 +245,21 @@ class Model(LightningModule, _Base_Class):
                         if self.is_global_zero: print(f"  {task_name} {layer_name} {param_name} {param_lr:.3e}")
                     lr /= self.layerwise_lr_decrement
 
-        self.optimizer = torch.optim.Adam(
-            parameter_group,
-            lr=self.initial_max_lr,
-            weight_decay=self.weight_decay,
-        )
+        if self.is_global_zero: print(f"Using {self.use_optimizer} optimizer")
+        if self.use_optimizer.lower() == 'sgd':
+            self.optimizer = torch.optim.SGD(
+                parameter_group,
+                lr=self.initial_max_lr,
+                weight_decay=self.weight_decay,
+                momentum=0.2,
+            )
+        elif self.use_optimizer.lower() == 'adam':
+            self.optimizer = torch.optim.Adam(
+                parameter_group,
+                lr=self.initial_max_lr,
+                weight_decay=self.weight_decay,
+            )
+
         self.lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer=self.optimizer,
             factor=0.5,
@@ -391,7 +402,7 @@ class Data(_Base_Class, LightningDataModule):
     time_to_elm_quantile_max: float|Any = None
     contrastive_learning: bool = False
     min_pre_elm_time: float|Any = None
-    fir_hp_filter: float|Any = None
+    fir_hp_filter: float = 0.0
 
     def __post_init__(self):
         super().__post_init__()
@@ -455,8 +466,11 @@ class Data(_Base_Class, LightningDataModule):
                 print("Creating global data split")
             self._make_data_split()
 
-        if self.is_global_zero and self.b_coeffs is not None:
-            print(f"  Applying HP filter with PB={self.fir_hp_filter:.1f} kHz")
+        if self.is_global_zero:
+            if self.b_coeffs is not None:
+                print(f"  Using HP filter with f_pass={self.fir_hp_filter:.1f} kHz")
+            else:
+                print("  Using raw BES signals; no HP filter")
 
         stages = ['train', 'validation'] if stage == 'fit' else [stage]
         for st in stages:
@@ -817,6 +831,7 @@ def main(
         monitor_metric = None,
         do_dropout = False,
         dropout_percent = 0.05,
+        use_optimizer = 'SGD',
         # loggers
         log_freq = 100,
         use_wandb = False,
@@ -836,7 +851,7 @@ def main(
         time_to_elm_quantile_max: float|Any = None,
         contrastive_learning: bool = True,
         min_pre_elm_time: float|Any = None,
-        fir_hp_filter: float|Any = None,
+        fir_hp_filter: float = 0.0,
 ):
 
     # SLURM/MPI environment
@@ -862,6 +877,7 @@ def main(
         do_dropout=do_dropout,
         dropout_percent=dropout_percent,
         monitor_metric=monitor_metric,
+        use_optimizer=use_optimizer,
     )
     monitor_metric = lit_model.monitor_metric
     ### callbacks
@@ -985,6 +1001,6 @@ if __name__=='__main__':
         contrastive_learning=True,
         min_pre_elm_time=20,
         skip_train=False,
-        do_dropout=True,
         fir_hp_filter=5.0,
+        use_optimizer='sgd',
     )

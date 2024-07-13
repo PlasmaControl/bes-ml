@@ -378,6 +378,7 @@ class Model(LightningModule, _Base_Class):
 @dataclasses.dataclass(eq=False)
 class Data(_Base_Class, LightningDataModule):
     data_file: str|Path|Any = None
+    confinement_data_file: str|Path|Any = None
     max_elms: int|Any = None
     batch_size: int = 128
     stride_factor: int = 8
@@ -399,6 +400,8 @@ class Data(_Base_Class, LightningDataModule):
         self.save_hyperparameters()
         self.data_file = Path(self.data_file).absolute()
         assert self.data_file.exists()
+        self.confinement_data_file = Path(self.confinement_data_file).absolute()
+        assert self.confinement_data_file.exists()
 
         self.datasets: dict[str,torch.utils.data.Dataset] = {}
         self.global_elm_split: dict[str,Sequence] = {}
@@ -409,6 +412,7 @@ class Data(_Base_Class, LightningDataModule):
         self.time_to_elm_quantiles: dict[float,float] = {}
         self.raw_signal_mean: float|Any = None
         self.raw_signal_stdev: float|Any = None
+        self.global_confinement_split: dict[str,Sequence] = {}
 
         self.trainer: Trainer|Any = None
         self.batch_size_per_rank: int = 0
@@ -432,6 +436,7 @@ class Data(_Base_Class, LightningDataModule):
             'raw_signal_mean',
             'raw_signal_stdev',
             'global_elm_split',
+            'global_confinement_split',
             'time_to_elm_quantiles',
         ]
         for item in self.state_items:
@@ -454,6 +459,11 @@ class Data(_Base_Class, LightningDataModule):
             if self.is_global_zero:
                 print("Creating global data split")
             self._make_data_split()
+
+        if 'train' not in self.global_confinement_split:
+            if self.is_global_zero:
+                print("Creating global confinement split")
+            self._make_confinement_split()
 
         if self.is_global_zero and self.b_coeffs is not None:
             print(f"  Applying HP filter with PB={self.fir_hp_filter:.1f} kHz")
@@ -616,6 +626,14 @@ class Data(_Base_Class, LightningDataModule):
                 pass
 
         return
+
+    def _make_confinement_split(self):
+        assert len(self.global_confinement_split) == 0
+        print(f"Rank {self.trainer.global_rank}: Confinement data split")
+        shots = {}
+        with h5py.File(self.confinement_data_file) as data_file:
+            for shot in data_file:
+                shot_labels = 
 
     def _make_data_split(self):
         assert len(self.global_elm_split) == 0
@@ -806,6 +824,7 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
 
 def main(
         data_file: str|Path,
+        confinement_data_file: str|Path,
         max_elms: int|Any = None,
         signal_window_size = 1024,
         experiment_name = 'experiment_default',
@@ -950,6 +969,7 @@ def main(
     lit_datamodule = Data(
         signal_window_size=signal_window_size,
         data_file=data_file,
+        confinement_data_file=confinement_data_file,
         max_elms=max_elms,
         batch_size=batch_size,
         fraction_test=fraction_test,
@@ -976,6 +996,7 @@ if __name__=='__main__':
         data_file='/global/homes/d/drsmith/scratch-ml/data/labeled_elm_events.hdf5',
         # data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
         # data_file='/Users/drsmith/Documents/repos/bes-ml/bes_ml/small_elm_data.hdf5',
+        confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
         max_elms=300,
         batch_size=128,
         max_epochs=2,
