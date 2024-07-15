@@ -647,7 +647,7 @@ class Data(_Base_Class, LightningDataModule):
         shots = {}
         with h5py.File(self.confinement_data_file) as data_file:
             for shot in data_file:
-                shot_labels = 
+                shot_labels = 1
 
     def _make_data_split(self):
         assert len(self.global_elm_split) == 0
@@ -1022,7 +1022,6 @@ if __name__=='__main__':
         contrastive_learning=True,
         min_pre_elm_time=20,
         skip_train=False,
-        do_dropout=True,
         fir_hp_filter=5.0,
         use_optimizer='sgd',
     )
