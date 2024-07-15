@@ -24,6 +24,7 @@ from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from lightning.pytorch.callbacks import \
     LearningRateMonitor, EarlyStopping, ModelCheckpoint
 from lightning.pytorch.utilities.model_summary.model_summary import ModelSummary
+from lightning.pytorch.utilities import grad_norm
 
 torch.set_float32_matmul_precision('medium')
 torch.set_default_dtype(torch.float32)
@@ -371,6 +372,12 @@ class Model(LightningModule, _Base_Class):
             line += f"ep/gl steps {epoch_steps:,d}/{self.global_step:,d}  "
             line += f"ep/gl time (min): {epoch_time/60:.1f}/{global_time/60:.1f}  " 
             print(line)
+
+    def on_before_optimizer_step(self, optimizer):
+        # Compute the 2-norm for each layer
+        # If using mixed precision, the gradients are already unscaled here
+        norms = grad_norm(self, norm_type=2)
+        self.log_dict(norms, on_step=True)
 
     # def on_validation_epoch_start(self):
     #     if self.is_global_zero:
@@ -840,7 +847,7 @@ def main(
         early_stopping_patience = 5,
         # trainer
         max_epochs = 2,
-        gradient_clip_val = 2000,
+        gradient_clip_val = None,
         batch_size = 64,
         skip_train: bool = False,
         # data
@@ -992,15 +999,18 @@ if __name__=='__main__':
         data_file='/global/homes/d/drsmith/scratch-ml/data/labeled_elm_events.hdf5',
         # data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
         # data_file='/Users/drsmith/Documents/repos/bes-ml/bes_ml/small_elm_data.hdf5',
-        max_elms=300,
+        max_elms=400,
         batch_size=128,
         max_epochs=2,
         num_workers=2,
+        log_freq=10,
         time_to_elm_quantile_min=0.4,
         time_to_elm_quantile_max=0.6,
         contrastive_learning=True,
         min_pre_elm_time=20,
-        skip_train=False,
-        fir_hp_filter=5.0,
+        # skip_train=False,
+        # fir_hp_filter=5.0,
         use_optimizer='sgd',
+        use_wandb=True,
+        gradient_clip_val=0.3,
     )
