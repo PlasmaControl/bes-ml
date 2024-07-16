@@ -851,6 +851,7 @@ def main(
         gradient_clip_algorithm = None,
         batch_size = 64,
         skip_train: bool = False,
+        precision = None,
         # data
         fraction_validation = 0.12,
         fraction_test = 0.0,
@@ -946,6 +947,8 @@ def main(
     # exit()
 
     ### initialize trainer
+    if precision is None:
+        precision = '16-mixed' if torch.cuda.is_available() else 32
     trainer = Trainer(
         max_epochs = max_epochs,
         gradient_clip_val = gradient_clip_val,
@@ -956,7 +959,7 @@ def main(
         enable_checkpointing = True,
         enable_progress_bar = False,
         enable_model_summary = False,
-        precision = '16-mixed' if torch.cuda.is_available() else 32,
+        precision = precision,
         strategy = DDPStrategy(
             gradient_as_bucket_view=True,
             static_graph=True,
@@ -964,6 +967,11 @@ def main(
         num_nodes = num_nodes,
         use_distributed_sampler=False,
     )
+    lit_model.save_hyperparameters({
+        'gradient_clip_val': gradient_clip_val, 
+        'gradient_clip_algorithm': gradient_clip_algorithm, 
+        'precision': precision,
+    })
 
     assert trainer.node_rank == node_rank
     assert trainer.world_size == world_size
@@ -1013,7 +1021,7 @@ if __name__=='__main__':
         # skip_train=False,
         # fir_hp_filter=5.0,
         use_optimizer='sgd',
-        # use_wandb=True,
+        use_wandb=True,
         gradient_clip_val=0.1,
-        gradient_clip_algorithm='value',
+        gradient_clip_algorithm='norm',
     )

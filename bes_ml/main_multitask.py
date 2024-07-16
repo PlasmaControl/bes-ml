@@ -24,6 +24,7 @@ from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from lightning.pytorch.callbacks import \
     LearningRateMonitor, EarlyStopping, ModelCheckpoint
 from lightning.pytorch.utilities.model_summary.model_summary import ModelSummary
+from lightning.pytorch.utilities import grad_norm
 
 torch.set_float32_matmul_precision('medium')
 torch.set_default_dtype(torch.float32)
@@ -371,6 +372,12 @@ class Model(LightningModule, _Base_Class):
             line += f"ep/gl steps {epoch_steps:,d}/{self.global_step:,d}  "
             line += f"ep/gl time (min): {epoch_time/60:.1f}/{global_time/60:.1f}  " 
             print(line)
+
+    def on_before_optimizer_step(self, optimizer):
+        # Compute the 2-norm for each layer
+        # If using mixed precision, the gradients are already unscaled here
+        norms = grad_norm(self, norm_type=2)
+        self.log_dict(norms, on_step=True)
 
     # def on_validation_epoch_start(self):
     #     if self.is_global_zero:
@@ -859,9 +866,11 @@ def main(
         early_stopping_patience = 5,
         # trainer
         max_epochs = 2,
-        gradient_clip_val = 2000,
+        gradient_clip_val = None,
+        gradient_clip_algorithm = None,
         batch_size = 64,
         skip_train: bool = False,
+        precision = None,
         # data
         fraction_validation = 0.12,
         fraction_test = 0.0,
@@ -957,16 +966,19 @@ def main(
     # exit()
 
     ### initialize trainer
+    if precision is None:
+        precision = '16-mixed' if torch.cuda.is_available() else 32
     trainer = Trainer(
         max_epochs = max_epochs,
         gradient_clip_val = gradient_clip_val,
+        gradient_clip_algorithm = gradient_clip_algorithm,
         logger = loggers,
         log_every_n_steps = log_freq,
         callbacks = callbacks,
         enable_checkpointing = True,
         enable_progress_bar = False,
         enable_model_summary = False,
-        precision = '16-mixed' if torch.cuda.is_available() else 32,
+        precision = precision,
         strategy = DDPStrategy(
             gradient_as_bucket_view=True,
             static_graph=True,
@@ -974,6 +986,11 @@ def main(
         num_nodes = num_nodes,
         use_distributed_sampler=False,
     )
+    lit_model.save_hyperparameters({
+        'gradient_clip_val': gradient_clip_val, 
+        'gradient_clip_algorithm': gradient_clip_algorithm, 
+        'precision': precision,
+    })
 
     assert trainer.node_rank == node_rank
     assert trainer.world_size == world_size
