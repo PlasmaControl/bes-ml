@@ -848,6 +848,7 @@ def main(
         # trainer
         max_epochs = 2,
         gradient_clip_val = None,
+        gradient_clip_algorithm = None,
         batch_size = 64,
         skip_train: bool = False,
         # data
@@ -948,6 +949,7 @@ def main(
     trainer = Trainer(
         max_epochs = max_epochs,
         gradient_clip_val = gradient_clip_val,
+        gradient_clip_algorithm = gradient_clip_algorithm,
         logger = loggers,
         log_every_n_steps = log_freq,
         callbacks = callbacks,
@@ -1003,7 +1005,7 @@ if __name__=='__main__':
         batch_size=128,
         max_epochs=2,
         num_workers=2,
-        log_freq=10,
+        log_freq=100,
         time_to_elm_quantile_min=0.4,
         time_to_elm_quantile_max=0.6,
         contrastive_learning=True,
@@ -1011,6 +1013,7 @@ if __name__=='__main__':
         # skip_train=False,
         # fir_hp_filter=5.0,
         use_optimizer='sgd',
-        use_wandb=True,
-        gradient_clip_val=0.3,
+        # use_wandb=True,
+        gradient_clip_val=0.1,
+        gradient_clip_algorithm='value',
     )
