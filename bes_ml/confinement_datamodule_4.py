@@ -206,9 +206,9 @@ class Confinement_Datamodule(LightningDataModule):
     upper_cutoff_frequency_hz: float = None  # Upper cutoff frequency in Hz
     clip_signals: float = None # remove signal windows with abs(raw_signals) > clip_signals
     mask_sigma_outliers: float = None  # remove signal windows with abs(standardized_signals) > n_sigma
-    bad_confinement_indices: list = None  # iterable of indices to skip when reading data
-    bad_confinement_indices_csv: str | bool = False  # CSV file to read bad indices
-    log_time: bool = False  # if True, use label = log(time_to_elm_onset)
+    # bad_confinement_indices: list = None  # iterable of indices to skip when reading data
+    # bad_confinement_indices_csv: str | bool = False  # CSV file to read bad indices
+    # log_time: bool = False  # if True, use label = log(time_to_elm_onset)
     one_hot_labels: bool = False # if True, use one-hot vector for label
     prepare_data_per_node: bool = True  # hack to avoid error between dataclass and LightningDataModule
     plot_data_stats: bool = True
@@ -965,8 +965,8 @@ class Confinement_Datamodule(LightningDataModule):
         first_valid_signal_window_start_index = self.signal_window_size - 1
         valid_t0[first_valid_signal_window_start_index:] = 1
 
-        if self.log_time:
-            labels = np.log10(labels)
+        # if self.log_time:
+        #     labels = np.log10(labels)
 
         return labels, valid_t0
     

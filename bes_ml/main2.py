@@ -1021,7 +1021,7 @@ if __name__=='__main__':
         # skip_train=False,
         # fir_hp_filter=5.0,
         use_optimizer='sgd',
-        use_wandb=True,
+        # use_wandb=True,
         gradient_clip_val=0.1,
-        gradient_clip_algorithm='norm',
+        gradient_clip_algorithm='value',
     )
