@@ -448,7 +448,7 @@ class Data(_Base_Class, LightningDataModule):
         self.confinement_data_file = Path(self.confinement_data_file).absolute()
         assert self.confinement_data_file.exists()
 
-        self.datasets: dict[str,torch.utils.data.Dataset] = {}
+        self.elm_datasets: dict[str,torch.utils.data.Dataset] = {}
         self.global_elm_split: dict[str,Sequence] = {}
         self.global_shot_split: dict[str,np.ndarray] = {}
         self.rankwise_elm_split: dict[str,Sequence] = {}
@@ -457,6 +457,8 @@ class Data(_Base_Class, LightningDataModule):
         self.time_to_elm_quantiles: dict[float,float] = {}
         self.raw_signal_mean: float|Any = None
         self.raw_signal_stdev: float|Any = None
+
+        self.confinement_datasets: dict[str,torch.utils.data.Dataset] = {}
         self.signal_mean: float|Any = None
         self.signal_stdev: float|Any = None
         self.global_confinement_split: dict[str,Sequence] = {}
@@ -529,7 +531,7 @@ class Data(_Base_Class, LightningDataModule):
         stages = ['train', 'validation'] if stage == 'fit' else [stage]
         for st in stages:
             assert st in ['train', 'validation', 'test', 'predict']
-            if st in self.datasets and isinstance(self.datasets[st], torch.utils.data.Dataset):
+            if st in self.elm_datasets and isinstance(self.elm_datasets[st], torch.utils.data.Dataset):
                 if self.is_global_zero:
                     print(f"Stage {st.upper()}: Using saved dataset")
                 continue
@@ -669,7 +671,7 @@ class Data(_Base_Class, LightningDataModule):
 
             # rank-wise datasets
             if st in ['train', 'validation', 'test']:
-                self.datasets[st] = ELM_TrainValTest_Dataset(
+                self.elm_datasets[st] = ELM_TrainValTest_Dataset(
                     signal_window_size=self.signal_window_size,
                     time_to_elm_quantiles=self.time_to_elm_quantiles,
                     sw_list=sw_for_rank,
@@ -678,7 +680,7 @@ class Data(_Base_Class, LightningDataModule):
                     quantile_max=self.time_to_elm_quantile_max,
                     contrastive_learning=self.contrastive_learning,
                 )
-                print(f"  Rank {self.trainer.global_rank} stage {st}: Dataset size: {len(self.datasets[st]):,d}")
+                print(f"  Rank {self.trainer.global_rank} stage {st}: Dataset size: {len(self.elm_datasets[st]):,d}")
             
             if st in ['test', 'predict']:
                 pass
@@ -924,7 +926,7 @@ class Data(_Base_Class, LightningDataModule):
             )
             return dataset
         if dataset_stage in ['validation', 'test']:
-            self.datasets[dataset_stage] = Confinement_TrainValTest_Dataset(
+            self.confinement_datasets[dataset_stage] = Confinement_TrainValTest_Dataset(
                     signals=packaged_signals,
                     n_rows=self.n_rows,
                     n_cols=self.n_cols,
@@ -936,9 +938,8 @@ class Data(_Base_Class, LightningDataModule):
                 )
             return
         if dataset_stage in ['predict']:
-            pass
-            # del self._train_dataloader
-            # del self.datasets['validation']
+            del self._train_dataloader
+            del self.confinement_datasets['validation']
             
             # predict_datasets = []
             # for i_confinement_mode, idx_start in enumerate(packaged_window_start):
@@ -957,7 +958,7 @@ class Data(_Base_Class, LightningDataModule):
             #         confinement_mode_index=packaged_confinement_mode_key[i_confinement_mode],
             #     )
             #     predict_datasets.append(dataset)
-            # self.datasets['predict'] = predict_datasets
+            # self.confinement_datasets['predict'] = predict_datasets
             # return predict_datasets
         # print(f"  Data stage `{dataset_stage}` elapsed time {(time.time()-t0)/60:.1f} min")
         gc.collect()
@@ -1357,14 +1358,14 @@ class Data(_Base_Class, LightningDataModule):
         #     shuffle=shuffle,
         # ) if is_distributed else None
         sampler = (
-            torch.utils.data.RandomSampler(data_source=self.datasets[stage])
+            torch.utils.data.RandomSampler(data_source=self.elm_datasets[stage])
             if stage == 'train'
-            else torch.utils.data.SequentialSampler(data_source=self.datasets[stage])
+            else torch.utils.data.SequentialSampler(data_source=self.elm_datasets[stage])
         )
         if self.num_workers is None:
             self.num_workers = 2 if self.trainer.world_size==1 else 0
         return torch.utils.data.DataLoader(
-            dataset=self.datasets[stage],
+            dataset=self.elm_datasets[stage],
             sampler=sampler,
             batch_size=self.batch_size_per_rank,  # batch size per rank
             num_workers=self.num_workers,
