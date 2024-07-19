@@ -1245,13 +1245,18 @@ class Data(_Base_Class, LightningDataModule):
         }
 
     def val_dataloader(self) -> dict[str, torch.utils.data.DataLoader]:
-        confinement_val_dl = torch.utils.data.DataLoader(
-            dataset=self.confinement_datasets['validation'],
-            sampler=torch.utils.data.DistributedSampler(
-                self.confinement_datasets['validation'],
+        sampler = (
+            torch.utils.data.DistributedSampler(
+                dataset=self.confinement_datasets['validation'],
                 shuffle=False,
                 drop_last=True,
-            ),
+            )
+            if self.trainer.world_size > 1
+            else torch.utils.data.SequentialSampler(self.confinement_datasets['validation'])
+        )
+        confinement_val_dl = torch.utils.data.DataLoader(
+            dataset=self.confinement_datasets['validation'],
+            sampler=sampler,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             # pin_memory=True,
