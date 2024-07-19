@@ -494,31 +494,18 @@ class Data(_Base_Class, LightningDataModule):
 
         assert self.batch_size % self.trainer.world_size == 0
         self.batch_size_per_rank = self.batch_size // self.trainer.world_size
-        self.zprint(f"Batch size: {self.batch_size}")
+        self.zprint(f"Global batch size: {self.batch_size}")
         self.zprint(f"Batch size per rank {self.batch_size_per_rank}")
+        self.zprint("ELM data preparation")
 
         if 'train' in self.global_elm_split and len(self.global_elm_split['train'])>0:
-            self.zprint("Reusing saved global data split")
+            self.zprint("Reusing saved global ELM data split")
         else:
-            self.zprint("Creating global data split")
+            self.zprint("Creating global ELM data split")
             self._make_elm_data_split()
 
-        if 'train' not in self.global_confinement_split:
-            self.zprint("Creating global confinement split")
-            self._get_confinement_events_and_split()
-        self.dataset_confinement_events = {
-                'train': self.train_confinement_events,
-                'validation': self.validation_confinement_events,
-                'test': self.test_confinement_events,
-                'predict': self.test_confinement_events,
-            }
-
-        if self.b_coeffs is not None:
-            self.zprint(f"  Using HP filter with f_pass={self.fir_hp_filter:.1f} kHz")
-        else:
-            self.zprint("  Using raw BES signals; no HP filter")
-
         if self.fir_hp_filter:
+            self.zprint(f"Using HP filter with f_pass={self.fir_hp_filter:.1f} kHz")
             self.b_coeffs = scipy.signal.firwin(
                 numtaps=401,  # must be odd
                 cutoff=self.fir_hp_filter,  # transition width in kHz
@@ -527,6 +514,8 @@ class Data(_Base_Class, LightningDataModule):
             )
             self.a_coeffs = np.zeros_like(self.b_coeffs)
             self.a_coeffs[0] = 1
+        else:
+            self.zprint("  Using raw BES signals; no HP filter")
 
         stages = ['train', 'validation'] if stage == 'fit' else [stage]
         for st in stages:
@@ -712,6 +701,18 @@ class Data(_Base_Class, LightningDataModule):
             if st in ['test', 'predict']:
                 pass
 
+        self.zprint(f"ELM data setup time: {time.time()-t0:0.1f} s")
+
+        t1 = time.time()
+        if 'train' not in self.global_confinement_split:
+            self._get_confinement_events_and_split()
+        self.dataset_confinement_events = {
+                'train': self.train_confinement_events,
+                'validation': self.validation_confinement_events,
+                'test': self.test_confinement_events,
+                'predict': self.test_confinement_events,
+            }
+
         def get_time_for_index(shot_event_tuple):
             shot, event = shot_event_tuple  # Unpack the tuple
             with h5py.File(self.confinement_data_file) as h5_file:
@@ -759,6 +760,7 @@ class Data(_Base_Class, LightningDataModule):
                                         drop_last=True,
                                         )
                 
+        self.zprint(f"Confinement data setup time: {time.time()-t1:.1f} s")
         self.zprint(f"Setup stage {stage} time: {time.time()-t0:.1f} s")
 
     def _make_elm_data_split(self):
@@ -822,17 +824,19 @@ class Data(_Base_Class, LightningDataModule):
         )
 
     def _get_confinement_events_and_split(self):
-        self.rprint(f"Data file: {self.confinement_data_file}")
+        t0 = time.time()
+        self.zprint("Confinement data split")
+        self.zprint(f"Confinement data file: {self.confinement_data_file}")
         if self.bad_shots is None:
             self.bad_shots = []  # Initialize to empty list if None
         shots = {}
-        with h5py.File(self.confinement_data_file, "r") as data_file:
-            for shot in data_file.keys():
+        with h5py.File(self.confinement_data_file) as data_file:
+            for shot in data_file:
                 if shot in self.bad_shots:
-                    self.rprint(f"Skipping bad shot: {shot}")
+                    self.zprint(f"Skipping bad shot: {shot}")
                     continue
                 shot_labels = []
-                for event in data_file[shot].keys():
+                for event in data_file[shot]:
                     event_data = data_file[shot][event]
                     if 'labels' in event_data:
                         labels_array = event_data['labels'][()]
@@ -840,8 +844,7 @@ class Data(_Base_Class, LightningDataModule):
                 if not shot_labels:
                     continue
                 label_presence = tuple(class_id in shot_labels for class_id in range(self.num_classes))  
-                shot_events = [(shot, event) for event in data_file[shot].keys() if 'labels' in data_file[shot][event]]
-                # metadata = self._extract_metadata(data_file[shot].attrs)
+                shot_events = [(shot, event) for event in data_file[shot] if 'labels' in data_file[shot][event]]
                 attrs = data_file[shot].attrs
                 metadata = {
                     'r_avg': attrs.get('r_avg'),
@@ -849,23 +852,23 @@ class Data(_Base_Class, LightningDataModule):
                     'delz_avg': attrs.get('delz_avg')
                 }
                 shots[shot] = (shot_events, label_presence, metadata)
+        self.zprint(f"Data read: {time.time()-t0:.1f} s")
         r_avg_exclusions = z_avg_exclusions = delz_avg_exclusions = 0
-        def _check_bounds(value, bounds):
+        def check_bounds(value, bounds):
             return bounds[0] <= value <= bounds[1] if bounds else True
-        for shot in list(shots):
+        for shot in list(shots.keys()):
             metadata = shots[shot][2]
-            # if not self._metadata_within_bounds(metadata):
-            if not all(_check_bounds(metadata[key], self.metadata_bounds[key]) for key in ['r_avg', 'z_avg', 'delz_avg'] if key in self.metadata_bounds):
+            if not all(check_bounds(metadata[key], self.metadata_bounds[key]) for key in ['r_avg', 'z_avg', 'delz_avg'] if key in self.metadata_bounds):
                 shots.pop(shot)
-                if metadata['r_avg'] is None or not _check_bounds(metadata['r_avg'], self.metadata_bounds['r_avg']):
+                if metadata['r_avg'] is None or not check_bounds(metadata['r_avg'], self.metadata_bounds['r_avg']):
                     r_avg_exclusions += 1
-                if metadata['z_avg'] is None or not _check_bounds(metadata['z_avg'], self.metadata_bounds['z_avg']):
+                if metadata['z_avg'] is None or not check_bounds(metadata['z_avg'], self.metadata_bounds['z_avg']):
                     z_avg_exclusions += 1
-                if metadata['delz_avg'] is None or not _check_bounds(metadata['delz_avg'], self.metadata_bounds['delz_avg']):
+                if metadata['delz_avg'] is None or not check_bounds(metadata['delz_avg'], self.metadata_bounds['delz_avg']):
                     delz_avg_exclusions += 1
-        self.rprint(f"Number of r_avg exclusions: {r_avg_exclusions}")
-        self.rprint(f"Number of z_avg exclusions: {z_avg_exclusions}")
-        self.rprint(f"Number of delz_avg exclusions: {delz_avg_exclusions}")
+        self.zprint(f"Number of r_avg exclusions: {r_avg_exclusions}")
+        self.zprint(f"Number of z_avg exclusions: {z_avg_exclusions}")
+        self.zprint(f"Number of delz_avg exclusions: {delz_avg_exclusions}")
         test_shot_data = {}
         validation_shot_data = {}
         # Handling forced test shots
@@ -900,7 +903,6 @@ class Data(_Base_Class, LightningDataModule):
         rng.shuffle(shot_numbers)
         if self.max_shots:
             shot_numbers = shot_numbers[:self.max_shots]
-        # self.all_confinement_events = np.concatenate([filtered_shots[shot][0] for shot in shot_numbers])
         if not self.test_only:
             shot_numbers = np.array(list(filtered_shots.keys()))
             # Map labels here
@@ -955,49 +957,50 @@ class Data(_Base_Class, LightningDataModule):
         else:
             shot_numbers = np.array(list(filtered_shots.keys()))
             self.test_confinement_events = [event for shot in shot_numbers for event in filtered_shots[shot][0]]
-        mode_times = {}  # Time spent in each mode
-        mode_shots = {}  # Unique shots for each mode
+        # mode_times = {}  # Time spent in each mode
+        # mode_shots = {}  # Unique shots for each mode
 
-        with h5py.File(self.confinement_data_file,) as file:
-            for shot_key in list(filtered_shots.keys()):
-                if shot_key in file:
-                    shot_group = file[shot_key]
-                    for nested_key in shot_group.keys():
-                        nested_group = shot_group[nested_key]
-                        if 'labels' in nested_group and 'time' in nested_group:
-                            labels = nested_group['labels'][:]
-                            bes_time = nested_group['time'][:]
-                            time_diffs = np.diff(bes_time)  # Time intervals
+        # t_tmp = time.time()
+        # with h5py.File(self.confinement_data_file,) as file:
+        #     for shot_key in filtered_shots:
+        #         assert shot_key in file
+        #         shot_group = file[shot_key]
+        #         for nested_key in shot_group.keys():
+        #             nested_group = shot_group[nested_key]
+        #             if 'labels' in nested_group and 'time' in nested_group:
+                        # labels = nested_group['labels'][:]
+                        # bes_time = nested_group['time'][:]
+                        # time_diffs = np.diff(bes_time)  # Time intervals
 
-                            # Handle NaNs in labels: create a mask for valid (non-NaN) labels
-                            valid_indices = ~np.isnan(labels[:-1])  # Exclude the last label as it has no following time difference
+                        # Handle NaNs in labels: create a mask for valid (non-NaN) labels
+                        # valid_indices = ~np.isnan(labels[:-1])  # Exclude the last label as it has no following time difference
 
-                            # Iterate only over valid indices
-                            for i in np.where(valid_indices)[0]:  # Get the indices of valid labels
-                                label = int(labels[i])  # Convert to int, NaNs should have been filtered out
-                                if label not in mode_times:
-                                    mode_times[label] = 0  # Initialize if the label hasn't been encountered yet
-                                    mode_shots[label] = set()  # Initialize a set for unique shots
+                        # Iterate only over valid indices
+                        # for i in np.where(valid_indices)[0]:  # Get the indices of valid labels
+                        #     label = int(labels[i])  # Convert to int, NaNs should have been filtered out
+                            # if label not in mode_times:
+                            #     mode_times[label] = 0  # Initialize if the label hasn't been encountered yet
+                            #     mode_shots[label] = set()  # Initialize a set for unique shots
 
-                                mode_times[label] += time_diffs[i]  # Add time difference to the corresponding mode
-                                mode_shots[label].add(shot_key)  # Add shot key to the set of unique shots for the mode
+                            # mode_times[label] += time_diffs[i]  # Add time difference to the corresponding mode
+                            # mode_shots[label].add(shot_key)  # Add shot key to the set of unique shots for the mode
+        # self.zprint(f"Confinement valid data: {time.time()-t_tmp:.1f} s")
 
         # Convert time from microseconds to more suitable units if necessary
-        mode_times_seconds = {k: v / 1e3 for k, v in mode_times.items()}  # Convert to seconds
+        # mode_times_seconds = {k: v / 1e3 for k, v in mode_times.items()}  # Convert to seconds
 
         # Count unique shots for each mode
-        mode_shot_counts = {k: len(v) for k, v in mode_shots.items()}
+        # mode_shot_counts = {k: len(v) for k, v in mode_shots.items()}
 
-        self.rprint(f"Total Time Spent in Each Mode (seconds): {mode_times_seconds}")
-        self.rprint(f"Number of Unique Shots for Each Mode: {mode_shot_counts}")
+        # self.rprint(f"Total Time Spent in Each Mode (seconds): {mode_times_seconds}")
+        # self.rprint(f"Number of Unique Shots for Each Mode: {mode_shot_counts}")
+        # t0 = time.time()
+        self.zprint(f"Confinement events and split time: {time.time()-t0:.1f} s")
 
     def _load_and_preprocess_confinement_data(self, shot_event_indices, dataset_stage):
-        # t0 = time.time()
-        self.rprint(f"Reading confinement events for dataset `{dataset_stage}`")
+        t0 = time.time()
+        self.zprint(f"Loading and preprocessing confinement data for stage {dataset_stage}")
         confinement_data = []
-        # n_bins = 201
-        # cummulative_hist = np.zeros(n_bins, dtype=int)
-        # selected_channels = self.n_rows * self.n_cols  # Total number of channels to select
 
         with h5py.File(self.confinement_data_file, 'r') as h5_file:
             if len(shot_event_indices) >= 5:
@@ -1069,8 +1072,7 @@ class Data(_Base_Class, LightningDataModule):
                     'time': event,
                 })
 
-        self.rprint(f"  Global min/max raw signal, ch 1-32: {np.amin(packaged_signals[:,:4,:]):.6f}, {np.amax(packaged_signals[:,:4,:]):.6f}")
-        self.rprint(f"  Global min/max raw signal, ch 33-64: {np.amin(packaged_signals[:,4:,:]):.6f}, {np.amax(packaged_signals[:,4:,:]):.6f}")
+        self.zprint(f"Time for confinement data read: {time.time()-t0:.1f} s")
 
         packaged_labels = np.concatenate([confinement_mode['labels'] for confinement_mode in confinement_data], axis=0)
         if self.one_hot_labels:
@@ -1094,11 +1096,12 @@ class Data(_Base_Class, LightningDataModule):
         del confinement_data
 
         def _get_statistics2(sample_indices: np.ndarray, signals: np.ndarray) -> dict:
+            t_tmp = time.time()
             signal_min = np.array(np.inf)
             signal_max = np.array(-np.inf)
             n_bins = 200
             cummulative_hist = np.zeros(n_bins, dtype=int)
-            stat_samples = int(100e3)
+            stat_samples = int(5e3)
             stat_interval = np.max([1, sample_indices.size//stat_samples])
             n_samples = sample_indices.size // stat_interval
             for i in sample_indices[::stat_interval]:
@@ -1116,6 +1119,7 @@ class Data(_Base_Class, LightningDataModule):
             stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
             exkurt = np.sum(cummulative_hist * ((bin_center - mean)/stdev) ** 4) / np.sum(cummulative_hist) - 3
             self.rprint(f"Stats: count {sample_indices.size:,} min {signal_min:.3f} max {signal_max:.3f} mean {mean:.3f} stdev {stdev:.3f} exkurt {exkurt:.3f} n_samples {n_samples:,}")
+            self.zprint(f"Stats time: {time.time()-t_tmp:.1f} s")
             return {
                 'count': sample_indices.size,
                 'min': signal_min,
@@ -1183,11 +1187,9 @@ class Data(_Base_Class, LightningDataModule):
             self.rprint(f"  Calculating signal mean and std from {dataset_stage} data")
             self.confinement_raw_signal_mean = stats['mean']
             self.confinement_raw_signal_stdev = stats['stdev']
-            # self.signal_exkurt = stats['exkurt']
             self.save_hyperparameters({
                 'signal_mean': self.confinement_raw_signal_mean.item(),
                 'signal_stdev': self.confinement_raw_signal_stdev.item(),
-                # 'signal_exkurt': self.signal_exkurt.item(),
             })
 
         if dataset_stage in ['train']:
@@ -1199,8 +1201,9 @@ class Data(_Base_Class, LightningDataModule):
                 sample_indices=packaged_valid_t0_indices,
                 signals=packaged_signals,
             )
-        # self.max_abs_valid_signal = np.max(np.abs([stats['min'],stats['max']]))
             
+        self.zprint(f"Load and pre-process confinement data stage `{dataset_stage}` time: {time.time()-t0:.1f} s")
+
         if dataset_stage in ['train']:
             dataset = Confinement_TrainValTest_Dataset(
                 signals=packaged_signals,
@@ -1243,9 +1246,9 @@ class Data(_Base_Class, LightningDataModule):
 
     def val_dataloader(self) -> dict[str, torch.utils.data.DataLoader]:
         confinement_val_dl = torch.utils.data.DataLoader(
-            dataset=self.datasets['validation'],
+            dataset=self.confinement_datasets['validation'],
             sampler=torch.utils.data.DistributedSampler(
-                self.datasets['validation'],
+                self.confinement_datasets['validation'],
                 shuffle=False,
                 drop_last=True,
             ),
@@ -1261,9 +1264,9 @@ class Data(_Base_Class, LightningDataModule):
 
     def test_dataloader(self) -> dict[str, torch.utils.data.DataLoader]:
         confinement_test_dl = torch.utils.data.DataLoader(
-            dataset=self.datasets['test'],
+            dataset=self.confinement_datasets['test'],
             sampler=torch.utils.data.DistributedSampler(
-                self.datasets['test'],
+                self.confinement_datasets['test'],
                 shuffle=False,
                 drop_last=True,
             ),
@@ -1593,8 +1596,8 @@ def main(
         is_global_zero=is_global_zero,
         min_pre_elm_time=min_pre_elm_time,
         fir_hp_filter=fir_hp_filter,
-        max_shots_per_class=3,
-        max_shots=12,
+        max_shots_per_class=2,
+        # max_shots=12,
     )
 
     if skip_train is False:
