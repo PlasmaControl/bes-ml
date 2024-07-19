@@ -1010,14 +1010,13 @@ class Confinement_Datamodule(LightningDataModule):
         return self._train_dataloader
     
     def val_dataloader(self):
-        valid_sampler = torch.utils.data.DistributedSampler(
-            self.datasets['validation'],
-            shuffle=False,
-            drop_last=True,
-        )
         return torch.utils.data.DataLoader(
             dataset=self.datasets['validation'],
-            sampler=valid_sampler,
+            sampler=torch.utils.data.DistributedSampler(
+                self.datasets['validation'],
+                shuffle=False,
+                drop_last=True,
+            ),
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             # pin_memory=True,
@@ -1025,14 +1024,13 @@ class Confinement_Datamodule(LightningDataModule):
         ) 
                 
     def test_dataloader(self):
-        test_sampler = torch.utils.data.DistributedSampler(
-            self.datasets['test'],
-            shuffle=False,
-            drop_last=True,
-        )
         return torch.utils.data.DataLoader(
             dataset=self.datasets['test'],
-            sampler=test_sampler,
+            sampler=torch.utils.data.DistributedSampler(
+                self.datasets['test'],
+                shuffle=False,
+                drop_last=True,
+            ),
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             # pin_memory=True,

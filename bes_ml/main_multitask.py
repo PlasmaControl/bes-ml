@@ -515,7 +515,7 @@ class Data(_Base_Class, LightningDataModule):
             self.zprint("Reusing saved global data split")
         else:
             self.zprint("Creating global data split")
-            self._make_data_split()
+            self._make_elm_data_split()
 
         if 'train' not in self.global_confinement_split:
             self.zprint("Creating global confinement split")
@@ -601,7 +601,47 @@ class Data(_Base_Class, LightningDataModule):
             self.rprint(f"Stage {st.upper()}: Global steps per epoch {n_signal_windows/self.batch_size:,.1f}")
 
             # Raw signal stats
-            self._get_statistics(signal_windows=global_sw_metadata_list, stage=st)
+            # self._get_statistics(global_sw_metadata_list=global_sw_metadata_list, st=st)
+
+            signal_min = np.array(np.inf)
+            signal_max = np.array(-np.inf)
+            n_bins = 200
+            cummulative_hist = np.zeros(n_bins, dtype=int)
+            stat_interval = np.max([self.stride_factor, len(global_sw_metadata_list)//int(50e3)])
+            last_elm_index = -1
+            with h5py.File(self.data_file) as root:
+                for elm_dict in global_sw_metadata_list[::stat_interval]:
+                    elm_index = elm_dict['elm_index']
+                    if elm_index != last_elm_index:
+                        elm_event: h5py.Group = root['elms'][f'{elm_index:06d}']
+                        signals = np.array(elm_event["bes_signals"], dtype=np.float32)  # (64, <time>)
+                        signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (time, pol, rad)
+                    last_elm_index = elm_index
+                    i_t0 = elm_dict['i_t0']
+                    signal_window = signals[i_t0: i_t0 + self.signal_window_size, :, :]
+                    assert signal_window.shape[0] == self.signal_window_size
+                    signal_min = np.min([signal_min, signal_window.min()])
+                    signal_max = np.max([signal_max, signal_window.max()])
+                    hist, bin_edges = np.histogram(
+                        signal_window,
+                        bins=n_bins,
+                        range=(-10.4, 10.4),
+                    )
+                    cummulative_hist += hist
+            bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
+            mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
+            stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
+            exkurt = np.sum(cummulative_hist * ((bin_center - mean)/stdev) ** 4) / np.sum(cummulative_hist) - 3
+            self.zprint(f"  Raw signals min {signal_min:.2f} max {signal_max:.2f} mean {mean:.2f} stdev {stdev:.2f} exkurt {exkurt:.2f}")
+            # time-to-ELM quantiles
+            time_to_elm_list = [e['time_to_elm'] for e in global_sw_metadata_list]
+            quantiles = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
+            quantile_values = np.quantile(time_to_elm_list, quantiles)
+            if st == 'train':
+                self.raw_signal_mean = mean.item()
+                self.raw_signal_stdev = stdev.item()
+                self.time_to_elm_quantiles = {q: qval.item() for q, qval in zip(quantiles, quantile_values)}
+
             assert self.raw_signal_mean and self.raw_signal_stdev
             if st == 'train':
                 self.save_hyperparameters({
@@ -713,7 +753,7 @@ class Data(_Base_Class, LightningDataModule):
             elif dataset_stage in ['validation', 'test', 'predict']:
                 chunk_events = events
 
-            dataset = self._load_and_preprocess_data_2(chunk_events, dataset_stage)
+            dataset = self._load_and_preprocess_confinement_data(chunk_events, dataset_stage)
 
             # Store the DataLoader for this GPU
             if dataset_stage == 'train':
@@ -726,7 +766,7 @@ class Data(_Base_Class, LightningDataModule):
                                         drop_last=True,
                                         )
 
-    def _load_and_preprocess_data_2(self, shot_event_indices, dataset_stage):
+    def _load_and_preprocess_confinement_data(self, shot_event_indices, dataset_stage):
         # t0 = time.time()
         self.rprint(f"Reading confinement events for dataset `{dataset_stage}`")
         confinement_data = []
@@ -828,12 +868,44 @@ class Data(_Base_Class, LightningDataModule):
         )
         del confinement_data
 
+        def _get_statistics2(sample_indices: np.ndarray, signals: np.ndarray) -> dict:
+            signal_min = np.array(np.inf)
+            signal_max = np.array(-np.inf)
+            n_bins = 200
+            cummulative_hist = np.zeros(n_bins, dtype=int)
+            stat_samples = int(100e3)
+            stat_interval = np.max([1, sample_indices.size//stat_samples])
+            n_samples = sample_indices.size // stat_interval
+            for i in sample_indices[::stat_interval]:
+                signal_window = signals[i: i + self.signal_window_size, :, :]
+                signal_min = np.min([signal_min, signal_window.min()])
+                signal_max = np.max([signal_max, signal_window.max()])
+                hist, bin_edges = np.histogram(
+                    signal_window,
+                    bins=n_bins,
+                    range=[-10.4, 10.4],
+                )
+                cummulative_hist += hist
+            bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
+            mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
+            stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
+            exkurt = np.sum(cummulative_hist * ((bin_center - mean)/stdev) ** 4) / np.sum(cummulative_hist) - 3
+            self.rprint(f"Stats: count {sample_indices.size:,} min {signal_min:.3f} max {signal_max:.3f} mean {mean:.3f} stdev {stdev:.3f} exkurt {exkurt:.3f} n_samples {n_samples:,}")
+            return {
+                'count': sample_indices.size,
+                'min': signal_min,
+                'max': signal_max,
+                'mean': mean,
+                'stdev': stdev,
+                'exkurt': exkurt,
+            }
+
         # valid t0 indices
         packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
         packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
         assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices]))
         self.rprint("  Raw data stats")
-        stats = self._get_statistics2(
+        stats = _get_statistics2(
             sample_indices=packaged_valid_t0_indices,
             signals=packaged_signals,
         )
@@ -847,7 +919,7 @@ class Data(_Base_Class, LightningDataModule):
                 mask.append((signal_window.min() >= -self.clip_signals) and (signal_window.max() <= self.clip_signals))
             packaged_valid_t0_indices = packaged_valid_t0_indices[mask]
 
-            stats = self._get_statistics2(
+            stats = _get_statistics2(
                 sample_indices=packaged_valid_t0_indices,
                 signals=packaged_signals,
             )
@@ -875,7 +947,7 @@ class Data(_Base_Class, LightningDataModule):
                 )
             packaged_valid_t0_indices = packaged_valid_t0_indices[mask]
             self.rprint("  Masked data stats")
-            stats = self._get_statistics2(
+            stats = _get_statistics2(
                 sample_indices=packaged_valid_t0_indices,
                 signals=packaged_signals,
             )
@@ -898,7 +970,7 @@ class Data(_Base_Class, LightningDataModule):
             self.rprint(f"  Standardized signal stats")
             for idx, signal in enumerate(packaged_signals):
                 packaged_signals[idx] = (signal - self.signal_mean) / self.signal_stdev
-            stats = self._get_statistics2(
+            stats = _get_statistics2(
                 sample_indices=packaged_valid_t0_indices,
                 signals=packaged_signals,
             )
@@ -960,41 +1032,41 @@ class Data(_Base_Class, LightningDataModule):
         # Getting usage of virtual_memory in GB ( 4th field)
         self.rprint(f'RAM Used (GB): {psutil.virtual_memory()[3]/1000000000}')    
 
-    def _get_statistics2(
-            self, 
-            sample_indices: np.ndarray, 
-            signals: np.ndarray,
-    ) -> dict:
-        signal_min = np.array(np.inf)
-        signal_max = np.array(-np.inf)
-        n_bins = 200
-        cummulative_hist = np.zeros(n_bins, dtype=int)
-        stat_samples = int(100e3)
-        stat_interval = np.max([1, sample_indices.size//stat_samples])
-        n_samples = sample_indices.size // stat_interval
-        for i in sample_indices[::stat_interval]:
-            signal_window = signals[i: i + self.signal_window_size, :, :]
-            signal_min = np.min([signal_min, signal_window.min()])
-            signal_max = np.max([signal_max, signal_window.max()])
-            hist, bin_edges = np.histogram(
-                signal_window,
-                bins=n_bins,
-                range=[-10.4, 10.4],
-            )
-            cummulative_hist += hist
-        bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
-        mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
-        stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
-        exkurt = np.sum(cummulative_hist * ((bin_center - mean)/stdev) ** 4) / np.sum(cummulative_hist) - 3
-        self.rprint(f"    Stats: count {sample_indices.size:,} min {signal_min:.3f} max {signal_max:.3f} mean {mean:.3f} stdev {stdev:.3f} exkurt {exkurt:.3f} n_samples {n_samples:,}")
-        return {
-            'count': sample_indices.size,
-            'min': signal_min,
-            'max': signal_max,
-            'mean': mean,
-            'stdev': stdev,
-            'exkurt': exkurt,
-        }
+    # def _get_statistics2(
+    #         self, 
+    #         sample_indices: np.ndarray, 
+    #         signals: np.ndarray,
+    # ) -> dict:
+    #     signal_min = np.array(np.inf)
+    #     signal_max = np.array(-np.inf)
+    #     n_bins = 200
+    #     cummulative_hist = np.zeros(n_bins, dtype=int)
+    #     stat_samples = int(100e3)
+    #     stat_interval = np.max([1, sample_indices.size//stat_samples])
+    #     n_samples = sample_indices.size // stat_interval
+    #     for i in sample_indices[::stat_interval]:
+    #         signal_window = signals[i: i + self.signal_window_size, :, :]
+    #         signal_min = np.min([signal_min, signal_window.min()])
+    #         signal_max = np.max([signal_max, signal_window.max()])
+    #         hist, bin_edges = np.histogram(
+    #             signal_window,
+    #             bins=n_bins,
+    #             range=[-10.4, 10.4],
+    #         )
+    #         cummulative_hist += hist
+    #     bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
+    #     mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
+    #     stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
+    #     exkurt = np.sum(cummulative_hist * ((bin_center - mean)/stdev) ** 4) / np.sum(cummulative_hist) - 3
+    #     self.rprint(f"Stats: count {sample_indices.size:,} min {signal_min:.3f} max {signal_max:.3f} mean {mean:.3f} stdev {stdev:.3f} exkurt {exkurt:.3f} n_samples {n_samples:,}")
+    #     return {
+    #         'count': sample_indices.size,
+    #         'min': signal_min,
+    #         'max': signal_max,
+    #         'mean': mean,
+    #         'stdev': stdev,
+    #         'exkurt': exkurt,
+    #     }
 
     def _get_confinement_events_and_split(self):
         self.rprint(f"Data file: {self.confinement_data_file}")
@@ -1168,51 +1240,7 @@ class Data(_Base_Class, LightningDataModule):
         self.rprint(f"Total Time Spent in Each Mode (seconds): {mode_times_seconds}")
         self.rprint(f"Number of Unique Shots for Each Mode: {mode_shot_counts}")
 
-    # def _get_valid_indices(
-    #     self,
-    #     labels: np.ndarray = None,
-    # ) -> tuple[np.ndarray, np.ndarray]:
-    #     # Determine valid t0 indices (start of signal windows) for real-time inference
-    #     valid_t0 = np.zeros(labels.size, dtype=int)
-    #     first_valid_signal_window_start_index = self.signal_window_size - 1
-    #     valid_t0[first_valid_signal_window_start_index:] = 1
-
-    #     # if self.log_time:
-    #     #     labels = np.log10(labels)
-
-    #     return labels, valid_t0
-    
-    # def apply_bandpass_filter(self, signals):
-    #         """
-    #         Applies a bandpass filter to the given signals if the cutoff frequencies are specified.
-    #         Otherwise, returns the original signals.
-
-    #         Args:
-    #             packaged_signals: The signals to be filtered.
-
-    #         Returns:
-    #             Filtered signals or the original signals.
-    #         """
-    #         required_length = 3 * self.filter_taps  # Set to 3 times the number of filter taps
-
-    #         # Check if the cutoff frequencies are specified
-    #         if self.lower_cutoff_frequency_hz is not None and self.upper_cutoff_frequency_hz is not None and signals.shape[0] > required_length:
-    #             # Design the bandpass filter
-    #             bandpass_filter = scipy.signal.firwin(
-    #                 self.filter_taps,
-    #                 [self.lower_cutoff_frequency_hz, self.upper_cutoff_frequency_hz],
-    #                 pass_zero=False,
-    #                 fs=self.sampling_frequency_hz
-    #             )
-
-    #             # Apply the filter
-    #             filtered_signals = scipy.signal.filtfilt(bandpass_filter, 1, signals, axis=0)
-    #             return filtered_signals
-    #         else:
-    #             # print("BANDPASS FILTER NOT APPLIED")
-    #             return signals
-
-    def _make_data_split(self):
+    def _make_elm_data_split(self):
         assert len(self.global_elm_split) == 0
         print(f"Rank {self.trainer.global_rank}: Data split")
         with h5py.File(self.data_file, 'r') as root:
@@ -1253,64 +1281,6 @@ class Data(_Base_Class, LightningDataModule):
                     if value.attrs['shot'] in self.global_shot_split[stage]
                 ]
                 self.rprint(f"Stage {stage.upper()}: Global ELM/shot count {len(self.global_elm_split[stage]):,d} ({len(self.global_elm_split[stage])/len(global_elms)*1e2:.1f}%) / {self.global_shot_split[stage].size} ({self.global_shot_split[stage].size/len(global_shots)*1e2:.1f}%)")
-                # self.rankwise_shot_split[stage] = np.array_split(shot_split, self.trainer.world_size)
-                # self.rankwise_elm_split[stage] = [
-                #     [
-                #         int(key) 
-                #         for key, value in root['elms'].items() 
-                #         if value.attrs['shot'] in rank_shot_list
-                #     ]
-                #     for rank_shot_list in self.rankwise_shot_split[stage]
-                # ]
-                # print(f"  Rank {self.trainer.global_rank} stage {stage.upper()}: Rank ELM/shot count {len(self.rankwise_elm_split[stage][self.trainer.global_rank])} / {self.rankwise_shot_split[stage][self.trainer.global_rank].size}")
-
-        # self.zprint("ELMs for analysis")
-        # for stage, elm_indices in self.elm_split.items():
-        #     self.zprint(f"  {stage} ELMs: {len(elm_indices)}  ({len(elm_indices)/len(elms)*1e2:.1f}%)")
-
-    def _get_statistics(
-            self, 
-            signal_windows: list[dict],
-            stage: str,
-    ):
-        signal_min = np.array(np.inf)
-        signal_max = np.array(-np.inf)
-        n_bins = 200
-        cummulative_hist = np.zeros(n_bins, dtype=int)
-        stat_interval = np.max([self.stride_factor, len(signal_windows)//int(50e3)])
-        last_elm_index = -1
-        with h5py.File(self.data_file) as root:
-            for elm_dict in signal_windows[::stat_interval]:
-                elm_index = elm_dict['elm_index']
-                if elm_index != last_elm_index:
-                    elm_event: h5py.Group = root['elms'][f'{elm_index:06d}']
-                    signals = np.array(elm_event["bes_signals"], dtype=np.float32)  # (64, <time>)
-                    signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (time, pol, rad)
-                last_elm_index = elm_index
-                i_t0 = elm_dict['i_t0']
-                signal_window = signals[i_t0: i_t0 + self.signal_window_size, :, :]
-                assert signal_window.shape[0] == self.signal_window_size
-                signal_min = np.min([signal_min, signal_window.min()])
-                signal_max = np.max([signal_max, signal_window.max()])
-                hist, bin_edges = np.histogram(
-                    signal_window,
-                    bins=n_bins,
-                    range=(-10.4, 10.4),
-                )
-                cummulative_hist += hist
-        bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
-        mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
-        stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
-        exkurt = np.sum(cummulative_hist * ((bin_center - mean)/stdev) ** 4) / np.sum(cummulative_hist) - 3
-        self.zprint(f"  Raw signals min {signal_min:.2f} max {signal_max:.2f} mean {mean:.2f} stdev {stdev:.2f} exkurt {exkurt:.2f}")
-        # time-to-ELM quantiles
-        time_to_elm_list = [e['time_to_elm'] for e in signal_windows]
-        quantiles = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
-        quantile_values = np.quantile(time_to_elm_list, quantiles)
-        if stage == 'train':
-            self.raw_signal_mean = mean.item()
-            self.raw_signal_stdev = stdev.item()
-            self.time_to_elm_quantiles = {q: qval.item() for q, qval in zip(quantiles, quantile_values)}
 
     def _elm_train_val_test_dataloaders(self, stage: str) -> torch.utils.data.DataLoader:
         sampler = (
@@ -1330,14 +1300,47 @@ class Data(_Base_Class, LightningDataModule):
             drop_last=True,
         )
 
-    def train_dataloader(self) -> torch.utils.data.DataLoader:
-        return self._elm_train_val_test_dataloaders('train')
+    def train_dataloader(self) -> dict[str, torch.utils.data.DataLoader]:
+        return {
+            'elm_dataloader': self._elm_train_val_test_dataloaders('train'),
+            'confinement_dataloader': self._train_dataloader,
+        }
 
-    def val_dataloader(self) -> torch.utils.data.DataLoader:
-        return self._elm_train_val_test_dataloaders('validation')
+    def val_dataloader(self) -> dict[str, torch.utils.data.DataLoader]:
+        confinement_val_dl = torch.utils.data.DataLoader(
+            dataset=self.datasets['validation'],
+            sampler=torch.utils.data.DistributedSampler(
+                self.datasets['validation'],
+                shuffle=False,
+                drop_last=True,
+            ),
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            # pin_memory=True,
+            persistent_workers=(self.num_workers > 0),
+        )
+        return {
+            'elm_dataloader': self._elm_train_val_test_dataloaders('validation'),
+            'confinement_dataloader': confinement_val_dl,
+        }
 
-    def test_dataloader(self) -> torch.utils.data.DataLoader:
-        return self._elm_train_val_test_dataloaders('test')
+    def test_dataloader(self) -> dict[str, torch.utils.data.DataLoader]:
+        confinement_test_dl = torch.utils.data.DataLoader(
+            dataset=self.datasets['test'],
+            sampler=torch.utils.data.DistributedSampler(
+                self.datasets['test'],
+                shuffle=False,
+                drop_last=True,
+            ),
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            # pin_memory=True,
+            persistent_workers=(self.num_workers > 0),
+        ) 
+        return {
+            'elm_dataloader': self._elm_train_val_test_dataloaders('test'),
+            'confinement_dataloader': confinement_test_dl,
+        }
 
     def predict_dataloader(self) -> None:
         pass
