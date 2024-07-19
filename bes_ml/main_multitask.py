@@ -459,9 +459,16 @@ class Data(_Base_Class, LightningDataModule):
         self.raw_signal_stdev: float|Any = None
 
         self.confinement_datasets: dict[str,torch.utils.data.Dataset] = {}
+        self.global_confinement_split: dict[str,Sequence] = {}
+        self.dataset_confinement_events: dict = {}
         self.signal_mean: float|Any = None
         self.signal_stdev: float|Any = None
-        self.global_confinement_split: dict[str,Sequence] = {}
+        self._train_dataloader: torch.utils.data.DataLoader|Any = None
+        self.mask_lb: float|Any = None
+        self.mask_ub: float|Any = None
+        self.train_confinement_events: list = []
+        self.validation_confinement_events: list = []
+        self.test_confinement_events: list = []
 
         self.trainer: Trainer|Any = None
         self.batch_size_per_rank: int = 0
@@ -489,6 +496,8 @@ class Data(_Base_Class, LightningDataModule):
             'time_to_elm_quantiles',
             'signal_mean',
             'signal_stdev',
+            'mask_lb',
+            'mask_ub',
         ]
         for item in self.state_items:
             assert hasattr(self, item)
@@ -895,11 +904,11 @@ class Data(_Base_Class, LightningDataModule):
             print(f"  Calculating signal mean and std from {dataset_stage} data")
             self.signal_mean = stats['mean']
             self.signal_stdev = stats['stdev']
-            self.signal_exkurt = stats['exkurt']
+            # self.signal_exkurt = stats['exkurt']
             self.save_hyperparameters({
                 'signal_mean': self.signal_mean.item(),
                 'signal_stdev': self.signal_stdev.item(),
-                'signal_exkurt': self.signal_exkurt.item(),
+                # 'signal_exkurt': self.signal_exkurt.item(),
             })
 
         if dataset_stage in ['train']:
@@ -911,7 +920,7 @@ class Data(_Base_Class, LightningDataModule):
                 sample_indices=packaged_valid_t0_indices,
                 signals=packaged_signals,
             )
-        self.max_abs_valid_signal = np.max(np.abs([stats['min'],stats['max']]))
+        # self.max_abs_valid_signal = np.max(np.abs([stats['min'],stats['max']]))
             
         if dataset_stage in ['train']:
             dataset = Confinement_TrainValTest_Dataset(
@@ -1067,8 +1076,8 @@ class Data(_Base_Class, LightningDataModule):
                 else:
                     print(f"Warning: Forced validation shot number {shot_number} not found in dataset.")
         # These dictionaries can be used to ensure that the specified shots are included in their respective datasets
-        self.forced_test_shots_data = test_shot_data
-        self.forced_validation_shots_data = validation_shot_data
+        forced_test_shots_data = test_shot_data
+        forced_validation_shots_data = validation_shot_data
         shots_by_class = {}
         for shot, (events, labels, metadata) in shots.items():
             if labels not in shots_by_class:
@@ -1084,7 +1093,7 @@ class Data(_Base_Class, LightningDataModule):
         rng.shuffle(shot_numbers)
         if self.max_shots:
             shot_numbers = shot_numbers[:self.max_shots]
-        self.all_confinement_events = np.concatenate([filtered_shots[shot][0] for shot in shot_numbers])
+        # self.all_confinement_events = np.concatenate([filtered_shots[shot][0] for shot in shot_numbers])
         if not self.test_only:
             shot_numbers = np.array(list(filtered_shots.keys()))
             # Map labels here
@@ -1114,17 +1123,17 @@ class Data(_Base_Class, LightningDataModule):
                 )
 
             # Ensure forced shots are included back in filtered_shots if needed
-            filtered_shots.update(self.forced_test_shots_data)
-            filtered_shots.update(self.forced_validation_shots_data)
+            filtered_shots.update(forced_test_shots_data)
+            filtered_shots.update(forced_validation_shots_data)
 
             # Include forced test and validation shots
-            if hasattr(self, 'forced_test_shots_data'):
-                forced_test_indices = np.array(list(self.forced_test_shots_data.keys()))
-                test_indices = np.concatenate((test_indices, forced_test_indices))
+            # if hasattr(self, 'forced_test_shots_data'):
+            forced_test_indices = np.array(list(forced_test_shots_data.keys()))
+            test_indices = np.concatenate((test_indices, forced_test_indices))
             
-            if hasattr(self, 'forced_validation_shots_data'):
-                forced_val_indices = np.array(list(self.forced_validation_shots_data.keys()))
-                val_indices = np.concatenate((val_indices, forced_val_indices))
+            # if hasattr(self, 'forced_validation_shots_data'):
+            forced_val_indices = np.array(list(forced_validation_shots_data.keys()))
+            val_indices = np.concatenate((val_indices, forced_val_indices))
 
             # Assign events to datasets
             self.train_confinement_events = [event for shot in train_indices for event in filtered_shots[shot][0]]
