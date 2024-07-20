@@ -280,44 +280,40 @@ class Model(LightningModule, _Base_Class):
             },
         }
 
-    def forward(
-            self, 
-            x: torch.Tensor, 
-            stage: str = '',
-    ) -> dict[str, torch.Tensor]:
-        for layer in self.feature_model.children():
-            if self.do_dropout and stage=='train':
-                x = torch.nn.functional.dropout3d(x, p=self.dropout_percent)
-            x = torch.nn.functional.leaky_relu(layer(x), negative_slope=self.leaky_relu_slope)
-        features = x.flatten(1)
-        results = {}
-        for task_model_name, task_model in self.task_models.items():
-            x = features
-            children_layers = list(task_model.children())
-            nlayers = len(children_layers)
-            for i, layer in enumerate(children_layers):
-                if self.do_dropout and stage=='train' and i != nlayers-1:
-                    x = torch.nn.functional.dropout1d(x, p=self.dropout_percent)
-                x = layer(x)
-                if i != nlayers-1:
-                    x = torch.nn.functional.leaky_relu(x, negative_slope=self.leaky_relu_slope)
-            results[task_model_name] = x
-        return results
-
     def training_step(self, batch, batch_idx, dataloader_idx=0) -> torch.Tensor:
-        # if self.is_global_zero and self.global_step%50==0:
-        #     print(f"  Train step {self.global_step}")
-        return self.update_step(batch, batch_idx, stage='train')
+        return self.update_step(
+            batch, 
+            batch_idx, 
+            stage='train',
+            dataloader_idx=None if isinstance(batch, dict) else dataloader_idx,
+        )
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0) -> None:
-        self.update_step(batch, batch_idx, stage='val')
+        self.update_step(
+            batch, 
+            batch_idx, 
+            stage='val',
+            dataloader_idx=None if isinstance(batch, dict) else dataloader_idx,
+        )
 
     def test_step(self, batch, batch_idx, dataloader_idx=0) -> None:
-        self.update_step(batch, batch_idx, stage='test')
+        self.update_step(
+            batch, 
+            batch_idx, 
+            stage='test',
+            dataloader_idx=None if isinstance(batch, dict) else dataloader_idx,
+        )
 
-    def update_step(self, batch, batch_idx, stage: str) -> torch.Tensor:
+    def update_step(
+            self, 
+            batch, 
+            batch_idx: int, 
+            stage: str, 
+            dataloader_idx: int|Any = None,
+    ) -> torch.Tensor:
+        assert (isinstance(batch, dict) and dataloader_idx is None) or isinstance(dataloader_idx,int)
         signal_window, time_to_elm, quantiles = batch
-        task_results = self(signal_window, stage=stage)
+        task_results = self(signal_window, stage=stage)  # call to self.forward()
         sum_loss = torch.Tensor([0.0])
         for task, task_metrics in self.task_metrics.items():
             results: torch.Tensor = task_results[task]
@@ -345,6 +341,30 @@ class Model(LightningModule, _Base_Class):
                 self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True)
         self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True)
         return sum_loss
+
+    def forward(
+            self, 
+            x: torch.Tensor, 
+            stage: str = '',
+    ) -> dict[str, torch.Tensor]:
+        for layer in self.feature_model.children():
+            if self.do_dropout and stage=='train':
+                x = torch.nn.functional.dropout3d(x, p=self.dropout_percent)
+            x = torch.nn.functional.leaky_relu(layer(x), negative_slope=self.leaky_relu_slope)
+        features = x.flatten(1)
+        results = {}
+        for task_model_name, task_model in self.task_models.items():
+            x = features
+            children_layers = list(task_model.children())
+            nlayers = len(children_layers)
+            for i, layer in enumerate(children_layers):
+                if self.do_dropout and stage=='train' and i != nlayers-1:
+                    x = torch.nn.functional.dropout1d(x, p=self.dropout_percent)
+                x = layer(x)
+                if i != nlayers-1:
+                    x = torch.nn.functional.leaky_relu(x, negative_slope=self.leaky_relu_slope)
+            results[task_model_name] = x
+        return results
 
     def on_fit_start(self):
         self.t_fit_start = time.time()
@@ -1585,7 +1605,7 @@ def main(
         ) if world_size>1 else 'auto',
         num_nodes = num_nodes,
         use_distributed_sampler=False,
-        num_sanity_val_steps=0,
+        # num_sanity_val_steps=0,
     )
     lit_model.save_hyperparameters({
         'gradient_clip_val': gradient_clip_val, 
