@@ -68,6 +68,8 @@ class Model(LightningModule, _Base_Class):
     do_dropout: bool = False
     dropout_percent: float = 0.05
     use_optimizer: str = 'SGD'
+    feature_batchnorm: bool = True
+    task_batchnorm: bool = False
 
     def __post_init__(self):
 
@@ -83,16 +85,18 @@ class Model(LightningModule, _Base_Class):
         self.input_data_shape = (1, 1, self.signal_window_size, 8, 8)
 
         # feature space sub-model
-        self.feature_model, self.feature_space_size = self.make_feature_model()
+        self.make_feature_model(self.feature_batchnorm)
 
         # task sub-models and metrics
         self.task_models = torch.nn.ModuleDict()
-        self.task_models_layers = {}
         self.task_metrics: dict[str, dict] = {}
 
-        # binary classifier task
-        task_name = 'median_classifier'
-        self.task_models[task_name] = self.make_mlp_classifier()
+        # Sub-model: ELM median time-to-ELM binary classifier
+        task_name = 'elm_class'
+        self.task_models[task_name] = self.make_task_model(
+            n_out=1,
+            batchnorm=self.task_batchnorm,
+        )
         self.task_metrics[task_name] = {
             'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
             'f1_score': sklearn.metrics.f1_score,
@@ -100,8 +104,24 @@ class Model(LightningModule, _Base_Class):
             'recall_score': sklearn.metrics.recall_score,
         }
 
+        # sub-model: Confinement mode multi-class classifier
+        task_name = 'conf_class'
+        self.task_models[task_name] = self.make_task_model(
+            n_out=4,
+            batchnorm=self.task_batchnorm,
+        )
+        self.task_metrics[task_name] = {
+            'ce_loss': torch.nn.functional.cross_entropy,
+            'f1_score': sklearn.metrics.f1_score,
+            'precision_score': sklearn.metrics.precision_score,
+            'recall_score': sklearn.metrics.recall_score,
+        }
+
+        self.tasks = list(self.task_models.keys())
+
+        # default monitor metric
         if self.monitor_metric is None:
-            self.monitor_metric = "median_classifier/f1_score/val"
+            self.monitor_metric = "elm_class/f1_score/val"
 
         self.total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
         if self.is_global_zero: print(f"Total model parameters: {self.total_parameters:,}")
@@ -130,7 +150,7 @@ class Model(LightningModule, _Base_Class):
             for task_name, task_output in example_batch_output.items():
                 print(f"  {task_name} output shape: {task_output.shape}  mean: {torch.mean(task_output):.3e}  var: {torch.var(task_output):.3e}")
 
-    def make_feature_model(self) -> tuple[torch.nn.Module, int]:
+    def make_feature_model(self, batchnorm: bool = True) -> None:
 
         if self.is_global_zero: print("Feature space sub-model")
 
@@ -148,7 +168,7 @@ class Model(LightningModule, _Base_Class):
         if self.is_global_zero: print(f"  Data shape: {data_shape}  (size {np.prod(data_shape)})")
         out_channels: int|Any = None
         for i_layer, layer in enumerate(conv_layers):
-            if i_layer != 0:
+            if batchnorm and i_layer > 0:
                 feature_layer_dict[f"L{i_layer:02d}_bn"] = torch.nn.BatchNorm3d(
                     num_features=out_channels,
                 )
@@ -167,29 +187,27 @@ class Model(LightningModule, _Base_Class):
             out_channels = conv.out_channels
             feature_layer_dict[layer_name] = conv
 
-        feature_model = torch.nn.Sequential(feature_layer_dict)
+        self.feature_model = torch.nn.Sequential(feature_layer_dict)
+        self.feature_space_size = self.feature_model(torch.zeros(self.input_data_shape)).numel()
 
-        output_size = feature_model(torch.zeros(self.input_data_shape)).numel()
-        if self.is_global_zero: print(f"  Feature space size: {output_size}")
-
-        n_params = sum(p.numel() for p in feature_model.parameters() if p.requires_grad)
+        n_params = sum(p.numel() for p in self.feature_model.parameters() if p.requires_grad)
         if self.is_global_zero: print(f"  Feature sub-model parameters: {n_params:,d}")
+        if self.is_global_zero: print(f"  Feature space size: {self.feature_space_size}")
 
-        return feature_model, output_size
+    def make_task_model(self, n_out: int = 1, batchnorm: bool = False) -> torch.nn.Module:
 
-    def make_mlp_classifier(self) -> torch.nn.Module:
-
-        if self.is_global_zero: print("MLP classifier sub-model")
+        if self.is_global_zero: print("Task sub-model")
 
         mlp_layer_dict = OrderedDict()
 
         assert self.feature_space_size
-        mlp_layers = (self.feature_space_size, 32, 1)
+        mlp_layers = (self.feature_space_size, 32, n_out)
 
         for i in range(len(mlp_layers)-1):
-            # mlp_layer_dict[f"L{i:02d}_bn"] = torch.nn.BatchNorm1d(
-            #     num_features=mlp_layers[i],
-            # )
+            if batchnorm:
+                mlp_layer_dict[f"L{i:02d}_bn"] = torch.nn.BatchNorm1d(
+                    num_features=mlp_layers[i],
+                )
             layer_name = f"L{i:02d}_fc"
             fc_layer = torch.nn.Linear(
                 in_features=mlp_layers[i],
@@ -311,15 +329,24 @@ class Model(LightningModule, _Base_Class):
             stage: str, 
             dataloader_idx: int|Any = None,
     ) -> torch.Tensor:
-        assert (isinstance(batch, dict) and dataloader_idx is None) or isinstance(dataloader_idx,int)
-        signal_window, time_to_elm, quantiles = batch
-        task_results = self(signal_window, stage=stage)  # call to self.forward()
+        elm_batch = confinement_batch = None
+        if isinstance(batch, dict) and dataloader_idx is None:
+            elm_batch = batch['elm_dataloader']
+            confinement_batch = batch['confinement_dataloader']
+        elif dataloader_idx == 0:
+            elm_batch = batch
+        elif dataloader_idx == 1:
+            confinement_batch = batch
+        else:
+            raise ValueError
         sum_loss = torch.Tensor([0.0])
-        for task, task_metrics in self.task_metrics.items():
-            results: torch.Tensor = task_results[task]
-            if 'class' in task:
-                labels: torch.Tensor = quantiles[0.5]
-            for metric_name, metric_function in task_metrics.items():
+        if elm_batch is not None:
+            signal_window, time_to_elm, quantiles = elm_batch
+            task = 'elm_class'
+            results = self(signal_window, stage=stage, task=task)  # call to self.forward()
+            labels = quantiles[0.5]
+            metrics = self.task_metrics[task]
+            for metric_name, metric_function in metrics.items():
                 if 'loss' in metric_name:
                     metric_value = metric_function(
                         input=results.reshape_as(labels),
@@ -339,6 +366,31 @@ class Model(LightningModule, _Base_Class):
                         **kwargs,
                     )
                 self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True)
+        if confinement_batch is not None:
+            signal_window, labels, mode_key = confinement_batch
+            task = 'conf_class'
+            results = self(signal_window, stage=stage, task=task)
+            metrics = self.task_metrics[task]
+            for metric_name, metric_function in metrics.items():
+                if 'loss' in metric_name:
+                    metric_value = metric_function(
+                        input=results.reshape_as(labels),
+                        target=labels.type_as(results),
+                    )
+                    sum_loss = sum_loss + metric_value if sum_loss else metric_value
+                elif 'score' in metric_name:
+                    kwargs = {}
+                    if metric_name.startswith(('f1','precision','recall')):
+                        modified_predictions = (results > 0.5).type(torch.int)
+                        kwargs['zero_division'] = 0
+                    else:
+                        modified_predictions = results
+                    metric_value = metric_function(
+                        y_pred=modified_predictions.detach().cpu(), 
+                        y_true=labels.detach().cpu(),
+                        **kwargs,
+                    )
+                self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True)            
         self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True)
         return sum_loss
 
@@ -346,25 +398,25 @@ class Model(LightningModule, _Base_Class):
             self, 
             x: torch.Tensor, 
             stage: str = '',
-    ) -> dict[str, torch.Tensor]:
+            task: str = '',
+    ) -> torch.Tensor:
         for layer in self.feature_model.children():
             if self.do_dropout and stage=='train':
                 x = torch.nn.functional.dropout3d(x, p=self.dropout_percent)
-            x = torch.nn.functional.leaky_relu(layer(x), negative_slope=self.leaky_relu_slope)
+            x = layer(x)
+            x = torch.nn.functional.leaky_relu(x, negative_slope=self.leaky_relu_slope)
         features = x.flatten(1)
-        results = {}
-        for task_model_name, task_model in self.task_models.items():
-            x = features
-            children_layers = list(task_model.children())
-            nlayers = len(children_layers)
-            for i, layer in enumerate(children_layers):
-                if self.do_dropout and stage=='train' and i != nlayers-1:
-                    x = torch.nn.functional.dropout1d(x, p=self.dropout_percent)
-                x = layer(x)
-                if i != nlayers-1:
-                    x = torch.nn.functional.leaky_relu(x, negative_slope=self.leaky_relu_slope)
-            results[task_model_name] = x
-        return results
+        task_model = self.task_models[task]
+        x = features
+        children_layers = list(task_model.children())
+        nlayers = len(children_layers)
+        for i, layer in enumerate(children_layers):
+            if self.do_dropout and stage=='train' and i != nlayers-1:
+                x = torch.nn.functional.dropout1d(x, p=self.dropout_percent)
+            x = layer(x)
+            if i != nlayers-1:
+                x = torch.nn.functional.leaky_relu(x, negative_slope=self.leaky_relu_slope)
+        return x
 
     def on_fit_start(self):
         self.t_fit_start = time.time()
@@ -1537,7 +1589,6 @@ def main(
             mode=metric_mode,
             save_last=True,
         ),
-        # DeviceStatsMonitor(),
         EarlyStopping(
             monitor=monitor_metric,
             mode=metric_mode,
@@ -1605,7 +1656,7 @@ def main(
         ) if world_size>1 else 'auto',
         num_nodes = num_nodes,
         use_distributed_sampler=False,
-        # num_sanity_val_steps=0,
+        num_sanity_val_steps=0,
     )
     lit_model.save_hyperparameters({
         'gradient_clip_val': gradient_clip_val, 
