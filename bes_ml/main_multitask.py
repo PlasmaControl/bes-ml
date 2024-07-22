@@ -17,6 +17,7 @@ import wandb
 
 import torch
 import torch.nn
+from torch.nn.functional import leaky_relu, dropout1d, dropout3d
 import torch.cuda
 import torch.optim
 import torch.optim.lr_scheduler
@@ -59,14 +60,13 @@ class _Base_Class:
 @dataclasses.dataclass(eq=False)
 class Model(LightningModule, _Base_Class):
     initial_max_lr: float = 1e-3  # maximum LR used by first layer
-    layerwise_lr_decrement: float = 1.5
-    lr_scheduler_patience: int = 20
-    lr_scheduler_threshold: float = 1e-3
+    layerwise_lr_decrement: float = 1.0
+    lr_scheduler_patience: int = 80
+    lr_scheduler_threshold: float = 1e-6
     weight_decay: float = 1e-6
     leaky_relu_slope: float = 1e-2
     monitor_metric: str|Any = None #'sum_loss/val' f"{task}/{metric_name}/{stage}"
-    do_dropout: bool = False
-    dropout_percent: float = 0.05
+    dropout_percent: float|Any = None
     use_optimizer: str = 'SGD'
     feature_batchnorm: bool = True
     task_batchnorm: bool = False
@@ -146,9 +146,8 @@ class Model(LightningModule, _Base_Class):
                 size=[128]+list(self.input_data_shape[1:]),
                 dtype=torch.float32,
             )
-            example_batch_output = self(self.example_batch_data)
-            for task_name, task_output in example_batch_output.items():
-                print(f"  {task_name} output shape: {task_output.shape}  mean: {torch.mean(task_output):.3e}  var: {torch.var(task_output):.3e}")
+            example_output = self(self.example_batch_data)
+            print(f"  Output shape: {example_output.shape}  mean: {torch.mean(example_output):.3e}  var: {torch.var(example_output):.3e}")
 
     def make_feature_model(self, batchnorm: bool = True) -> None:
 
@@ -356,7 +355,7 @@ class Model(LightningModule, _Base_Class):
                 elif 'score' in metric_name:
                     kwargs = {}
                     if metric_name.startswith(('f1','precision','recall')):
-                        modified_predictions = (results > 0.5).type(torch.int)
+                        modified_predictions = (results > 0.0).type(torch.int)
                         kwargs['zero_division'] = 0
                     else:
                         modified_predictions = results
@@ -374,20 +373,21 @@ class Model(LightningModule, _Base_Class):
             for metric_name, metric_function in metrics.items():
                 if 'loss' in metric_name:
                     metric_value = metric_function(
-                        input=results.reshape_as(labels),
-                        target=labels.type_as(results),
+                        input=results,
+                        target=labels.flatten(),
                     )
                     sum_loss = sum_loss + metric_value if sum_loss else metric_value
                 elif 'score' in metric_name:
                     kwargs = {}
                     if metric_name.startswith(('f1','precision','recall')):
-                        modified_predictions = (results > 0.5).type(torch.int)
+                        modified_predictions = (results > 0.0).type(torch.int)
                         kwargs['zero_division'] = 0
+                        kwargs['average'] = 'macro'
                     else:
                         modified_predictions = results
                     metric_value = metric_function(
                         y_pred=modified_predictions.detach().cpu(), 
-                        y_true=labels.detach().cpu(),
+                        y_true=torch.nn.functional.one_hot(labels.flatten().detach().cpu()),
                         **kwargs,
                     )
                 self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True)            
@@ -401,21 +401,37 @@ class Model(LightningModule, _Base_Class):
             task: str = '',
     ) -> torch.Tensor:
         for layer in self.feature_model.children():
-            if self.do_dropout and stage=='train':
-                x = torch.nn.functional.dropout3d(x, p=self.dropout_percent)
-            x = layer(x)
-            x = torch.nn.functional.leaky_relu(x, negative_slope=self.leaky_relu_slope)
-        features = x.flatten(1)
-        task_model = self.task_models[task]
-        x = features
-        children_layers = list(task_model.children())
+            if self.dropout_percent and stage=='train':
+                x = leaky_relu(
+                    input=layer(dropout3d(x, p=self.dropout_percent)), 
+                    negative_slope=self.leaky_relu_slope,
+                )
+            else:
+                x = leaky_relu(
+                    input=layer(x), 
+                    negative_slope=self.leaky_relu_slope,
+                )
+        x = x.flatten(1)  # features
+        if not task:
+            task = list(self.task_models.keys())[0]
+        children_layers = list(self.task_models[task].children())
         nlayers = len(children_layers)
         for i, layer in enumerate(children_layers):
-            if self.do_dropout and stage=='train' and i != nlayers-1:
-                x = torch.nn.functional.dropout1d(x, p=self.dropout_percent)
-            x = layer(x)
-            if i != nlayers-1:
-                x = torch.nn.functional.leaky_relu(x, negative_slope=self.leaky_relu_slope)
+            if i == nlayers-1:
+                # for last layer, no dropout at input and no relu at output
+                x = layer(x)
+            else:
+                # for non-last layers, relu at output
+                if self.dropout_percent and stage=='train':
+                    x = leaky_relu(
+                        input=layer(dropout1d(x, p=self.dropout_percent)), 
+                        negative_slope=self.leaky_relu_slope,
+                    )
+                else:
+                    x = leaky_relu(
+                        input=layer(x), 
+                        negative_slope=self.leaky_relu_slope,
+                    )
         return x
 
     def on_fit_start(self):
@@ -470,7 +486,7 @@ class Data(_Base_Class, LightningDataModule):
     elm_data_file: str|Path|Any = None
     confinement_data_file: str|Path|Any = None
     max_elms: int|Any = None
-    batch_size: int = 128
+    batch_size: int = 256
     stride_factor: int = 8
     num_workers: int|Any = None
     outlier_value: float = 6
@@ -482,8 +498,9 @@ class Data(_Base_Class, LightningDataModule):
     time_to_elm_quantile_max: float|Any = None
     contrastive_learning: bool = False
     min_pre_elm_time: float|Any = None
-    fir_hp_filter: float = 0.0
     fir_taps: int = 501  # Number of taps in the filter
+    fir_bp_low: float|Any = None  # bandpass filter cut-on freq in kHz
+    fir_bp_high: float|Any = None  # bandpass filter cut-off freq in kHz
     bad_shots: list = None
     num_classes: int = 4
     metadata_bounds = {
@@ -494,16 +511,16 @@ class Data(_Base_Class, LightningDataModule):
     force_validation_shots: list = None
     force_test_shots: list = None
     max_shots_per_class: int = None
-    max_shots: int = None
+    # max_shots: int = None
     test_only: bool = False
     n_rows: int = 8
     n_cols: int = 8
-    sampling_frequency_hz: float = 1 / 10**(-6)  # Sampling frequency in Hz
-    lower_cutoff_frequency_hz: float = None  # Lower cutoff frequency in Hz
-    upper_cutoff_frequency_hz: float = None  # Upper cutoff frequency in Hz
-    clip_signals: float = None # remove signal windows with abs(raw_signals) > clip_signals
+    # sampling_frequency_hz: float = 1.e6  # Sampling frequency in Hz
+    # lower_cutoff_frequency_hz: float = None  # Lower cutoff frequency in Hz
+    # upper_cutoff_frequency_hz: float = None  # Upper cutoff frequency in Hz
+    # clip_signals: float = None # remove signal windows with abs(raw_signals) > clip_signals
     mask_sigma_outliers: float = None  # remove signal windows with abs(standardized_signals) > n_sigma
-    one_hot_labels: bool = False # if True, use one-hot vector for label
+    # one_hot_labels: bool = False # if True, use one-hot vector for label
     prepare_data_per_node: bool = True  # hack to avoid error between dataclass and LightningDataModule
 
     def __post_init__(self):
@@ -544,9 +561,9 @@ class Data(_Base_Class, LightningDataModule):
             print_fields(self)
 
         self.state_items = [
+            'global_elm_split',
             'elm_raw_signal_mean',
             'elm_raw_signal_stdev',
-            'global_elm_split',
             'time_to_elm_quantiles',
             'global_confinement_split',
             'confinement_raw_signal_mean',
@@ -568,12 +585,12 @@ class Data(_Base_Class, LightningDataModule):
         self.zprint(f"Global batch size: {self.batch_size}")
         self.zprint(f"Batch size per rank {self.batch_size_per_rank}")
 
-        if self.fir_hp_filter:
-            self.zprint(f"Using HP filter with f_pass={self.fir_hp_filter:.1f} kHz")
+        if self.fir_bp_low and self.fir_bp_high:
+            self.zprint(f"Using bandpass filter with f_low-f_high: {self.fir_bp_low:.1f}-{self.fir_bp_high:.1f} kHz")
             self.b_coeffs = scipy.signal.firwin(
                 numtaps=self.fir_taps,  # must be odd
-                cutoff=self.fir_hp_filter,  # transition width in kHz
-                pass_zero='highpass',
+                cutoff=[self.fir_bp_low, self.fir_bp_high],  # transition width in kHz
+                pass_zero='bandpass',
                 fs=1e3,  # f_sample in kHz
             )
             self.a_coeffs = np.zeros_like(self.b_coeffs)
@@ -932,8 +949,8 @@ class Data(_Base_Class, LightningDataModule):
         shot_numbers = np.array(list(filtered_shots.keys()))
         rng = np.random.default_rng(self.seed)
         rng.shuffle(shot_numbers)
-        if self.max_shots:
-            shot_numbers = shot_numbers[:self.max_shots]
+        # if self.max_shots:
+        #     shot_numbers = shot_numbers[:self.max_shots]
         if not self.test_only:
             shot_numbers = np.array(list(filtered_shots.keys()))
             # Map labels here
@@ -1113,15 +1130,15 @@ class Data(_Base_Class, LightningDataModule):
             packaged_signals = np.empty((time_count, self.n_rows, self.n_cols), dtype=np.float32)
             start_index = 0
 
-            if self.lower_cutoff_frequency_hz is not None and self.upper_cutoff_frequency_hz is not None:
-                bandpass_filter = scipy.signal.firwin(
-                    self.fir_taps,
-                    [self.lower_cutoff_frequency_hz, self.upper_cutoff_frequency_hz],
-                    pass_zero=False,
-                    fs=self.sampling_frequency_hz
-                )
-            else:
-                bandpass_filter = None
+            # if self.lower_cutoff_frequency_hz is not None and self.upper_cutoff_frequency_hz is not None:
+            #     bandpass_filter = scipy.signal.firwin(
+            #         self.fir_taps,
+            #         [self.lower_cutoff_frequency_hz, self.upper_cutoff_frequency_hz],
+            #         pass_zero=False,
+            #         fs=self.sampling_frequency_hz
+            #     )
+            # else:
+            #     bandpass_filter = None
 
             for i, (shot, event) in enumerate(long_enough_indices):
                 if i % 100 == 0:
@@ -1135,10 +1152,17 @@ class Data(_Base_Class, LightningDataModule):
                 # Retrieve signals and reshape according to inboard_order
                 signals = np.array(event_data["signals"][:, :], dtype=np.float32)
                 signals = np.transpose(signals, (1, 0)).reshape(-1, self.n_rows, self.n_cols)
-                if bandpass_filter is not None and signals.shape[0] > 3 * self.fir_taps:
-                    if i % 100 == 0:
-                        self.rprint(f"Applying {self.lower_cutoff_frequency_hz} - {self.upper_cutoff_frequency_hz} bandpass filter ")
-                    signals = scipy.signal.filtfilt(bandpass_filter, 1, signals, axis=0)
+                if self.b_coeffs is not None and signals.shape[0] > 3 * self.fir_taps:
+                    # if i % 100 == 0:
+                    #     self.rprint(f"Applying {self.lower_cutoff_frequency_hz} - {self.upper_cutoff_frequency_hz} bandpass filter ")
+                    signals = np.array(
+                        scipy.signal.lfilter(
+                            x=signals,
+                            a=self.a_coeffs,
+                            b=self.b_coeffs,
+                        ),
+                        dtype=np.float32,
+                    )
                 labels = np.array(event_data["labels"], dtype=int)
 
                 # labels, valid_t0 = self._get_valid_indices(labels)
@@ -1158,9 +1182,9 @@ class Data(_Base_Class, LightningDataModule):
         self.zprint(f"Time for confinement data read: {time.time()-t_tmp:.1f} s")
 
         packaged_labels = np.concatenate([confinement_mode['labels'] for confinement_mode in confinement_data], axis=0)
-        if self.one_hot_labels:
-            encoder = OneHotEncoder(sparse_output=False, categories=[np.arange(self.num_classes)], handle_unknown='ignore')
-            packaged_labels = encoder.fit_transform(packaged_labels.reshape(-1, 1))
+        # if self.one_hot_labels:
+        #     encoder = OneHotEncoder(sparse_output=False, categories=[np.arange(self.num_classes)], handle_unknown='ignore')
+        #     packaged_labels = encoder.fit_transform(packaged_labels.reshape(-1, 1))
 
         packaged_valid_t0 = np.concatenate([confinement_mode['valid_t0'] for confinement_mode in confinement_data], axis=0)
 
@@ -1223,19 +1247,19 @@ class Data(_Base_Class, LightningDataModule):
         )
 
         # mask abs(signals) > N volts
-        if self.clip_signals and stage == 'train':
-            self.rprint(f"  Clipping signal windows beyond +/- {self.clip_signals} V")
-            mask = []
-            for i in packaged_valid_t0_indices:
-                signal_window = packaged_signals[i: i + self.signal_window_size, :, :]
-                mask.append((signal_window.min() >= -self.clip_signals) and (signal_window.max() <= self.clip_signals))
-            packaged_valid_t0_indices = packaged_valid_t0_indices[mask]
+        # if self.clip_signals and stage == 'train':
+        #     self.rprint(f"  Clipping signal windows beyond +/- {self.clip_signals} V")
+        #     mask = []
+        #     for i in packaged_valid_t0_indices:
+        #         signal_window = packaged_signals[i: i + self.signal_window_size, :, :]
+        #         mask.append((signal_window.min() >= -self.clip_signals) and (signal_window.max() <= self.clip_signals))
+        #     packaged_valid_t0_indices = packaged_valid_t0_indices[mask]
 
-            stats = _get_statistics2(
-                sample_indices=packaged_valid_t0_indices,
-                signals=packaged_signals,
-            )
-            self.rprint(f"  Clipped signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
+        #     stats = _get_statistics2(
+        #         sample_indices=packaged_valid_t0_indices,
+        #         signals=packaged_signals,
+        #     )
+        #     self.rprint(f"  Clipped signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
 
         # mask outlier signals
         if self.mask_sigma_outliers:
@@ -1527,8 +1551,7 @@ def main(
         weight_decay = 1e-4,
         lr_scheduler_patience = 8,
         monitor_metric = None,
-        do_dropout = False,
-        dropout_percent = 0.05,
+        dropout_percent = None,
         use_optimizer = 'SGD',
         # loggers
         log_freq = 100,
@@ -1551,7 +1574,8 @@ def main(
         time_to_elm_quantile_max: float|Any = None,
         contrastive_learning: bool = True,
         min_pre_elm_time: float|Any = None,
-        fir_hp_filter: float = 0.0,
+        fir_bp_low = None,
+        fir_bp_high = None,
 ):
 
     # SLURM/MPI environment
@@ -1574,7 +1598,6 @@ def main(
         weight_decay=weight_decay,
         is_global_zero=is_global_zero,
         lr_scheduler_patience=lr_scheduler_patience,
-        do_dropout=do_dropout,
         dropout_percent=dropout_percent,
         monitor_metric=monitor_metric,
         use_optimizer=use_optimizer,
@@ -1685,7 +1708,8 @@ def main(
         contrastive_learning=contrastive_learning,
         is_global_zero=is_global_zero,
         min_pre_elm_time=min_pre_elm_time,
-        fir_hp_filter=fir_hp_filter,
+        fir_bp_low=fir_bp_low,
+        fir_bp_high=fir_bp_high,
         max_shots_per_class=2,
     )
 
@@ -1714,6 +1738,5 @@ if __name__=='__main__':
         # contrastive_learning=True,
         # min_pre_elm_time=20,
         skip_train=False,
-        # fir_hp_filter=5.0,
         # use_optimizer='sgd',
     )

@@ -317,8 +317,7 @@ class Model(LightningModule, _Base_Class):
         sum_loss = torch.Tensor([0.0])
         for task, task_metrics in self.task_metrics.items():
             results: torch.Tensor = task_results[task]
-            if 'class' in task:
-                labels: torch.Tensor = quantiles[0.5]
+            labels: torch.Tensor = quantiles[0.5]
             for metric_name, metric_function in task_metrics.items():
                 if 'loss' in metric_name:
                     metric_value = metric_function(
@@ -329,7 +328,7 @@ class Model(LightningModule, _Base_Class):
                 elif 'score' in metric_name:
                     kwargs = {}
                     if metric_name.startswith(('f1','precision','recall')):
-                        modified_predictions = (results > 0.5).type(torch.int)
+                        modified_predictions = (results >= 0.0).type(torch.int)
                         kwargs['zero_division'] = 0
                     else:
                         modified_predictions = results
