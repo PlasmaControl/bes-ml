@@ -94,6 +94,8 @@ class Model(LightningModule, _Base_Class):
             'f1_score': sklearn.metrics.f1_score,
             'precision_score': sklearn.metrics.precision_score,
             'recall_score': sklearn.metrics.recall_score,
+            'mean_stat': torch.mean,
+            'std_stat': torch.std,
         }
 
         if self.monitor_metric is None:
@@ -312,31 +314,27 @@ class Model(LightningModule, _Base_Class):
         self.update_step(batch, batch_idx, stage='test')
 
     def update_step(self, batch, batch_idx, stage: str) -> torch.Tensor:
-        signal_window, time_to_elm, quantiles = batch
-        task_results = self(signal_window, stage=stage)
+        signal_inputs, _, quantiles = batch
+        model_outputs = self(signal_inputs, stage=stage)
         sum_loss = torch.Tensor([0.0])
         for task, task_metrics in self.task_metrics.items():
-            results: torch.Tensor = task_results[task]
+            task_outputs: torch.Tensor = model_outputs[task]
             labels: torch.Tensor = quantiles[0.5]
             for metric_name, metric_function in task_metrics.items():
                 if 'loss' in metric_name:
                     metric_value = metric_function(
-                        input=results.reshape_as(labels),
-                        target=labels.type_as(results),
+                        input=task_outputs.reshape_as(labels),
+                        target=labels.type_as(task_outputs),
                     )
                     sum_loss = sum_loss + metric_value if sum_loss else metric_value
                 elif 'score' in metric_name:
-                    kwargs = {}
-                    if metric_name.startswith(('f1','precision','recall')):
-                        modified_predictions = (results >= 0.0).type(torch.int)
-                        kwargs['zero_division'] = 0
-                    else:
-                        modified_predictions = results
                     metric_value = metric_function(
-                        y_pred=modified_predictions.detach().cpu(), 
+                        y_pred=(task_outputs.detach().cpu() >= 0.0).type(torch.int), 
                         y_true=labels.detach().cpu(),
-                        **kwargs,
+                        zero_division=0,
                     )
+                elif 'stat' in metric_name:
+                    metric_value = metric_function(task_outputs.detach().cpu())
                 self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True)
         self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True)
         return sum_loss
@@ -1008,19 +1006,18 @@ if __name__=='__main__':
         data_file='/global/homes/d/drsmith/scratch-ml/data/labeled_elm_events.hdf5',
         # data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
         # data_file='/Users/drsmith/Documents/repos/bes-ml/bes_ml/small_elm_data.hdf5',
-        max_elms=400,
+        max_elms=500,
         batch_size=128,
-        max_epochs=2,
+        max_epochs=4,
         num_workers=2,
-        log_freq=100,
-        time_to_elm_quantile_min=0.4,
-        time_to_elm_quantile_max=0.6,
+        log_freq=20,
+        time_to_elm_quantile_min=0.2,
+        time_to_elm_quantile_max=0.8,
         contrastive_learning=True,
         min_pre_elm_time=20,
-        # skip_train=False,
         # fir_hp_filter=5.0,
-        use_optimizer='sgd',
-        # use_wandb=True,
-        gradient_clip_val=0.1,
+        gradient_clip_val=1,
         gradient_clip_algorithm='value',
+        use_wandb=True,
+        # skip_train=False,
     )

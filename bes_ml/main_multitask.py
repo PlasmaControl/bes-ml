@@ -575,6 +575,7 @@ class Data(_Base_Class, LightningDataModule):
             assert hasattr(self, item)
 
     def setup(self, stage: str):
+        t_tmp = time.time()
         self.zprint(f"Begin setup stage {stage}".upper())
 
         assert stage in ['fit', 'test', 'predict']
@@ -629,6 +630,7 @@ class Data(_Base_Class, LightningDataModule):
         for st in stages:
             self._setup_confinement_data(st)
         self.zprint("Confinement data preparation: end".upper())
+        self.zprint(f"Setup time: {time.time()-t_tmp:.1f} s")
 
     def _setup_elm_data(self, stage: str):
         if stage in self.elm_datasets and isinstance(self.elm_datasets[stage], torch.utils.data.Dataset):
@@ -815,6 +817,7 @@ class Data(_Base_Class, LightningDataModule):
     def _make_elm_data_split(self):
         assert len(self.global_elm_split) == 0
         self.rprint(f"Data split")
+        rng = np.random.default_rng(self.seed)
         with h5py.File(self.elm_data_file, 'r') as root:
             global_shots = set([int(shot_key) for shot_key in root['shots']])
             shots_from_elms = set([int(elm_group.attrs['shot']) for elm_group in root['elms'].values()])
@@ -824,21 +827,28 @@ class Data(_Base_Class, LightningDataModule):
             self.zprint(f"  ELMs/shots in HDF5 file: {len(global_elms):,d} / {len(global_shots):,d}")
             # limit max ELMs
             if self.max_elms and len(global_elms) > self.max_elms:
+                rng.shuffle(global_elms)
                 global_elms = global_elms[:self.max_elms]
                 global_shots = set([int(root['elms'][f"{elm_index:06d}"].attrs['shot']) for elm_index in global_elms])
                 global_shots = list(global_shots)
                 self.zprint(f"  ELMs/shots for analysis: {len(global_elms):,d} / {len(global_shots):,d}")
             # shuffle shots in dataset
             self.rprint(f"Shuffling global shots with seed={self.seed}")
-            np.random.default_rng(self.seed).shuffle(global_shots)
+            rng.shuffle(global_shots)
             self.rprint(f"Shuffled shot order: " + ', '.join(map(str, global_shots[:5])))
             # order ELMs by shuffled shots
             self.rprint(f"Ordering ELMs by shuffled shots")
             new_global_elms = []
+            global_elms = sorted(global_elms)
             for shot in global_shots:
-                for elm_key in root['elms']:
-                    if root['elms'][elm_key].attrs['shot'] == shot:
-                        new_global_elms.append(int(elm_key))
+                start_new_shot = True
+                for i_elm in global_elms:
+                    if root['elms'][f"{i_elm:06d}"].attrs['shot'] == shot:
+                        new_global_elms.append(i_elm)
+                        start_new_shot = False
+                    else:
+                        if start_new_shot == False:
+                            break
             global_elms = new_global_elms
             # split shots
             n_test_shots = int(self.fraction_test * len(global_shots))
@@ -848,9 +858,8 @@ class Data(_Base_Class, LightningDataModule):
             
             for stage in ['train','validation','test']:
                 self.global_elm_split[stage] = [
-                    int(key) 
-                    for key, value in root['elms'].items()
-                    if value.attrs['shot'] in self.global_shot_split[stage]
+                    i_elm for i_elm in global_elms
+                    if root['elms'][f"{i_elm:06d}"].attrs['shot'] in self.global_shot_split[stage]
                 ]
                 self.rprint(f"Stage {stage.upper()}: Global ELM/shot count {len(self.global_elm_split[stage]):,d} ({len(self.global_elm_split[stage])/len(global_elms)*1e2:.1f}%) / {self.global_shot_split[stage].size} ({self.global_shot_split[stage].size/len(global_shots)*1e2:.1f}%)")
 
@@ -873,7 +882,6 @@ class Data(_Base_Class, LightningDataModule):
         )
 
     def _get_confinement_events_and_split(self):
-        t_tmp = time.time()
         self.zprint("Get confinement events and split: begin".upper())
         if self.bad_shots is None:
             self.bad_shots = []  # Initialize to empty list if None
@@ -887,8 +895,9 @@ class Data(_Base_Class, LightningDataModule):
                 for event in data_file[shot]:
                     event_data = data_file[shot][event]
                     if 'labels' in event_data:
-                        labels_array = event_data['labels'][()]
-                        shot_labels.extend(labels_array)
+                        shot_labels.append(event_data['labels'][0])
+                        # if np.max(event_data['labels'])!=np.min(event_data['labels']):
+                        #     raise ValueError
                 if not shot_labels:
                     continue
                 label_presence = tuple(class_id in shot_labels for class_id in range(self.num_classes))  
@@ -900,7 +909,6 @@ class Data(_Base_Class, LightningDataModule):
                     'delz_avg': attrs.get('delz_avg')
                 }
                 shots[shot] = (shot_events, label_presence, metadata)
-        self.zprint(f"Data read: {time.time()-t_tmp:.1f} s")
         r_avg_exclusions = z_avg_exclusions = delz_avg_exclusions = 0
         def check_bounds(value, bounds):
             return bounds[0] <= value <= bounds[1] if bounds else True
@@ -1043,7 +1051,8 @@ class Data(_Base_Class, LightningDataModule):
         # self.rprint(f"Total Time Spent in Each Mode (seconds): {mode_times_seconds}")
         # self.rprint(f"Number of Unique Shots for Each Mode: {mode_shot_counts}")
         # t0 = time.time()
-        self.zprint(f"Get confinement events and split: end,  time: {time.time()-t_tmp:.1f} s")
+        # self.zprint(f"After data read: {time.time()-t_tmp:.1f} s")
+        # self.zprint(f"Get confinement events and split: end,  time: {time.time()-t_tmp:.1f} s")
 
     def _setup_confinement_data(self, stage: str):
 
@@ -1168,7 +1177,7 @@ class Data(_Base_Class, LightningDataModule):
                 # labels, valid_t0 = self._get_valid_indices(labels)
                 valid_t0 = np.zeros(labels.size, dtype=int)
                 first_valid_signal_window_start_index = self.signal_window_size - 1
-                valid_t0[first_valid_signal_window_start_index:] = 1
+                valid_t0[first_valid_signal_window_start_index::128] = 1
                 packaged_signals[start_index:start_index + signals.shape[0]] = signals
                 start_index += signals.shape[0]
                 confinement_data.append({
@@ -1299,11 +1308,12 @@ class Data(_Base_Class, LightningDataModule):
                 'signal_stdev': self.confinement_raw_signal_stdev.item(),
             })
 
-        if stage in ['train']:
+        if stage in ['train'] or True:
             self.rprint(f"  Standarizing signals with mean {self.confinement_raw_signal_mean:.3f} and std {self.confinement_raw_signal_stdev:.3f}")
             self.rprint(f"  Standardized signal stats")
-            for idx, signal in enumerate(packaged_signals):
-                packaged_signals[idx] = (signal - self.confinement_raw_signal_mean) / self.confinement_raw_signal_stdev
+            packaged_signals = (packaged_signals - self.confinement_raw_signal_mean) / self.confinement_raw_signal_stdev
+            # for idx, signal in enumerate(packaged_signals):
+            #     packaged_signals[idx] = (signal - self.confinement_raw_signal_mean) / self.confinement_raw_signal_stdev
             stats = _get_statistics2(
                 sample_indices=packaged_valid_t0_indices,
                 signals=packaged_signals,
@@ -1727,7 +1737,7 @@ if __name__=='__main__':
         # data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
         # data_file='/Users/drsmith/Documents/repos/bes-ml/bes_ml/small_elm_data.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
-        max_elms=300,
+        max_elms=100,
         batch_size=128,
         max_epochs=2,
         fraction_validation=0.2,
