@@ -57,14 +57,16 @@ class _Base_Class:
 
 @dataclasses.dataclass(eq=False)
 class Model(LightningModule, _Base_Class):
+    elm_classifier: bool = True
+    conf_classifier: bool = False
     lr: float = 1e-3  # maximum LR used by first layer
-    lr_scheduler_patience: int = 20
+    lr_scheduler_patience: int = 50
     lr_scheduler_threshold: float = 1e-3
-    lr_warmup_epochs: int = 5
+    lr_warmup_epochs: int = 8
     # lr_layerwise_decrement: float = 1.
     weight_decay: float = 1e-6
     leaky_relu_slope: float = 2e-2
-    monitor_metric: str|Any = None #'sum_loss/val' f"{task}/{metric_name}/{stage}"
+    monitor_metric: str = 'sum_score/val'
     use_optimizer: str = 'SGD'
     # feature_batchnorm: bool = True
     # task_batchnorm: bool = False
@@ -79,7 +81,7 @@ class Model(LightningModule, _Base_Class):
         if self.is_global_zero:
             print_fields(self)
 
-        # input data shape
+        # single input data shape
         self.input_data_shape = (1, 1, self.signal_window_size, 8, 8)
 
         # feature space sub-model
@@ -87,68 +89,71 @@ class Model(LightningModule, _Base_Class):
 
         # task sub-models and metrics
         self.task_models = torch.nn.ModuleDict()
-        self.task_models_layers = {}
         self.task_metrics: dict[str, dict] = {}
 
         # Sub-model: ELM median time-to-ELM binary classifier
-        task_name = 'elm_class'
-        self.task_models[task_name] = self.make_mlp_classifier()
-        self.task_metrics[task_name] = {
-            'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
-            'f1_score': sklearn.metrics.f1_score,
-            'precision_score': sklearn.metrics.precision_score,
-            'recall_score': sklearn.metrics.recall_score,
-            'mean_stat': torch.mean,
-            'std_stat': torch.std,
-        }
+        if self.elm_classifier:
+            task_name = 'elm_classifier'
+            self.task_models[task_name] = self.make_mlp_classifier()
+            self.task_metrics[task_name] = {
+                'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
+                'f1_score': sklearn.metrics.f1_score,
+                'precision_score': sklearn.metrics.precision_score,
+                'recall_score': sklearn.metrics.recall_score,
+                'mean_stat': torch.mean,
+                'std_stat': torch.std,
+            }
 
         # sub-model: Confinement mode multi-class classifier
-        task_name = 'conf_class'
-        self.task_models[task_name] = self.make_mlp_classifier(n_out=4)
-        self.task_metrics[task_name] = {
-            'ce_loss': torch.nn.functional.cross_entropy,
-            'f1_score': sklearn.metrics.f1_score,
-            'precision_score': sklearn.metrics.precision_score,
-            'recall_score': sklearn.metrics.recall_score,
-            'mean_stat': torch.mean,
-            'std_stat': torch.std,
-        }
+        if self.conf_classifier:
+            task_name = 'conf_classifier'
+            self.task_models[task_name] = self.make_mlp_classifier(n_out=4)
+            self.task_metrics[task_name] = {
+                'ce_loss': torch.nn.functional.cross_entropy,
+                'f1_score': sklearn.metrics.f1_score,
+                'precision_score': sklearn.metrics.precision_score,
+                'recall_score': sklearn.metrics.recall_score,
+                'mean_stat': torch.mean,
+                'std_stat': torch.std,
+            }
 
-        self.tasks = list(self.task_models.keys())
+        self.task_names = list(self.task_models.keys())
 
-        # default monitor metric
-        if self.monitor_metric is None:
-            self.monitor_metric = "elm_class/f1_score/val"
-
-        self.total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        if self.is_global_zero: print(f"Total model parameters: {self.total_parameters:,}")
-
-        if self.is_global_zero: print("Initializing model to uniform random weights and biases=0")
+        self.zprint("Initializing model to uniform random weights and biases=0")
         for name, param in self.named_parameters():
             if 'bn' in name: continue
             if name.endswith("bias"):
-                if self.is_global_zero: print(f"  {name}: initialized to zeros (numel {param.data.numel()})")
+                self.zprint(f"  {name}: initialized to zeros (numel {param.data.numel()})")
                 param.data.fill_(0)
             elif name.endswith("weight"):
                 n_in = np.prod(param.shape[1:])
                 sqrt_k = np.sqrt(3. / n_in)
                 param.data.uniform_(-sqrt_k, sqrt_k)
-                if self.is_global_zero: print(f"  {name}: initialized to uniform +- {sqrt_k:.1e} n*var: {n_in*torch.var(param.data):.3f} (n {param.data.numel()})")
+                self.zprint(f"  {name}: initialized to uniform +- {sqrt_k:.1e} n*var: {n_in*torch.var(param.data):.3f} (n {param.data.numel()})")
             else:
                 raise ValueError
 
         if self.is_global_zero: 
             print("Batch evaluation (batch_size=128) with randn() data")
-            self.example_batch_data = torch.randn(
+            example_batch_data = torch.randn(
                 size=[128]+list(self.input_data_shape[1:]),
                 dtype=torch.float32,
             )
-            example_batch_output = self(self.example_batch_data)
-            print(f"  Output shape: {example_batch_output.shape}  mean: {torch.mean(example_batch_output):.3e}  var: {torch.var(example_batch_output):.3e}")
+            batch_input = {task: [example_batch_data] for task in self.task_names}
+            batch_output = self(batch_input)
+            for task, task_output in batch_output.items():
+                print(f"  Task {task} output shape: {task_output.shape}")
+
+        self.zprint(f"Total model parameters: {self.param_count(self):,d}")
+        return
+
+    @staticmethod
+    def param_count(model: LightningModule) -> int:
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     def make_feature_model(self) -> None:
 
-        if self.is_global_zero: print("Feature space sub-model")
+        self.zprint("Feature space sub-model")
 
         feature_layer_dict = OrderedDict()
 
@@ -161,7 +166,7 @@ class Model(LightningModule, _Base_Class):
         )
 
         data_shape = self.input_data_shape
-        if self.is_global_zero: print(f"  Data shape: {data_shape}  (size {np.prod(data_shape)})")
+        self.zprint(f"  Input data shape: {data_shape}  (size {np.prod(data_shape)})")
         out_channels: int|Any = None
         for i_layer, layer in enumerate(conv_layers):
             conv_layer_name = f"L{i_layer:02d}_Conv"
@@ -173,8 +178,7 @@ class Model(LightningModule, _Base_Class):
             )
             n_params = sum(p.numel() for p in conv.parameters() if p.requires_grad)
             data_shape = tuple(conv(torch.zeros(data_shape)).shape)
-            if self.is_global_zero: 
-                print(f"  {conv_layer_name} kern {conv.kernel_size}  stride {conv.stride}  out_ch {conv.out_channels}  param {n_params:,d}  output {data_shape} (size {np.prod(data_shape)})")
+            self.zprint(f"  {conv_layer_name} kern {conv.kernel_size}  stride {conv.stride}  out_ch {conv.out_channels}  param {n_params:,d}  output {data_shape} (size {np.prod(data_shape)})")
             out_channels = conv.out_channels
             feature_layer_dict[conv_layer_name] = conv
             feature_layer_dict[f"L{i_layer:02d}_LeRu"] = torch.nn.LeakyReLU(self.leaky_relu_slope)
@@ -184,13 +188,12 @@ class Model(LightningModule, _Base_Class):
         self.feature_model = torch.nn.Sequential(feature_layer_dict)
         self.feature_space_size = self.feature_model(torch.zeros(self.input_data_shape)).numel()
 
-        n_params = sum(p.numel() for p in self.feature_model.parameters() if p.requires_grad)
-        if self.is_global_zero: print(f"  Feature sub-model parameters: {n_params:,d}")
-        if self.is_global_zero: print(f"  Feature space size: {self.feature_space_size}")
+        self.zprint(f"  Feature sub-model parameters: {self.param_count(self.feature_model):,d}")
+        self.zprint(f"  Feature space size: {self.feature_space_size}")
 
     def make_mlp_classifier(self, n_out: int = 1) -> torch.nn.Module:
 
-        if self.is_global_zero: print("MLP classifier sub-model")
+        self.zprint("MLP classifier sub-model")
 
         mlp_layer_dict = OrderedDict()
 
@@ -206,75 +209,30 @@ class Model(LightningModule, _Base_Class):
                 bias=True if i_layer+1<n_layers-1 else False,
             )
             n_params = sum(p.numel() for p in mlp_layer.parameters() if p.requires_grad)
-            if self.is_global_zero: 
-                print(f"  {mlp_layer_name}  in_features {mlp_layer.in_features}  out_features {mlp_layer.out_features}  parameters {n_params:,d}")
+            self.zprint(f"  {mlp_layer_name}  in_features {mlp_layer.in_features}  out_features {mlp_layer.out_features}  parameters {n_params:,d}")
             mlp_layer_dict[mlp_layer_name] = mlp_layer
             if i_layer+1 < n_layers-1:
                 mlp_layer_dict[f"L{i_layer:02d}_LeRu"] = torch.nn.LeakyReLU(self.leaky_relu_slope)
 
         mlp_classifier = torch.nn.Sequential(mlp_layer_dict)
 
-        n_params = n_params = sum(p.numel() for p in mlp_classifier.parameters() if p.requires_grad)
-        if self.is_global_zero: print(f"  MLP sub-model parameters: {n_params:,d}")
+        self.zprint(f"  MLP sub-model parameters: {self.param_count(mlp_classifier):,d}")
 
         return mlp_classifier
 
     def configure_optimizers(self):
-        # parameter_group = []
-        # lr = self.lr
-        # if self.is_global_zero: print("Initial layer-wise learning rates")
-        # for layer_name, layer in self.feature_model.named_children():
-        #     if 'bn' in layer_name:
-        #         for param_name, param in layer.named_parameters():
-        #             parameter_group.append({
-        #                 'params': param,
-        #                 'lr': self.lr,
-        #             })
-        #     else:
-        #         for param_name, param in layer.named_parameters():
-        #             assert param_name.endswith('weight') or param_name.endswith('bias')
-        #             param_lr = lr if param_name.endswith('weight') else lr
-        #             parameter_group.append({
-        #                 'params': param,
-        #                 'lr': param_lr,
-        #             })
-        #             if self.is_global_zero: print(f"  {layer_name} {param_name} {param_lr:.3e}")
-        #         lr /= self.lr_layerwise_decrement
-        # lr_after_feature_model = lr
-        # for task_name, task_model in self.task_models.items():
-        #     lr = lr_after_feature_model
-        #     for layer_name, layer in task_model.named_children():
-        #         if 'bn' in layer_name:
-        #             for param_name, param in layer.named_parameters():
-        #                 parameter_group.append({
-        #                     'params': param,
-        #                     'lr': self.lr,
-        #                 })
-        #         else:
-        #             for param_name, param in layer.named_parameters():
-        #                 assert param_name.endswith('weight') or param_name.endswith('bias')
-        #                 param_lr = lr if param_name.endswith('weight') else lr
-        #                 parameter_group.append({
-        #                     'params': param,
-        #                     'lr': param_lr,
-        #                 })
-        #                 if self.is_global_zero: print(f"  {task_name} {layer_name} {param_name} {param_lr:.3e}")
-        #             lr /= self.lr_layerwise_decrement
-
-        if self.is_global_zero: print(f"Using {self.use_optimizer.upper()} optimizer")
+        self.zprint(f"Using {self.use_optimizer.upper()} optimizer")
+        optim_kwargs = {
+            'params': self.parameters(),
+            'lr': self.lr,
+            'weight_decay': self.weight_decay,
+        }
         if self.use_optimizer.lower() == 'sgd':
-            self.optimizer = torch.optim.SGD(
-                self.parameters(),
-                lr=self.lr,
-                weight_decay=self.weight_decay,
-                momentum=0.2,
-            )
+            self.optimizer = torch.optim.SGD(momentum=0.2, **optim_kwargs)
         elif self.use_optimizer.lower() == 'adam':
-            self.optimizer = torch.optim.Adam(
-                self.parameters(),
-                lr=self.lr,
-                weight_decay=self.weight_decay,
-            )
+            self.optimizer = torch.optim.Adam(**optim_kwargs)
+        else:
+            raise ValueError
 
         lr_reduce_on_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer=self.optimizer,
@@ -282,11 +240,14 @@ class Model(LightningModule, _Base_Class):
             patience=self.lr_scheduler_patience,
             threshold=self.lr_scheduler_threshold,
             mode='min' if 'loss' in self.monitor_metric else 'max',
+            min_lr=1e-4,
+            verbose=True,
         )
         lr_warm_up = torch.optim.lr_scheduler.LinearLR(
             optimizer=self.optimizer,
             start_factor=0.1,
             total_iters=self.lr_warmup_epochs,
+            verbose=True,
         )
         return_optim_list = [self.optimizer]
         return_lr_scheduler_list = [
@@ -323,23 +284,39 @@ class Model(LightningModule, _Base_Class):
             self, 
             batch, 
             batch_idx: int, 
-            stage: str, 
             dataloader_idx: int|Any = None,
+            stage: str = '', 
     ) -> torch.Tensor:
-        elm_batch = confinement_batch = None
-        if isinstance(batch, dict) and dataloader_idx is None:
-            elm_batch = batch['elm_dataloader']
-            confinement_batch = batch['confinement_dataloader']
-        elif dataloader_idx == 0:
-            elm_batch = batch
-        elif dataloader_idx == 1:
-            confinement_batch = batch
-        else:
-            raise ValueError
+        # for task_name in self.task_names:
+        #     assert task_name in batch
+        # elm_batch = confinement_batch = None
+        # if isinstance(batch, dict) and dataloader_idx is None:
+        #     elm_batch = batch['elm_dataloader']
+        #     confinement_batch = batch['confinement_dataloader']
+        # elif dataloader_idx == 0:
+        #     elm_batch = batch
+        # elif dataloader_idx == 1:
+        #     confinement_batch = batch
+        # else:
+        #     raise ValueError
         sum_loss = torch.Tensor([0.0])
-        if elm_batch is not None:
-            signal_window, time_to_elm, quantiles = elm_batch
+        sum_score = torch.Tensor([0.0])
+        model_outputs = self(batch)
+        for task in model_outputs:
+            task_outputs = model_outputs[task]
+            metrics = self.task_metrics[task]
+            labels = batch[task][1]
+            for metric_name, metric_function in metrics.items():
+                if 'loss' in metric_name:
+                    pass
+                elif 'score' in metric_name:
+                    pass
+                elif 'stat' in metric_name:
+                    metric_value = metric_function(task_outputs)
+                self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True)
+        if self.elm_classifier is not None:
             task = 'elm_class'
+            signal_window, time_to_elm, quantiles = batch[task]
             task_outputs = self(signal_window, stage=stage, task=task)  # call to self.forward()
             labels: torch.Tensor = quantiles[0.5]
             metrics = self.task_metrics[task]
@@ -356,12 +333,16 @@ class Model(LightningModule, _Base_Class):
                         y_true=labels.detach().cpu(),
                         zero_division=0,
                     )
+                    if self.current_epoch<10:
+                        metric_value /= 10
+                    if metric_name=='f1_score':
+                        sum_score = sum_score + metric_value if sum_score else metric_value
                 elif 'stat' in metric_name:
                     metric_value = metric_function(task_outputs)
                 self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True)
-        if confinement_batch is not None:
-            signal_window, labels, mode_key = confinement_batch
+        if self.conf_classifier is not None:
             task = 'conf_class'
+            signal_window, labels, mode_key = batch[task]
             task_outputs = self(signal_window, stage=stage, task=task)
             metrics = self.task_metrics[task]
             for metric_name, metric_function in metrics.items():
@@ -374,39 +355,46 @@ class Model(LightningModule, _Base_Class):
                 elif 'score' in metric_name:
                     metric_value = metric_function(
                         y_pred=(task_outputs > 0.0).type(torch.int).detach().cpu(), 
-                        y_true=torch.nn.functional.one_hot(labels.flatten().detach().cpu()),
+                        y_true=torch.nn.functional.one_hot(
+                            labels.flatten().detach().cpu(),
+                            num_classes=4,
+                        ),
                         zero_division=0,
                         average='macro',
                     )
+                    if self.current_epoch<10:
+                        metric_value /= 10
+                    if metric_name=='f1_score':
+                        sum_score = sum_score + metric_value if sum_score else metric_value
                 elif 'stat' in metric_name:
                     metric_value = metric_function(task_outputs)
                 self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True)            
 
         self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True)
+        self.log(f"sum_score/{stage}", sum_score, sync_dist=True)
         return sum_loss
 
     def forward(
             self, 
-            x: torch.Tensor, 
-            stage: str = '',
-            task: str = '',
-    ) -> torch.Tensor:
-        features = self.feature_model(x)
-        if not task:
-            task = list(self.task_models.keys())[0]
-        task_model = self.task_models[task]
-        task_output = task_model(features)
-        return task_output
+            batch: torch.Tensor, 
+            # task: str = '',
+    ) -> dict[str,torch.Tensor]:
+        results = {}
+        for task in batch:
+            results[task] = self.task_models[task](self.feature_model(batch[task][0]))
+        return results
+        # task = self.task_names[0] if not task else task
+        # features = self.feature_model(x)
+        # task_output = self.task_models[task](features)
+        # return task_output
 
     def on_fit_start(self):
         self.t_fit_start = time.time()
-        if self.is_global_zero:
-            print(f"**** Fit start with global step {self.trainer.global_step} ****")
+        self.zprint(f"**** Fit start with global step {self.trainer.global_step} ****")
 
     def on_fit_end(self) -> None:
         delt = time.time() - self.t_fit_start
-        if self.is_global_zero:
-            print(f"Fit time: {delt/60:0.1f} min")
+        self.zprint(f"Fit time: {delt/60:0.1f} min")
 
     def on_train_epoch_start(self):
         self.t_train_epoch_start = time.time()
@@ -420,7 +408,7 @@ class Model(LightningModule, _Base_Class):
             logged_metrics = self.trainer.logged_metrics
             line =  f"Ep {self.current_epoch:03d}  "
             line += f"train/val loss {logged_metrics['sum_loss/train']:.3f}/"
-            line += f"{logged_metrics['sum_loss/val']:.3f}  "
+            # line += f"{logged_metrics['sum_loss/val']:.3f}  "
             line += f"ep/gl steps {epoch_steps:,d}/{self.global_step:,d}  "
             line += f"ep/gl time (min): {epoch_time/60:.1f}/{global_time/60:.1f}  " 
             print(line)
@@ -434,11 +422,22 @@ class Model(LightningModule, _Base_Class):
         if self.is_global_zero:
             assert self.global_rank == 0
 
+    def zprint(self, text: str = ''):
+        if self.is_global_zero:
+            print(text)
+
+    def rprint(self, text: str = ''):
+        if self.trainer.world_size > 1:
+            print(f"Rank {self.trainer.global_rank}: {text}")
+        else:
+            print(text)
 
 @dataclasses.dataclass(eq=False)
 class Data(_Base_Class, LightningDataModule):
     elm_data_file: str|Path|Any = None
     confinement_data_file: str|Path|Any = None
+    elm_classifier: bool = True
+    conf_classifier: bool = False
     max_elms: int|Any = None
     batch_size: int = 256
     stride_factor: int = 8
@@ -476,126 +475,151 @@ class Data(_Base_Class, LightningDataModule):
         super().__post_init__()
         super(_Base_Class, self).__init__()
         self.save_hyperparameters()
-        self.elm_data_file = Path(self.elm_data_file).absolute()
-        assert self.elm_data_file.exists()
-
-        self.confinement_data_file = Path(self.confinement_data_file).absolute()
-        assert self.confinement_data_file.exists()
 
         self.trainer: Trainer|Any = None
         self.batch_size_per_rank: int = 0
         self.a_coeffs = self.b_coeffs = None
 
-        self.elm_datasets: dict[str,torch.utils.data.Dataset] = {}
-        self.global_elm_split: dict[str,Sequence] = {}
-        self.global_shot_split: dict[str,np.ndarray] = {}
-        self.time_to_elm_quantiles: dict[float,float] = {}
-        self.elm_raw_signal_mean: float|Any = None
-        self.elm_raw_signal_stdev: float|Any = None
-        self.confinement_datasets: dict[str,torch.utils.data.Dataset] = {}
-        self.global_confinement_split: dict[str,Sequence] = {}
-        self.dataset_confinement_events: dict = {}
-        self.confinement_raw_signal_mean: float|Any = None
-        self.confinement_raw_signal_stdev: float|Any = None
-        self.confinement_train_dataloader: torch.utils.data.DataLoader|Any = None
-        self.confinement_mask_lb: float|Any = None
-        self.confinement_mask_ub: float|Any = None
-        self.train_confinement_events: list = []
-        self.validation_confinement_events: list = []
-        self.test_confinement_events: list = []
+        self.tasks = []
+
+        if self.elm_classifier:
+            self.elm_data_file = Path(self.elm_data_file).absolute()
+            assert self.elm_data_file.exists()
+            self.tasks.append('elm_classifier')
+
+            self.elm_datasets: dict[str,torch.utils.data.Dataset] = {}
+            self.global_elm_split: dict[str,Sequence] = {}
+            self.global_shot_split: dict[str,np.ndarray] = {}
+            self.time_to_elm_quantiles: dict[float,float] = {}
+            self.elm_raw_signal_mean: float|Any = None
+            self.elm_raw_signal_stdev: float|Any = None
+
+        if self.conf_classifier:
+            self.confinement_data_file = Path(self.confinement_data_file).absolute()
+            assert self.confinement_data_file.exists()
+            self.tasks.append('conf_classifier')
+
+            self.confinement_datasets: dict[str,torch.utils.data.Dataset] = {}
+            self.global_confinement_split: dict[str,Sequence] = {}
+            self.dataset_confinement_events: dict = {}
+            self.confinement_raw_signal_mean: float|Any = None
+            self.confinement_raw_signal_stdev: float|Any = None
+            self.confinement_train_dataloader: torch.utils.data.DataLoader|Any = None
+            self.confinement_mask_lb: float|Any = None
+            self.confinement_mask_ub: float|Any = None
+            self.train_confinement_events: list = []
+            self.validation_confinement_events: list = []
+            self.test_confinement_events: list = []
+
+        self._modified_batch_size_per_rank: int|Any = None
+        self.rng = np.random.default_rng(self.seed)
 
         if self.is_global_zero:
             print_fields(self)
 
-        self.state_items = [
-            'global_elm_split',
-            'elm_raw_signal_mean',
-            'elm_raw_signal_stdev',
-            'time_to_elm_quantiles',
-            'global_confinement_split',
-            'confinement_raw_signal_mean',
-            'confinement_raw_signal_stdev',
-            'confinement_mask_lb',
-            'confinement_mask_ub',
-        ]
+        self.state_items = []
+        if self.elm_classifier:
+            self.state_items.extend([
+                'global_elm_split',
+                'elm_raw_signal_mean',
+                'elm_raw_signal_stdev',
+                'time_to_elm_quantiles',
+            ])
+        if self.conf_classifier:
+            self.state_items.extend([
+                'global_confinement_split',
+                'confinement_raw_signal_mean',
+                'confinement_raw_signal_stdev',
+                'confinement_mask_lb',
+                'confinement_mask_ub',
+            ])
+
         for item in self.state_items:
             assert hasattr(self, item)
 
     def setup(self, stage: str):
         t_tmp = time.time()
-        self.zprint(f"Begin setup stage {stage}".upper())
+        self.zprint(f"**** Setup stage: {stage.upper()}")
 
         assert stage in ['fit', 'test', 'predict']
         assert self.is_global_zero == self.trainer.is_global_zero
 
         assert self.batch_size % self.trainer.world_size == 0
         self.batch_size_per_rank = self.batch_size // self.trainer.world_size
-        self.zprint(f"Global batch size: {self.batch_size}")
-        self.zprint(f"Batch size per rank {self.batch_size_per_rank}")
+        self.zprint(f"  Global batch size: {self.batch_size}")
+        self.zprint(f"  Batch size per rank {self.batch_size_per_rank}")
 
-        if self.fir_bp_low and self.fir_bp_high:
-            self.zprint(f"Using bandpass filter with f_low-f_high: {self.fir_bp_low:.1f}-{self.fir_bp_high:.1f} kHz")
+        if self.fir_bp_low is not None or self.fir_bp_high is not None:
+            self.zprint(f"  Bandpass filter with f_low-f_high: {self.fir_bp_low}-{self.fir_bp_high} kHz")
+            if self.fir_bp_low and self.fir_bp_high:
+                pass_zero = 'bandpass'
+                cutoff = [self.fir_bp_low, self.fir_bp_high]
+            elif self.fir_bp_low:
+                pass_zero = 'highpass'
+                cutoff = self.fir_bp_low
+            elif self.fir_bp_high:
+                pass_zero = 'lowpass'
+                cutoff = self.fir_bp_high
             self.b_coeffs = scipy.signal.firwin(
                 numtaps=self.fir_taps,  # must be odd
-                cutoff=[self.fir_bp_low, self.fir_bp_high],  # transition width in kHz
-                pass_zero='bandpass',
+                cutoff=cutoff,  # transition width in kHz
+                pass_zero=pass_zero,
                 fs=1e3,  # f_sample in kHz
             )
             self.a_coeffs = np.zeros_like(self.b_coeffs)
             self.a_coeffs[0] = 1
         else:
-            self.zprint("  Using raw BES signals; no HP filter")
+            self.zprint("  Using raw BES signals with no filter")
 
         stages = ['train', 'validation'] if stage == 'fit' else [stage]
-        self.zprint(f"Data setup for stages: {stages}".upper())
+        self.zprint(f"  Data setup for stages: {stages}")
 
-        t_tmp = time.time()
-        self.zprint("ELM data preparation: begin".upper())
-        if 'train' not in self.global_elm_split:
-            self.zprint("Creating global ELM data split")
-            self._make_elm_data_split()
-        else:
-            self.zprint("Reusing saved global ELM data split")
+        if self.elm_classifier:
+            t_tmp = time.time()
+            self.zprint("**** ELM data setup")
+            if 'train' not in self.global_elm_split:
+                self._make_elm_data_split()
+            else:
+                self.zprint("  Reusing saved global ELM data split")
 
-        for st in stages:
-            self._setup_elm_data(st)
-        self.zprint(f"ELM data setup time: {time.time()-t_tmp:0.1f} s")
-        self.zprint("ELM data preparation: end".upper())
+            for st in stages:
+                self._setup_elm_data(st)
+            self.zprint(f"  ELM data setup time: {time.time()-t_tmp:0.1f} s")
 
-        self.zprint("Confinement data preparation: begin".upper())
-        self.zprint(f"Confinement data file: {self.confinement_data_file}")
-        if 'train' not in self.global_confinement_split:
-            self.zprint("Creating global confinement data split")
-            self._get_confinement_events_and_split()
-        else:
-            self.zprint("Reusing saved global confinement data split")
-        self.dataset_confinement_events = {
-            'train': self.train_confinement_events,
-            'validation': self.validation_confinement_events,
-            'test': self.test_confinement_events,
-            'predict': self.test_confinement_events,
-        }
-        for st in stages:
-            self._setup_confinement_data(st)
-        self.zprint("Confinement data preparation: end".upper())
-        self.zprint(f"Setup time: {time.time()-t_tmp:.1f} s")
+
+        if self.conf_classifier:
+            self.zprint("**** Confinement data preparation")
+            if 'train' not in self.global_confinement_split:
+                self._get_confinement_events_and_split()
+            else:
+                self.zprint("  Reusing saved global confinement data split")
+            self.dataset_confinement_events = {
+                'train': self.train_confinement_events,
+                'validation': self.validation_confinement_events,
+                'test': self.test_confinement_events,
+                'predict': self.test_confinement_events,
+            }
+            for st in stages:
+                self._setup_confinement_data(st)
+            self.zprint(f"  Confinement data setup time: {time.time()-t_tmp:.1f} s")
 
     def _setup_elm_data(self, st: str):
+        self.zprint(f"  ELM {st.upper()} data setup")
         if st in self.elm_datasets and isinstance(self.elm_datasets[st], torch.utils.data.Dataset):
-            self.zprint(f"Stage {st.upper()}: Using saved dataset")
+            self.zprint(f"    Using saved dataset")
             return
-        self.rprint(f"Stage {st.upper()}: data setup")
-        global_elm_indices = self.global_elm_split[st]
-        self.zprint(f"  Global ELM count: {len(global_elm_indices)}")
-        assert len(global_elm_indices) > 0
+        elm_indices = self.global_elm_split[st]
+        n_elms = len(elm_indices)
+        self.zprint(f"    ELM count: {n_elms}")
+        assert n_elms > 0
         global_sw_metadata_list = []
         global_outliers = 0
         skipped_short_pre_elm_time = 0
         with h5py.File(self.elm_data_file, 'r') as h5_file:
             elms: h5py.Group = h5_file['elms']
-            for i_elm, elm_index in enumerate(global_elm_indices):
-                if i_elm%100 == 0:
-                    self.zprint(f"  Reading ELM event {i_elm:04d}/{len(global_elm_indices):04d}")
+            for i_elm, elm_index in enumerate(elm_indices):
+                if i_elm%(n_elms//10) == 0:
+                    self.zprint(f"    Reading ELM event {i_elm:04d}/{len(elm_indices):04d}")
                 elm_event: h5py.Group = elms[f"{elm_index:06d}"]
                 shot = int(elm_event.attrs['shot'])
                 assert elm_event["bes_signals"].shape[0] == 64
@@ -636,11 +660,11 @@ class Data(_Base_Class, LightningDataModule):
                     })
                     i_window_stop -= self.signal_window_size // self.stride_factor
 
-        self.rprint(f"Stage {st.upper()}:  Skipped ELMs for short pre-ELM time: {skipped_short_pre_elm_time}")
+        self.zprint(f"    Skipped ELMs for short pre-ELM time: {skipped_short_pre_elm_time}")
 
         n_signal_windows = len(global_sw_metadata_list)
-        self.rprint(f"Stage {st.upper()}: Global signal windows: {n_signal_windows:,d}  ({global_outliers:,d} outliers removed)")
-        self.rprint(f"Stage {st.upper()}: Global steps per epoch {n_signal_windows/self.batch_size:,.1f}")
+        self.zprint(f"    Global signal windows: {n_signal_windows:,d}  ({global_outliers:,d} outliers removed)")
+        self.zprint(f"    Global steps per epoch {n_signal_windows/self.batch_size:,.1f}")
 
         # Raw signal stats
         # self._get_statistics(global_sw_metadata_list=global_sw_metadata_list, st=st)
@@ -674,7 +698,7 @@ class Data(_Base_Class, LightningDataModule):
         mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
         stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
         exkurt = np.sum(cummulative_hist * ((bin_center - mean)/stdev) ** 4) / np.sum(cummulative_hist) - 3
-        self.zprint(f"  Raw signals min {signal_min:.2f} max {signal_max:.2f} mean {mean:.2f} stdev {stdev:.2f} exkurt {exkurt:.2f}")
+        self.zprint(f"    Raw signals min {signal_min:.2f} max {signal_max:.2f} mean {mean:.2f} stdev {stdev:.2f} exkurt {exkurt:.2f}")
         # time-to-ELM quantiles
         time_to_elm_list = [e['time_to_elm'] for e in global_sw_metadata_list]
         quantiles = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
@@ -693,15 +717,14 @@ class Data(_Base_Class, LightningDataModule):
 
         # time-to-ELM quantiles
         if st == 'train':
-            self.zprint("  Calculating time-to-ELM quantiles")
-            quantiles = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
+            quantiles = (0.5,)
             time_to_elm_labels = [sig_win['time_to_elm'] for sig_win in global_sw_metadata_list]
             quantile_values = np.quantile(time_to_elm_labels, quantiles)
             self.time_to_elm_quantiles = {q: qval.item() for q, qval in zip(quantiles, quantile_values)}
             self.save_hyperparameters({'time_to_elm_quantiles': self.time_to_elm_quantiles})
-            self.zprint(f"  Time-to-ELM quantiles for binary labels:")
+            self.zprint(f"    Time-to-ELM quantiles for binary labels:")
             for q, qval in self.time_to_elm_quantiles.items():
-                self.zprint(f"    Quantile {q:.2f}: {qval:.1f} ms")
+                self.zprint(f"      Quantile {q:.2f}: {qval:.1f} ms")
         assert self.time_to_elm_quantiles
 
         # restrict data according to quantiles
@@ -709,27 +732,27 @@ class Data(_Base_Class, LightningDataModule):
             time_to_elm_labels = np.array([sig_win['time_to_elm'] for sig_win in global_sw_metadata_list])
             time_to_elm_min, time_to_elm_max = np.quantile(time_to_elm_labels, (self.time_to_elm_quantile_min, self.time_to_elm_quantile_max))
             if self.contrastive_learning:
-                self.zprint(f"  Contrastive learning with time-to-ELM quantiles 0.0-{self.time_to_elm_quantile_min:.2f} and {self.time_to_elm_quantile_max:.2f}-1.0")
+                self.zprint(f"    Contrastive learning with time-to-ELM quantiles 0.0-{self.time_to_elm_quantile_min:.2f} and {self.time_to_elm_quantile_max:.2f}-1.0")
                 for i in np.arange(len(global_sw_metadata_list)-1, -1, -1, dtype=int):
                     if (global_sw_metadata_list[i]['time_to_elm'] > time_to_elm_min) and \
                         (global_sw_metadata_list[i]['time_to_elm'] < time_to_elm_max):
                         global_sw_metadata_list.pop(i)
             else:
-                self.zprint(f"  Restricting time-to-ELM labels to quantile range: {self.time_to_elm_quantile_min:.2f}-{self.time_to_elm_quantile_max:.2f}")
+                self.zprint(f"    Restricting time-to-ELM labels to quantile range: {self.time_to_elm_quantile_min:.2f}-{self.time_to_elm_quantile_max:.2f}")
                 for i in np.arange(len(global_sw_metadata_list)-1, -1, -1, dtype=int):
                     if (global_sw_metadata_list[i]['time_to_elm'] < time_to_elm_min) or \
                         (global_sw_metadata_list[i]['time_to_elm'] > time_to_elm_max):
                         global_sw_metadata_list.pop(i)
             n_signal_windows = len(global_sw_metadata_list)
-            self.rprint(f"Stage {st.upper()}: Restricted global signal windows: {n_signal_windows:,d}")
-            self.rprint(f"Stage {st.upper()}: Global steps per epoch {n_signal_windows/self.batch_size:,.1f}")
+            self.zprint(f"    Restricted global signal windows: {n_signal_windows:,d}")
+            self.zprint(f"    Global steps per epoch: {n_signal_windows/self.batch_size:,.1f}")
 
         # split signal windows by rank
         rankwise_sw_split = np.array_split(global_sw_metadata_list, self.trainer.world_size)
         sw_for_rank = list(rankwise_sw_split[self.trainer.global_rank])
         elms_for_rank = np.unique(np.array([item['elm_index'] for item in sw_for_rank],dtype=int))
         shots_for_rank = np.unique(np.array([item['shot'] for item in sw_for_rank],dtype=int))
-        self.rprint(f"Stage {st.upper()}:  Shots/ELMs/SigWin: {len(shots_for_rank):,d}/{len(elms_for_rank):,d}/{len(sw_for_rank):,d}")
+        self.zprint(f"    Shots/ELMs/SigWin: {len(shots_for_rank):,d}/{len(elms_for_rank):,d}/{len(sw_for_rank):,d}")
 
         # get rank-wise ELM signals
         signals_for_rank = {}
@@ -753,35 +776,34 @@ class Data(_Base_Class, LightningDataModule):
                 quantile_max=self.time_to_elm_quantile_max,
                 contrastive_learning=self.contrastive_learning,
             )
-            self.rprint(f"Stage {st}: Dataset size: {len(self.elm_datasets[st]):,d}")
+            self.rprint(f"    Dataset size: {len(self.elm_datasets[st]):,d}")
         
         if st in ['test', 'predict']:
             pass
 
     def _make_elm_data_split(self):
+        self.zprint("  Creating global ELM data split")
         assert len(self.global_elm_split) == 0
-        self.rprint(f"Data split")
-        rng = np.random.default_rng(self.seed)
         with h5py.File(self.elm_data_file, 'r') as root:
             datafile_shots = set([int(shot_key) for shot_key in root['shots']])
             datafile_shots_from_elms = set([int(elm_group.attrs['shot']) for elm_group in root['elms'].values()])
             assert len(datafile_shots ^ datafile_shots_from_elms) == 0
             datafile_shots = list(datafile_shots)
             datafile_elms = [int(elm_key) for elm_key in root['elms']]
-            self.zprint(f"  ELMs/shots in HDF5 file: {len(datafile_elms):,d} / {len(datafile_shots):,d}")
+            self.zprint(f"    ELMs/shots in HDF5 file: {len(datafile_elms):,d} / {len(datafile_shots):,d}")
             # limit max ELMs
             if self.max_elms and len(datafile_elms) > self.max_elms:
-                rng.shuffle(datafile_elms)
+                self.rng.shuffle(datafile_elms)
                 datafile_elms = datafile_elms[:self.max_elms]
                 datafile_shots = set([int(root['elms'][f"{elm_index:06d}"].attrs['shot']) for elm_index in datafile_elms])
                 datafile_shots = list(datafile_shots)
-                self.zprint(f"  ELMs/shots for analysis: {len(datafile_elms):,d} / {len(datafile_shots):,d}")
+                self.zprint(f"    ELMs/shots for analysis: {len(datafile_elms):,d} / {len(datafile_shots):,d}")
             # shuffle shots in dataset
-            self.rprint(f"Shuffling global shots with seed={self.seed}")
-            rng.shuffle(datafile_shots)
-            self.rprint(f"Shuffled shot order: " + ', '.join(map(str, datafile_shots[:5])))
+            self.zprint(f"    Shuffling global shots with seed={self.seed}")
+            self.rng.shuffle(datafile_shots)
+            self.rprint(f"    Shuffled shot order: " + ', '.join(map(str, datafile_shots[:5])))
             # order ELMs by shuffled shots
-            self.rprint(f"Ordering ELMs by shuffled shots")
+            self.zprint(f"    Ordering ELMs by shuffled shots")
             new_datafile_elms = []
             datafile_elms = sorted(datafile_elms)
             for shot in datafile_shots:
@@ -800,145 +822,218 @@ class Data(_Base_Class, LightningDataModule):
             self.global_shot_split['test'], self.global_shot_split['validation'], self.global_shot_split['train'] = \
                 np.split(datafile_shots, [n_test_shots, n_test_shots+n_validation_shots])
             
+            self.zprint("    Global ELM split")
             for stage in ['train','validation','test']:
                 self.global_elm_split[stage] = [
                     i_elm for i_elm in datafile_elms
                     if root['elms'][f"{i_elm:06d}"].attrs['shot'] in self.global_shot_split[stage]
                 ]
-                self.rprint(f"Stage {stage.upper()}: Global ELM/shot count {len(self.global_elm_split[stage]):,d} ({len(self.global_elm_split[stage])/len(datafile_elms)*1e2:.1f}%) / {self.global_shot_split[stage].size} ({self.global_shot_split[stage].size/len(datafile_shots)*1e2:.1f}%)")
+                self.rprint(f"      {stage.upper()}: Global ELM/shot count {len(self.global_elm_split[stage]):,d} ({len(self.global_elm_split[stage])/len(datafile_elms)*1e2:.1f}%) / {self.global_shot_split[stage].size} ({self.global_shot_split[stage].size/len(datafile_shots)*1e2:.1f}%)")
 
     def _get_confinement_events_and_split(self):
-        self.zprint("Get confinement events and split: begin".upper())
+        self.zprint("  Creating global confinement data split")
         if self.bad_shots is None:
             self.bad_shots = []  # Initialize to empty list if None
-        shots = {}
-        with h5py.File(self.confinement_data_file) as data_file:
-            for shot in data_file:
-                if shot in self.bad_shots:
-                    self.zprint(f"Skipping bad shot: {shot}")
-                    continue
-                shot_labels = []
-                for event in data_file[shot]:
-                    event_data = data_file[shot][event]
-                    if 'labels' in event_data:
-                        shot_labels.append(event_data['labels'][0])
-                        # if np.max(event_data['labels'])!=np.min(event_data['labels']):
-                        #     raise ValueError
-                if not shot_labels:
-                    continue
-                label_presence = tuple(class_id in shot_labels for class_id in range(self.num_classes))  
-                shot_events = [(shot, event) for event in data_file[shot] if 'labels' in data_file[shot][event]]
-                attrs = data_file[shot].attrs
-                metadata = {
-                    'r_avg': attrs.get('r_avg'),
-                    'z_avg': attrs.get('z_avg'),
-                    'delz_avg': attrs.get('delz_avg')
-                }
-                shots[shot] = (shot_events, label_presence, metadata)
+        # def check_bounds(value, bounds):
+        #     return bounds[0] <= value <= bounds[1] if bounds else True
+        check_bounds = lambda value, bounds: bounds[0] <= value <= bounds[1] if bounds else True
+        shot_data = {}
         r_avg_exclusions = z_avg_exclusions = delz_avg_exclusions = 0
-        def check_bounds(value, bounds):
-            return bounds[0] <= value <= bounds[1] if bounds else True
-        for shot in list(shots.keys()):
-            metadata = shots[shot][2]
-            if not all(check_bounds(metadata[key], self.metadata_bounds[key]) for key in ['r_avg', 'z_avg', 'delz_avg'] if key in self.metadata_bounds):
-                shots.pop(shot)
-                if metadata['r_avg'] is None or not check_bounds(metadata['r_avg'], self.metadata_bounds['r_avg']):
-                    r_avg_exclusions += 1
-                if metadata['z_avg'] is None or not check_bounds(metadata['z_avg'], self.metadata_bounds['z_avg']):
-                    z_avg_exclusions += 1
-                if metadata['delz_avg'] is None or not check_bounds(metadata['delz_avg'], self.metadata_bounds['delz_avg']):
-                    delz_avg_exclusions += 1
-        self.zprint(f"Number of r_avg exclusions: {r_avg_exclusions}")
-        self.zprint(f"Number of z_avg exclusions: {z_avg_exclusions}")
-        self.zprint(f"Number of delz_avg exclusions: {delz_avg_exclusions}")
-        test_shot_data = {}
-        validation_shot_data = {}
-        # Handling forced test shots
+        shots_by_class = {i: set() for i in range(self.num_classes)}
+        with h5py.File(self.confinement_data_file) as root:
+            for shot in root:
+                if shot in self.bad_shots:
+                    self.zprint(f"    Skipping bad shot: {shot}")
+                    continue
+                inboard_order = root[shot].attrs.get("inboard_column_channel_order", None)
+                if inboard_order is None or len(inboard_order)==0:
+                    self.zprint(f"    Skipping shot {shot} due to bad inboard order")
+                    continue
+                metadata = {
+                    'r_avg': root[shot].attrs.get('r_avg'),
+                    'z_avg': root[shot].attrs.get('z_avg'),
+                    'delz_avg': root[shot].attrs.get('delz_avg')
+                }
+                if not all(
+                    check_bounds(metadata[key], self.metadata_bounds[key]) 
+                    for key in ['r_avg', 'z_avg', 'delz_avg'] 
+                    if key in self.metadata_bounds
+                ):
+                    if metadata['r_avg'] is None or not check_bounds(metadata['r_avg'], self.metadata_bounds['r_avg']):
+                        r_avg_exclusions += 1
+                    if metadata['z_avg'] is None or not check_bounds(metadata['z_avg'], self.metadata_bounds['z_avg']):
+                        z_avg_exclusions += 1
+                    if metadata['delz_avg'] is None or not check_bounds(metadata['delz_avg'], self.metadata_bounds['delz_avg']):
+                        delz_avg_exclusions += 1
+                    continue
+                events = {}
+                labels_in_shot = [False] * self.num_classes
+                time_per_label = [0.] * self.num_classes
+                # event_signal_length = []
+                for event_key, event in root[shot].items():
+                    if 'labels' not in event:
+                        continue
+                    label = event['labels'][0].item()
+                    signal_length = event['signals'].shape[1]
+                    if signal_length < self.signal_window_size:
+                        continue
+                    events[int(event_key)] = {
+                        'shot': int(shot),
+                        'event': int(event_key),
+                        'label': label,
+                        'signal_length': signal_length,
+                    }
+                    labels_in_shot[label] = True
+                    time_per_label[label] += signal_length
+                    shots_by_class[label].add(int(shot))
+                    # event_labels.append(event['labels'][0])
+                    # event_signal_length.append(signal_length)
+                if not events:
+                    continue
+                # label_in_shot = tuple(class_id in event_labels for class_id in range(self.num_classes))  
+                # events_and_labels = [(shot, event, root[shot][event]['labels'][0]) for event in root[shot] if 'labels' in root[shot][event]]
+                shot_data[int(shot)] = {
+                    'events': events, 
+                    'labels_in_shot': labels_in_shot, 
+                    'time_per_label': time_per_label,
+                    'metadata': metadata,
+                }
+
+                # for i, (shot, event, label) in enumerate(shot_event_indices):
+                #     event_key = f"{shot}/{event}"
+                #     signal_length = root[event_key]["signals"].shape[1]
+                    
+                #     # Check if the signal length is greater than or equal to self.signal_window_size
+                #     if signal_length >= self.signal_window_size:
+                #         inboard_order = root[shot].attrs.get("inboard_column_channel_order", None)
+
+                #         # Skip processing if inboard_order is missing or empty
+                #         if inboard_order is None or len(inboard_order) == 0:
+                #             self.zprint(f"    Skipping event {event_key} due to missing or empty inboard_column_channel_order.")
+                #             continue
+                        
+                #         time_counts.append(signal_length)
+                #         long_enough_indices.append((shot, event))
+                # event_labels = [event['labels'][0] for event in root[shot].values() if 'labels' in event]
+                # for event in data_file[shot]:
+                #     event_data = data_file[shot][event]
+                #     if 'labels' in event_data:
+                #         shot_labels.append(event_data['labels'][0])
+                #         # if np.max(event_data['labels'])!=np.min(event_data['labels']):
+                #         #     raise ValueError
+                # for (shot, event, label) in events:
+                #     shots.append(int(shot))
+                #     event_time = h5_file[shot][event]["signals"].shape[1]
+                #     event_times.append(event_time)
+                #     label_times[label] += event_time
+                #     label_shots[label].append(int(shot))
+        # BES location exclusions
+        if r_avg_exclusions or z_avg_exclusions or delz_avg_exclusions:
+            self.zprint(f"    Number of r_avg exclusions: {r_avg_exclusions}")
+            self.zprint(f"    Number of z_avg exclusions: {z_avg_exclusions}")
+            self.zprint(f"    Number of delz_avg exclusions: {delz_avg_exclusions}")
+        # Forced shots
+        forced_test_shots_data = {}
+        forced_validation_shots_data = {}
         if self.force_test_shots:
             for shot_number in self.force_test_shots:
-                if shot_number in shots:
-                    test_shot_data[shot_number] = shots.pop(shot_number)
-                else:
-                    self.rprint(f"Warning: Forced test shot number {shot_number} not found in dataset.")
-        # Handling forced validation shots
+                forced_test_shots_data[shot_number] = shot_data.pop(shot_number)
         if self.force_validation_shots:
             for shot_number in self.force_validation_shots:
-                if shot_number in shots:
-                    validation_shot_data[shot_number] = shots.pop(shot_number)
-                else:
-                    self.rprint(f"Warning: Forced validation shot number {shot_number} not found in dataset.")
+                forced_validation_shots_data[shot_number] = shot_data.pop(shot_number)
         # These dictionaries can be used to ensure that the specified shots are included in their respective datasets
-        forced_test_shots_data = test_shot_data
-        forced_validation_shots_data = validation_shot_data
-        shots_by_class = {}
-        for shot, (events, labels, metadata) in shots.items():
-            if labels not in shots_by_class:
-                shots_by_class[labels] = []
-            shots_by_class[labels].append(shot)
+        # shots_by_class = {}
+        # for shot, (events_and_labels, label_in_shot, metadata) in shot_data.items():
+        #     for i_label, label in enumerate(label_in_shot):
+        #         if label:
+        #             if i_label not in shots_by_class:
+        #                 shots_by_class[i_label] = []
+        #             shots_by_class[i_label].append(shot)
+            # if labels not in shots_by_class:
+            #     shots_by_class[labels] = []
+            # shots_by_class[labels].append(shot)
         if self.max_shots_per_class is not None:
-            for labels, shot_list in shots_by_class.items():
+            for label in shots_by_class:
+                shot_list = shots_by_class[label]
                 if len(shot_list) > self.max_shots_per_class:
-                    shots_by_class[labels] = np.random.choice(shot_list, self.max_shots_per_class, replace=False).tolist()
-        filtered_shots =  {shot: shots[shot] for label_shots in shots_by_class.values() for shot in label_shots}
-        shot_numbers = np.array(list(filtered_shots.keys()))
-        rng = np.random.default_rng(self.seed)
-        rng.shuffle(shot_numbers)
-        # if self.max_shots:
-        #     shot_numbers = shot_numbers[:self.max_shots]
+                    shots_by_class[label] = self.rng.choice(
+                        a=list(shot_list), 
+                        size=self.max_shots_per_class, 
+                        replace=False,
+                    ).tolist()
+        # shot_data =  {int(shot): shot_data[shot] for label_shots in shots_by_class.values() for shot in label_shots}
+        shot_data = {shot: shot_data[shot] for shots in shots_by_class.values() for shot in shots}
+        shot_numbers = list(shot_data.keys())
+        self.rng.shuffle(shot_numbers)
         if not self.test_only:
-            shot_numbers = np.array(list(filtered_shots.keys()))
+            # shot_numbers = np.array(list(filtered_shots.keys()))
             # Map labels here
             # labels = [self.map_labels(filtered_shots[shot][1]) for shot in shot_numbers]
-            labels = [filtered_shots[shot][1] for shot in shot_numbers]
             # Try to stratify, revert to random split if stratification is not possible
-            try:
-                train_indices, test_val_indices = train_test_split(shot_numbers, labels, test_size=self.fraction_test + self.fraction_validation, stratify=labels, random_state=self.seed)
-            except ValueError:
-                self.rprint("Stratified split failed; reverting to random split for train/test+validation sets.")
-                train_indices, test_val_indices = train_test_split(shot_numbers, test_size=self.fraction_test + self.fraction_validation, random_state=self.seed)
-            try:
-                test_indices, val_indices = train_test_split(
-                    test_val_indices,
-                    [filtered_shots[shot][1] for shot in test_val_indices],
-                    test_size=self.fraction_validation/(self.fraction_test + self.fraction_validation),
-                    # stratify=[self.map_labels(filtered_shots[shot][1]) for shot in test_val_indices],
-                    stratify=[filtered_shots[shot][1] for shot in test_val_indices],
-                    random_state=self.seed
-                )
-            except ValueError:
-                self.rprint("Stratified split failed; reverting to random split for test/validation sets.")
-                test_indices, val_indices = train_test_split(
-                    test_val_indices,
-                    test_size=self.fraction_validation/(self.fraction_test + self.fraction_validation),
-                    random_state=self.seed  # No stratification here
-                )
+            # try:
+            #     label_in_shot = [shot_data[shot][1] for shot in shot_numbers]
+            #     train_shots, _test_val_shots = train_test_split(
+            #         shot_numbers, 
+            #         label_in_shot, 
+            #         test_size=self.fraction_test + self.fraction_validation, 
+            #         stratify=label_in_shot, 
+            #         random_state=self.seed,
+            #     )
+            # except ValueError:
+            #     # raise
+            #     self.zprint("    Stratified split failed; reverting to random split for train/test+validation sets.")
+            train_shots, _test_val_shots = train_test_split(
+                shot_numbers, 
+                test_size=self.fraction_test + self.fraction_validation, 
+                random_state=self.rng.integers(0,(2**32)-1),
+            )
+            # try:
+            #     label_in_shot = [shot_data[shot][1] for shot in _test_val_shots]
+            #     test_shots, val_shots = train_test_split(
+            #         _test_val_shots,
+            #         label_in_shot,
+            #         test_size=self.fraction_validation/(self.fraction_test + self.fraction_validation),
+            #         stratify=label_in_shot,
+            #         random_state=self.seed
+            #     )
+            # except ValueError:
+            #     # raise
+            #     self.rprint("    Stratified split failed; reverting to random split for test/validation sets.")
+            test_shots, val_shots = train_test_split(
+                _test_val_shots,
+                test_size=self.fraction_validation/(self.fraction_test + self.fraction_validation),
+                random_state=self.rng.integers(0,(2**32)-1),
+            )
 
-            # Ensure forced shots are included back in filtered_shots if needed
-            filtered_shots.update(forced_test_shots_data)
-            filtered_shots.update(forced_validation_shots_data)
+            if forced_test_shots_data or forced_validation_shots_data:
+                # Ensure forced shots are included back in filtered_shots if needed
+                shot_data.update(forced_test_shots_data)
+                shot_data.update(forced_validation_shots_data)
 
-            # Include forced test and validation shots
-            forced_test_indices = np.array(list(forced_test_shots_data.keys()))
-            test_indices = np.concatenate((test_indices, forced_test_indices))
-            
-            forced_val_indices = np.array(list(forced_validation_shots_data.keys()))
-            val_indices = np.concatenate((val_indices, forced_val_indices))
+                # Include forced test and validation shots
+                forced_test_indices = np.array(list(forced_test_shots_data.keys()))
+                test_shots = np.concatenate((test_shots, forced_test_indices))
+                
+                forced_val_indices = np.array(list(forced_validation_shots_data.keys()))
+                val_shots = np.concatenate((val_shots, forced_val_indices))
 
             # Assign events to datasets
-            self.train_confinement_events = [event for shot in train_indices for event in filtered_shots[shot][0]]
-            self.validation_confinement_events = [event for shot in val_indices for event in filtered_shots[shot][0]]
-            self.test_confinement_events = [event for shot in test_indices for event in filtered_shots[shot][0]]
+            self.train_confinement_events = [event for shot in train_shots for event in shot_data[shot]['events'].values()]
+            self.validation_confinement_events = [event for shot in val_shots for event in shot_data[shot]['events'].values()]
+            self.test_confinement_events = [event for shot in test_shots for event in shot_data[shot]['events'].values()]
 
-            self.rprint(f"Train set size: {len(self.train_confinement_events)} events")
-            self.rprint(f"Validation set size: {len(self.validation_confinement_events)} events")
-            self.rprint(f"Test set size: {len(self.test_confinement_events)} events")
+            self.zprint(f"    Train set size: {len(self.train_confinement_events)} events")
+            self.zprint(f"    Validation set size: {len(self.validation_confinement_events)} events")
+            self.zprint(f"    Test set size: {len(self.test_confinement_events)} events")
 
-            self.rprint(f"Train shot numbers: {train_indices}")
-            self.rprint(f"Validation shot numbers: {val_indices}")
-            self.rprint(f"Test shot numbers: {test_indices}")
+            self.zprint(f"    Train shot numbers: {train_shots}")
+            self.zprint(f"    Validation shot numbers: {val_shots}")
+            self.zprint(f"    Test shot numbers: {test_shots}")
         else:
-            shot_numbers = np.array(list(filtered_shots.keys()))
-            self.test_confinement_events = [event for shot in shot_numbers for event in filtered_shots[shot][0]]
+            pass
+        return
+            # shot_numbers = np.array(list(filtered_shots.keys()))
+            # self.test_confinement_events = [event for shot in shot_numbers for event in filtered_shots[shot][0]]
         # mode_times = {}  # Time spent in each mode
         # mode_shots = {}  # Unique shots for each mode
 
@@ -982,23 +1077,39 @@ class Data(_Base_Class, LightningDataModule):
 
     def _setup_confinement_data(self, stage: str):
 
-        def get_time_for_index(shot_event_tuple):
-            shot, event = shot_event_tuple  # Unpack the tuple
-            with h5py.File(self.confinement_data_file) as h5_file:
-                event_key = f"{shot}/{event}"  # Updated to use shot/event structure
-                time_count = h5_file[event_key]["signals"].shape[1]
-            return time_count
+        # def get_time_for_index(shot_event_label_tuple):
+        #     shot, event, label = shot_event_label_tuple  # Unpack the tuple
+        #     with h5py.File(self.confinement_data_file) as h5_file:
+        #         time_count = h5_file[shot][event]["signals"].shape[1]
+        #     return time_count
 
         # Determine the chunk of confinement indices for this GPU
         t_tmp = time.time()
-        self.zprint(f"Setup confinement data for stage {stage}: begin".upper())
+        self.zprint(f"  Setup confinement data for stage {stage.upper()}")
         events = self.dataset_confinement_events[stage]
-        times = [get_time_for_index(shot_event) for shot_event in events]  # Adapted for (shot, event) tuples
-        if stage == 'train':
-            self.rprint(f"Creating chunks for {stage} with {len(events)} indices and total time {sum(times)}")
+        event_times = []
+        label_times = [0.] * self.num_classes
+        label_times = {i: 0 for i in range(self.num_classes)}
+        label_shots = {i: set() for i in range(self.num_classes)}
+        shots = set()
+        # with h5py.File(self.confinement_data_file) as h5_file:
+        for event in events:
+            shots.add(event['shot'])
+            event_times.append(event['signal_length'])
+            label_times[event['label']] += event['signal_length']
+            label_shots[event['label']].add(event['shot'])
+            # label_shots[label] = list(set(label_shots[label]))
+        # shots = set(shots)
+        # event_times = [get_time_for_index(shot_event) for shot_event in events]  # Adapted for (shot, event) tuples
+        self.zprint(f"    Stage {stage.upper()} with {len(events)} events, {len(shots)} shots, and total time {sum(event_times)/1e3:.1f} ms")
+        for i in range(self.num_classes):
+            self.zprint(f"      Label {i}:  {len(label_shots[i])} shots and time {label_times[i]/1e3:.1f} ms")
+            assert label_shots[i], f"Label {i} has not data"
+        if stage == 'train' and self.trainer.world_size > 1:
+            self.zprint("    Creating chunks")
             # Create balanced chunks
             # Create a mapping from indices to times
-            index_to_time = {i: t for i, t in zip(events, times)}
+            index_to_time = {i: t for i, t in zip(events, event_times)}
             # Create a list to hold the chunks, and a list to hold the total time for each chunk
             chunks = [[] for _ in range(self.trainer.world_size)]
             chunk_times = [0] * self.trainer.world_size
@@ -1011,7 +1122,7 @@ class Data(_Base_Class, LightningDataModule):
                 # Update the total time for that chunk
                 chunk_times[min_time_chunk_idx] += t
             for i, (chunk, chunk_time) in enumerate(zip(chunks, chunk_times)):
-                self.rprint(f"Chunk {i} size: {len(chunk)}, total time: {sum(index_to_time[index] for index in chunk)}")
+                self.zprint(f"    Chunk {i} size: {len(chunk)}, total time: {sum(index_to_time[index] for index in chunk)}")
             # Determine the chunk for this GPU
             chunk_events = chunks[self.trainer.global_rank]
         else:
@@ -1030,37 +1141,38 @@ class Data(_Base_Class, LightningDataModule):
                 drop_last=True,
             )
 
-        self.zprint(f"Setup confinement data for stage {stage}: end, time: {time.time()-t_tmp:.1f} s")
+        self.zprint(f"    Setup confinement data for stage {stage}: end, time: {time.time()-t_tmp:.1f} s")
 
-    def _load_and_preprocess_confinement_data(self, shot_event_indices, stage):
+    def _load_and_preprocess_confinement_data(self, events, stage):
         t_tmp = time.time()
-        self.zprint(f"Load/preprocess confinement data for stage {stage}: begin.upper()")
+        self.zprint(f"  Stage {stage.upper()}: load and pre-process data")
         confinement_data = []
 
-        with h5py.File(self.confinement_data_file, 'r') as h5_file:
-            if len(shot_event_indices) >= 5:
-                self.rprint(f"Initial shot/event indices: {shot_event_indices[:5]}")
-            time_counts = []
-            long_enough_indices = []  # List to hold indices of events with long enough signals
-            for i, (shot, event) in enumerate(shot_event_indices):
-                event_key = f"{shot}/{event}"
-                signal_length = h5_file[event_key]["signals"].shape[1]
+        with h5py.File(self.confinement_data_file, 'r') as root:
+            # if len(shot_event_indices) >= 5:
+            #     self.zprint(f"    Initial shot/event indices: {shot_event_indices[:5]}")
+            # time_counts = []
+            # long_enough_indices = []  # List to hold indices of events with long enough signals
+            # for i, (shot, event, label, signal_length) in enumerate(shot_event_indices):
+            #     event_key = f"{shot}/{event}"
+            #     signal_length = root[event_key]["signals"].shape[1]
                 
-                # Check if the signal length is greater than or equal to self.signal_window_size
-                if signal_length >= self.signal_window_size:
-                    inboard_order = h5_file[shot].attrs.get("inboard_column_channel_order", None)
+            #     # Check if the signal length is greater than or equal to self.signal_window_size
+            #     if signal_length >= self.signal_window_size:
+            #         inboard_order = root[shot].attrs.get("inboard_column_channel_order", None)
 
-                    # Skip processing if inboard_order is missing or empty
-                    if inboard_order is None or len(inboard_order) == 0:
-                        self.rprint(f"Skipping event {event_key} due to missing or empty inboard_column_channel_order.")
-                        continue
+            #         # Skip processing if inboard_order is missing or empty
+            #         if inboard_order is None or len(inboard_order) == 0:
+            #             self.zprint(f"    Skipping event {event_key} due to missing or empty inboard_column_channel_order.")
+            #             continue
                     
-                    time_counts.append(signal_length)
-                    long_enough_indices.append((shot, event))
+            #         time_counts.append(signal_length)
+            #         long_enough_indices.append((shot, event))
 
-            time_count = np.sum(time_counts)
-            discarded_count = len(shot_event_indices) - len(long_enough_indices)
-            self.rprint(f"Discarded {discarded_count} events due to insufficient signal length or missing inboard order.")
+            # time_count = np.sum(time_counts)
+            time_count = sum([event['signal_length'] for event in events])
+            # discarded_count = len(shot_event_indices) - len(long_enough_indices)
+            # self.zprint(f"    Discarded {discarded_count} events due to insufficient signal length or missing inboard order.")
             
             packaged_signals = np.empty((time_count, self.n_rows, self.n_cols), dtype=np.float32)
             start_index = 0
@@ -1075,21 +1187,21 @@ class Data(_Base_Class, LightningDataModule):
             # else:
             #     bandpass_filter = None
 
-            for i, (shot, event) in enumerate(long_enough_indices):
-                if i % 100 == 0:
-                    self.rprint(f"Reading event {i:04d}/{len(shot_event_indices):04d} in shot {shot}")
-                event_key = f"{shot}/{event}"
-                event_data = h5_file[event_key]
+            for i, event in enumerate(events):
+                shot = event['shot']
+                event = event['event']
+                if i % (len(events)//10) == 0:
+                    self.zprint(f"    Reading event {i:04d}/{len(events):04d}")
+                event_group = root[str(shot)][str(event)]
 
                 # Retrieve the inboard_column_channel_order for this shot
-                inboard_order = h5_file[shot].attrs["inboard_column_channel_order"]
+                # inboard_order = root[shot].attrs["inboard_column_channel_order"]
 
                 # Retrieve signals and reshape according to inboard_order
-                signals = np.array(event_data["signals"][:, :], dtype=np.float32)
+                labels = np.array(event_group["labels"], dtype=int)
+                signals = np.array(event_group["signals"][:, :], dtype=np.float32)
                 signals = np.transpose(signals, (1, 0)).reshape(-1, self.n_rows, self.n_cols)
                 if self.b_coeffs is not None and signals.shape[0] > 3 * self.fir_taps:
-                    # if i % 100 == 0:
-                    #     self.rprint(f"Applying {self.lower_cutoff_frequency_hz} - {self.upper_cutoff_frequency_hz} bandpass filter ")
                     signals = np.array(
                         scipy.signal.lfilter(
                             x=signals,
@@ -1098,7 +1210,6 @@ class Data(_Base_Class, LightningDataModule):
                         ),
                         dtype=np.float32,
                     )
-                labels = np.array(event_data["labels"], dtype=int)
 
                 # labels, valid_t0 = self._get_valid_indices(labels)
                 valid_t0 = np.zeros(labels.size, dtype=int)
@@ -1109,12 +1220,12 @@ class Data(_Base_Class, LightningDataModule):
                 confinement_data.append({
                     'labels': labels, 
                     'valid_t0': valid_t0,
-                    'confinement_mode_key': event_key,
+                    'confinement_mode_key': f"{shot}/{event}",
                     'shot': shot,
                     'time': event,
                 })
 
-        self.zprint(f"Time for confinement data read: {time.time()-t_tmp:.1f} s")
+        self.zprint(f"    Time for confinement data read: {time.time()-t_tmp:.1f} s")
 
         packaged_labels = np.concatenate([confinement_mode['labels'] for confinement_mode in confinement_data], axis=0)
         # if self.one_hot_labels:
@@ -1160,8 +1271,8 @@ class Data(_Base_Class, LightningDataModule):
             mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
             stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
             exkurt = np.sum(cummulative_hist * ((bin_center - mean)/stdev) ** 4) / np.sum(cummulative_hist) - 3
-            self.rprint(f"Stats: count {sample_indices.size:,} min {signal_min:.3f} max {signal_max:.3f} mean {mean:.3f} stdev {stdev:.3f} exkurt {exkurt:.3f} n_samples {n_samples:,}")
-            self.zprint(f"Stats time: {time.time()-t_tmp:.1f} s")
+            self.rprint(f"      Stats: count {sample_indices.size:,} min {signal_min:.3f} max {signal_max:.3f} mean {mean:.3f} stdev {stdev:.3f} exkurt {exkurt:.3f} n_samples {n_samples:,}")
+            self.zprint(f"      Stats time: {time.time()-t_tmp:.1f} s")
             return {
                 'count': sample_indices.size,
                 'min': signal_min,
@@ -1174,8 +1285,9 @@ class Data(_Base_Class, LightningDataModule):
         # valid t0 indices
         packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
         packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
+        packaged_valid_t0_indices = packaged_valid_t0_indices[::self.signal_window_size//8]
         assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices]))
-        self.rprint("  Raw data stats")
+        self.zprint("    Raw data stats")
         stats = _get_statistics2(
             sample_indices=packaged_valid_t0_indices,
             signals=packaged_signals,
@@ -1197,36 +1309,36 @@ class Data(_Base_Class, LightningDataModule):
         #     self.rprint(f"  Clipped signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
 
         # mask outlier signals
-        if self.mask_sigma_outliers:
-            if None in [self.confinement_mask_lb, self.confinement_mask_ub]:
-                assert stage == 'train' or not self.train_confinement_events, f"Dataset_stage: {stage}"
-                self.rprint(f"  Calculating mask upper/lower bounds from {stage} data")
-                self.confinement_mask_lb = stats['mean'] - self.mask_sigma_outliers * stats['stdev']
-                self.confinement_mask_ub = stats['mean'] + self.mask_sigma_outliers * stats['stdev']
-                self.save_hyperparameters({
-                    'mask_lb': self.confinement_mask_lb.item(),
-                    'mask_ub': self.confinement_mask_ub.item(),
-                })
-            self.rprint(f"  Mask {self.mask_sigma_outliers:.2f} sigma outliers from signals")
-            self.rprint(f"  Mask lower bound {self.confinement_mask_lb:.3f} upper bound {self.confinement_mask_ub:.3f}")
-            mask = np.zeros(packaged_valid_t0_indices.size, dtype=bool)
-            for i_t0_index, t0_index in enumerate(packaged_valid_t0_indices):
-                signal_window = packaged_signals[t0_index: t0_index + self.signal_window_size, :, :]
-                mask[i_t0_index] = (
-                    np.max(signal_window) <= self.confinement_mask_ub and
-                    np.min(signal_window) >= self.confinement_mask_lb
-                )
-            packaged_valid_t0_indices = packaged_valid_t0_indices[mask]
-            self.rprint("  Masked data stats")
-            stats = _get_statistics2(
-                sample_indices=packaged_valid_t0_indices,
-                signals=packaged_signals,
-            )
+        # if self.mask_sigma_outliers:
+        #     if None in [self.confinement_mask_lb, self.confinement_mask_ub]:
+        #         assert stage == 'train' or not self.train_confinement_events, f"Dataset_stage: {stage}"
+        #         self.zprint(f"  Calculating mask upper/lower bounds from {stage} data")
+        #         self.confinement_mask_lb = stats['mean'] - self.mask_sigma_outliers * stats['stdev']
+        #         self.confinement_mask_ub = stats['mean'] + self.mask_sigma_outliers * stats['stdev']
+        #         self.save_hyperparameters({
+        #             'mask_lb': self.confinement_mask_lb.item(),
+        #             'mask_ub': self.confinement_mask_ub.item(),
+        #         })
+        #     self.zprint(f"  Mask {self.mask_sigma_outliers:.2f} sigma outliers from signals")
+        #     self.zprint(f"  Mask lower bound {self.confinement_mask_lb:.3f} upper bound {self.confinement_mask_ub:.3f}")
+        #     mask = np.zeros(packaged_valid_t0_indices.size, dtype=bool)
+        #     for i_t0_index, t0_index in enumerate(packaged_valid_t0_indices):
+        #         signal_window = packaged_signals[t0_index: t0_index + self.signal_window_size, :, :]
+        #         mask[i_t0_index] = (
+        #             np.max(signal_window) <= self.confinement_mask_ub and
+        #             np.min(signal_window) >= self.confinement_mask_lb
+        #         )
+        #     packaged_valid_t0_indices = packaged_valid_t0_indices[mask]
+        #     self.zprint("  Masked data stats")
+        #     stats = _get_statistics2(
+        #         sample_indices=packaged_valid_t0_indices,
+        #         signals=packaged_signals,
+        #     )
         
         # standardize signals based on training data
         if None in [self.confinement_raw_signal_mean, self.confinement_raw_signal_stdev]:
             assert stage == 'train' or not self.train_confinement_events, f"Dataset_stage: {stage}"
-            self.rprint(f"  Calculating signal mean and std from {stage} data")
+            self.zprint(f"    Calculating signal mean and std from {stage} data")
             self.confinement_raw_signal_mean = stats['mean']
             self.confinement_raw_signal_stdev = stats['stdev']
             self.save_hyperparameters({
@@ -1234,18 +1346,18 @@ class Data(_Base_Class, LightningDataModule):
                 'signal_stdev': self.confinement_raw_signal_stdev.item(),
             })
 
-        if stage in ['train'] or True:
-            self.rprint(f"  Standarizing signals with mean {self.confinement_raw_signal_mean:.3f} and std {self.confinement_raw_signal_stdev:.3f}")
-            self.rprint(f"  Standardized signal stats")
+        if True or stage in ['train']:
+            self.zprint(f"    Standarizing signals with mean {self.confinement_raw_signal_mean:.3f} and std {self.confinement_raw_signal_stdev:.3f}")
+            self.zprint(f"    Standardized signal stats")
             packaged_signals = (packaged_signals - self.confinement_raw_signal_mean) / self.confinement_raw_signal_stdev
             # for idx, signal in enumerate(packaged_signals):
             #     packaged_signals[idx] = (signal - self.confinement_raw_signal_mean) / self.confinement_raw_signal_stdev
-            stats = _get_statistics2(
-                sample_indices=packaged_valid_t0_indices,
-                signals=packaged_signals,
-            )
+            # stats = _get_statistics2(
+            #     sample_indices=packaged_valid_t0_indices,
+            #     signals=packaged_signals,
+            # )
             
-        self.zprint(f"Load/preprocess confinement data for stage {stage}: end, time: {time.time()-t_tmp:.1f} s")
+        self.zprint(f"  Stage {stage.upper()}: Load/preprocess confinement data time: {time.time()-t_tmp:.1f} s")
 
         if stage == 'train':
             dataset = Confinement_TrainValTest_Dataset(
@@ -1285,8 +1397,8 @@ class Data(_Base_Class, LightningDataModule):
 
     def train_dataloader(self) -> dict[str, torch.utils.data.DataLoader]:
         return {
-            'elm_dataloader': self._elm_train_val_test_dataloaders('train'),
-            'confinement_dataloader': self.confinement_train_dataloader,
+            'elm_classifier': self._elm_train_val_test_dataloaders('train'),
+            'conf_classifier': self.confinement_train_dataloader,
         }
 
     def val_dataloader(self) -> dict[str, torch.utils.data.DataLoader]:
@@ -1308,8 +1420,8 @@ class Data(_Base_Class, LightningDataModule):
             persistent_workers=(self.num_workers > 0),
         )
         return {
-            'elm_dataloader': self._elm_train_val_test_dataloaders('validation'),
-            'confinement_dataloader': confinement_val_dl,
+            'elm_classifier': self._elm_train_val_test_dataloaders('validation'),
+            'conf_classifier': confinement_val_dl,
         }
 
     def test_dataloader(self) -> dict[str, torch.utils.data.DataLoader]:
@@ -1326,8 +1438,8 @@ class Data(_Base_Class, LightningDataModule):
             persistent_workers=(self.num_workers > 0),
         ) 
         return {
-            'elm_dataloader': self._elm_train_val_test_dataloaders('test'),
-            'confinement_dataloader': confinement_test_dl,
+            'elm_classifier': self._elm_train_val_test_dataloaders('test'),
+            'conf_classifier': confinement_test_dl,
         }
 
     def predict_dataloader(self) -> None:
@@ -1348,8 +1460,7 @@ class Data(_Base_Class, LightningDataModule):
         )
         new_batch_size_per_rank = self.batch_size_per_rank // (2**batch_size_reduction_factor)
         if self._modified_batch_size_per_rank and self._modified_batch_size_per_rank != new_batch_size_per_rank:
-            if self.is_global_zero:
-                print(f"New global batchsize: {new_batch_size_per_rank*self.trainer.world_size}")
+            self.zprint(f"New global batchsize: {new_batch_size_per_rank*self.trainer.world_size}")
         self._modified_batch_size_per_rank = new_batch_size_per_rank
         return torch.utils.data.DataLoader(
             dataset=self.elm_datasets[stage],
@@ -1376,7 +1487,7 @@ class Data(_Base_Class, LightningDataModule):
 
     def rprint(self, text: str = ''):
         if self.trainer.world_size > 1:
-            print(f"  Rank {self.trainer.global_rank}: {text}")
+            print(f"Rank {self.trainer.global_rank}: {text}")
         else:
             print(text)
 
@@ -1504,8 +1615,10 @@ class Confinement_TrainValTest_Dataset(torch.utils.data.Dataset):
     
 
 def main(
-        data_file: str|Path,
+        elm_data_file: str|Path,
         confinement_data_file: str|Path,
+        elm_classifier=True,
+        conf_classifier=False,
         max_elms: int|Any = None,
         signal_window_size = 1024,
         experiment_name = 'experiment_default',
@@ -1514,10 +1627,8 @@ def main(
         weight_decay = 1e-4,
         lr_scheduler_patience = 20,
         lr_warmup_epochs: int = 5,
-        monitor_metric = None,
-        dropout_percent = None,
+        monitor_metric = 'sum_score/val',
         use_optimizer = 'SGD',
-        # layerwise_lr_decrement = 1.,
         # loggers
         log_freq = 100,
         use_wandb = False,
@@ -1542,6 +1653,7 @@ def main(
         fir_bp_low = None,
         fir_bp_high = None,
         epochs_per_batch_size_reduction: int = 50,
+        max_shots_per_class: int = 5,
 ):
 
     # SLURM/MPI environment
@@ -1551,23 +1663,23 @@ def main(
     local_rank = int(os.getenv("SLURM_LOCALID", default=0))
     node_rank = int(os.getenv("SLURM_NODEID", default=0))
 
-    is_global_zero = rank == 0
+    is_global_zero = (rank == 0)
     if is_global_zero:
         print(f"World size {world_size} on {num_nodes} node(s)")
     print(f"Rank {rank} of world size {world_size} (local rank {local_rank} on node {node_rank})")
 
     ### model
     lit_model = Model(
+        elm_classifier=elm_classifier,
+        conf_classifier=conf_classifier,
         signal_window_size=signal_window_size,
         lr=lr,
         lr_scheduler_patience=lr_scheduler_patience,
         lr_warmup_epochs=lr_warmup_epochs,
         weight_decay=weight_decay,
-        # dropout_percent=dropout_percent,
         monitor_metric=monitor_metric,
         use_optimizer=use_optimizer,
         is_global_zero=is_global_zero,
-        # lr_layerwise_decrement=layerwise_lr_decrement,
     )
     monitor_metric = lit_model.monitor_metric
     ### callbacks
@@ -1663,8 +1775,10 @@ def main(
     ### data
     lit_datamodule = Data(
         signal_window_size=signal_window_size,
-        elm_data_file=data_file,
+        elm_data_file=elm_data_file,
         confinement_data_file=confinement_data_file,
+        elm_classifier=lit_model.elm_classifier,
+        conf_classifier=lit_model.conf_classifier,
         max_elms=max_elms,
         batch_size=batch_size,
         fraction_test=fraction_test,
@@ -1678,7 +1792,7 @@ def main(
         fir_bp_low=fir_bp_low,
         fir_bp_high=fir_bp_high,
         epochs_per_batch_size_reduction=epochs_per_batch_size_reduction,
-        max_shots_per_class=2,
+        max_shots_per_class=max_shots_per_class,
     )
 
     if skip_train is False:
@@ -1691,14 +1805,15 @@ def main(
 
 if __name__=='__main__':
     main(
-        data_file='/global/homes/d/drsmith/scratch-ml/data/labeled_elm_events.hdf5',
-        # data_file='/Users/drsmith/Documents/repos/bes-ml/bes_ml/small_elm_data.hdf5',
+        elm_classifier=True,
+        conf_classifier=True,
+        elm_data_file='/global/homes/d/drsmith/scratch-ml/data/labeled_elm_events.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
-        max_elms=100,
+        max_elms=50,
         batch_size=256,
         lr=1e-3,
-        max_epochs=30,
-        num_workers=2,
+        max_epochs=1,
+        num_workers=0,
         log_freq=20,
         fraction_validation=0.2,
         fraction_test=0.2,
@@ -1709,4 +1824,5 @@ if __name__=='__main__':
         gradient_clip_algorithm='value',
         # use_wandb=True,
         epochs_per_batch_size_reduction=10,
+        max_shots_per_class=5,
     )

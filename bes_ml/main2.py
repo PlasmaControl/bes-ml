@@ -267,7 +267,7 @@ class Model(LightningModule, _Base_Class):
         )
         lr_warm_up = torch.optim.lr_scheduler.LinearLR(
             optimizer=self.optimizer,
-            start_factor=0.1,
+            start_factor=0.05,
             total_iters=self.lr_warmup_epochs,
         )
         return_optim_list = [self.optimizer]
@@ -306,6 +306,8 @@ class Model(LightningModule, _Base_Class):
                         y_true=labels.detach().cpu(),
                         zero_division=0,
                     )
+                    if self.current_epoch<10:
+                        metric_value /= 10
                 elif 'stat' in metric_name:
                     metric_value = metric_function(task_outputs)
                 self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True)            
@@ -398,9 +400,6 @@ class Data(_Base_Class, LightningDataModule):
         self.time_to_elm_quantiles: dict[float,float] = {}
         self.elm_raw_signal_mean: float|Any = None
         self.elm_raw_signal_stdev: float|Any = None
-        self.rankwise_elm_split: dict[str,Sequence] = {}
-        self.rankwise_shot_split: dict[str,Sequence] = {}
-        self.rankwise_sw_split: dict[str,Sequence] = {}
         self._modified_batch_size_per_rank: int|Any = None
 
         if self.is_global_zero:
@@ -425,10 +424,17 @@ class Data(_Base_Class, LightningDataModule):
             print(f"Batch size: {self.batch_size}")
             print(f"Batch size per rank {self.batch_size_per_rank}")
 
-        if self.fir_bp_low:
-            self.zprint(f"Using bandpass filter with f_low-f_high: {self.fir_bp_low:.1f}-{self.fir_bp_high:.1f} kHz")
-            cutoff = [self.fir_bp_low, self.fir_bp_high] if self.fir_bp_high else self.fir_bp_low
-            pass_zero = 'bandpass' if self.fir_bp_high else 'highpass'
+        if self.fir_bp_low is not None or self.fir_bp_high is not None:
+            self.zprint(f"Using bandpass filter with f_low-f_high: {self.fir_bp_low}-{self.fir_bp_high} kHz")
+            if self.fir_bp_low and self.fir_bp_high:
+                pass_zero = 'bandpass'
+                cutoff = [self.fir_bp_low, self.fir_bp_high]
+            elif self.fir_bp_low:
+                pass_zero = 'highpass'
+                cutoff = self.fir_bp_low
+            elif self.fir_bp_high:
+                pass_zero = 'lowpass'
+                cutoff = self.fir_bp_high
             self.b_coeffs = scipy.signal.firwin(
                 numtaps=self.fir_taps,  # must be odd
                 cutoff=cutoff,  # transition width in kHz
@@ -449,12 +455,6 @@ class Data(_Base_Class, LightningDataModule):
         else:
             if self.is_global_zero:
                 print("Reusing saved global data split")
-
-        # if self.is_global_zero:
-        #     if self.b_coeffs is not None:
-        #         print(f"  Using HP filter with f_pass={self.fir_hp_filter:.1f} kHz")
-        #     else:
-        #         print("  Using raw BES signals; no HP filter")
 
         for st in stages:
             assert st in ['train', 'validation', 'test', 'predict']
@@ -729,7 +729,7 @@ class Data(_Base_Class, LightningDataModule):
         if self.num_workers is None:
             self.num_workers = 2 if self.trainer.world_size==1 else 0
         batch_size_reduction_factor = (
-            min(2, self.trainer.current_epoch//self.epochs_per_batch_size_reduction) 
+            min(3, self.trainer.current_epoch//self.epochs_per_batch_size_reduction) 
             if stage=='train' 
             else 0
         )
@@ -985,10 +985,10 @@ if __name__=='__main__':
     main(
         data_file='/global/homes/d/drsmith/scratch-ml/data/labeled_elm_events.hdf5',
         # data_file='/Users/drsmith/Documents/repos/bes-ml/bes_ml/small_elm_data.hdf5',
-        max_elms=100,
-        batch_size=256,
+        max_elms=50,
+        batch_size=128,
         lr=1e-3,
-        max_epochs=4,
+        max_epochs=2,
         num_workers=2,
         log_freq=100,
         time_to_elm_quantile_min=0.4,
@@ -996,6 +996,8 @@ if __name__=='__main__':
         contrastive_learning=True,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
+        # fir_bp_low=5.,
+        fir_bp_high=250.,
         # use_wandb=True,
         epochs_per_batch_size_reduction=10,
     )
