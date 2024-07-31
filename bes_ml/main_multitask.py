@@ -847,8 +847,12 @@ class Data(_Base_Class, LightningDataModule):
                     continue
                 inboard_order = root[shot].attrs.get("inboard_column_channel_order", None)
                 if inboard_order is None or len(inboard_order)==0:
+                    self.zprint(f"    Skipping shot {shot} due to missing inboard order")
+                    continue
+                if not np.array_equal(inboard_order, np.arange(8, dtype=int)*8+1):
                     self.zprint(f"    Skipping shot {shot} due to bad inboard order")
                     continue
+                print(f"{shot} IB order: {inboard_order}")
                 metadata = {
                     'r_avg': root[shot].attrs.get('r_avg'),
                     'z_avg': root[shot].attrs.get('z_avg'),
@@ -999,11 +1003,15 @@ class Data(_Base_Class, LightningDataModule):
             # except ValueError:
             #     # raise
             #     self.rprint("    Stratified split failed; reverting to random split for test/validation sets.")
-            test_shots, val_shots = train_test_split(
-                _test_val_shots,
-                test_size=self.fraction_validation/(self.fraction_test + self.fraction_validation),
-                random_state=self.rng.integers(0,(2**32)-1),
-            )
+            if self.fraction_test:
+                test_shots, val_shots = train_test_split(
+                    _test_val_shots,
+                    test_size=self.fraction_validation/(self.fraction_test + self.fraction_validation),
+                    random_state=self.rng.integers(0,(2**32)-1),
+                )
+            else:
+                val_shots = _test_val_shots
+                test_shots = []
 
             if forced_test_shots_data or forced_validation_shots_data:
                 # Ensure forced shots are included back in filtered_shots if needed
@@ -1147,8 +1155,10 @@ class Data(_Base_Class, LightningDataModule):
         t_tmp = time.time()
         self.zprint(f"  Stage {stage.upper()}: load and pre-process data")
         confinement_data = []
+        time_count = sum([event['signal_length'] for event in events])
+        packaged_signals = np.empty((time_count, self.n_rows, self.n_cols), dtype=np.float32)
+        start_index = 0
 
-        with h5py.File(self.confinement_data_file, 'r') as root:
             # if len(shot_event_indices) >= 5:
             #     self.zprint(f"    Initial shot/event indices: {shot_event_indices[:5]}")
             # time_counts = []
@@ -1170,13 +1180,9 @@ class Data(_Base_Class, LightningDataModule):
             #         long_enough_indices.append((shot, event))
 
             # time_count = np.sum(time_counts)
-            time_count = sum([event['signal_length'] for event in events])
             # discarded_count = len(shot_event_indices) - len(long_enough_indices)
             # self.zprint(f"    Discarded {discarded_count} events due to insufficient signal length or missing inboard order.")
             
-            packaged_signals = np.empty((time_count, self.n_rows, self.n_cols), dtype=np.float32)
-            start_index = 0
-
             # if self.lower_cutoff_frequency_hz is not None and self.upper_cutoff_frequency_hz is not None:
             #     bandpass_filter = scipy.signal.firwin(
             #         self.fir_taps,
@@ -1187,21 +1193,19 @@ class Data(_Base_Class, LightningDataModule):
             # else:
             #     bandpass_filter = None
 
+        with h5py.File(self.confinement_data_file, 'r') as root:
             for i, event in enumerate(events):
                 shot = event['shot']
                 event = event['event']
                 if i % (len(events)//10) == 0:
                     self.zprint(f"    Reading event {i:04d}/{len(events):04d}")
                 event_group = root[str(shot)][str(event)]
-
-                # Retrieve the inboard_column_channel_order for this shot
-                # inboard_order = root[shot].attrs["inboard_column_channel_order"]
-
                 # Retrieve signals and reshape according to inboard_order
                 labels = np.array(event_group["labels"], dtype=int)
+
                 signals = np.array(event_group["signals"][:, :], dtype=np.float32)
                 signals = np.transpose(signals, (1, 0)).reshape(-1, self.n_rows, self.n_cols)
-                if self.b_coeffs is not None and signals.shape[0] > 3 * self.fir_taps:
+                if self.b_coeffs is not None and signals.shape[0] > self.fir_taps:
                     signals = np.array(
                         scipy.signal.lfilter(
                             x=signals,
@@ -1210,13 +1214,11 @@ class Data(_Base_Class, LightningDataModule):
                         ),
                         dtype=np.float32,
                     )
-
-                # labels, valid_t0 = self._get_valid_indices(labels)
-                valid_t0 = np.zeros(labels.size, dtype=int)
-                first_valid_signal_window_start_index = self.signal_window_size - 1
-                valid_t0[first_valid_signal_window_start_index::128] = 1
                 packaged_signals[start_index:start_index + signals.shape[0]] = signals
                 start_index += signals.shape[0]
+                valid_t0 = np.zeros(labels.size, dtype=int)
+                first_valid_signal_window_start_index = self.signal_window_size - 1
+                valid_t0[first_valid_signal_window_start_index::self.signal_window_size//8] = 1
                 confinement_data.append({
                     'labels': labels, 
                     'valid_t0': valid_t0,
@@ -1285,13 +1287,16 @@ class Data(_Base_Class, LightningDataModule):
         # valid t0 indices
         packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
         packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
-        packaged_valid_t0_indices = packaged_valid_t0_indices[::self.signal_window_size//8]
+        # packaged_valid_t0_indices = packaged_valid_t0_indices[::self.signal_window_size//8]
         assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices]))
         self.zprint("    Raw data stats")
         stats = _get_statistics2(
             sample_indices=packaged_valid_t0_indices,
             signals=packaged_signals,
         )
+
+        assert packaged_labels.size == packaged_signals.shape[0]
+        assert packaged_labels.size == packaged_valid_t0.size
 
         # mask abs(signals) > N volts
         # if self.clip_signals and stage == 'train':
@@ -1815,8 +1820,8 @@ if __name__=='__main__':
         max_epochs=1,
         num_workers=0,
         log_freq=20,
-        fraction_validation=0.2,
-        fraction_test=0.2,
+        fraction_validation=0.25,
+        fraction_test=0.0,
         time_to_elm_quantile_min=0.4,
         time_to_elm_quantile_max=0.6,
         contrastive_learning=True,
@@ -1824,5 +1829,5 @@ if __name__=='__main__':
         gradient_clip_algorithm='value',
         # use_wandb=True,
         epochs_per_batch_size_reduction=10,
-        max_shots_per_class=5,
+        max_shots_per_class=6,
     )
