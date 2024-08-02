@@ -288,92 +288,66 @@ class Model(LightningModule, _Base_Class):
     def update_step(
             self, 
             batch, 
-            batch_idx: int, 
-            dataloader_idx: int|Any = None,
+            batch_idx = None, 
+            dataloader_idx = None,
             stage: str = '', 
     ) -> torch.Tensor:
-        # for task_name in self.task_names:
-        #     assert task_name in batch
-        # elm_batch = confinement_batch = None
-        # if isinstance(batch, dict) and dataloader_idx is None:
-        #     elm_batch = batch['elm_dataloader']
-        #     confinement_batch = batch['confinement_dataloader']
-        # elif dataloader_idx == 0:
-        #     elm_batch = batch
-        # elif dataloader_idx == 1:
-        #     confinement_batch = batch
-        # else:
-        #     raise ValueError
         sum_loss = torch.Tensor([0.0])
         sum_score = torch.Tensor([0.0])
         model_outputs = self(batch)
         for task in model_outputs:
             task_outputs = model_outputs[task]
             metrics = self.task_metrics[task]
-            labels = batch[task][1]
-            for metric_name, metric_function in metrics.items():
-                if 'loss' in metric_name:
-                    pass
-                elif 'score' in metric_name:
-                    pass
-                elif 'stat' in metric_name:
-                    metric_value = metric_function(task_outputs)
-                self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True)
-        if self.elm_classifier is not None:
-            task = 'elm_class'
-            signal_window, time_to_elm, quantiles = batch[task]
-            task_outputs = self(signal_window, stage=stage, task=task)  # call to self.forward()
-            labels: torch.Tensor = quantiles[0.5]
-            metrics = self.task_metrics[task]
-            for metric_name, metric_function in metrics.items():
-                if 'loss' in metric_name:
-                    metric_value = metric_function(
-                        input=task_outputs.reshape_as(labels),
-                        target=labels.type_as(task_outputs),
-                    )
-                    sum_loss = sum_loss + metric_value if sum_loss else metric_value
-                elif 'score' in metric_name:
-                    metric_value = metric_function(
-                        y_pred=(task_outputs.detach().cpu() >= 0.0).type(torch.int), 
-                        y_true=labels.detach().cpu(),
-                        zero_division=0,
-                    )
-                    if self.current_epoch<10:
-                        metric_value /= 10
-                    if metric_name=='f1_score':
-                        sum_score = sum_score + metric_value if sum_score else metric_value
-                elif 'stat' in metric_name:
-                    metric_value = metric_function(task_outputs)
-                self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True)
-        if self.conf_classifier is not None:
-            task = 'conf_class'
-            signal_window, labels, mode_key = batch[task]
-            task_outputs = self(signal_window, stage=stage, task=task)
-            metrics = self.task_metrics[task]
-            for metric_name, metric_function in metrics.items():
-                if 'loss' in metric_name:
-                    metric_value = metric_function(
-                        input=task_outputs,
-                        target=labels.flatten(),
-                    )
-                    sum_loss = sum_loss + metric_value if sum_loss else metric_value
-                elif 'score' in metric_name:
-                    metric_value = metric_function(
-                        y_pred=(task_outputs > 0.0).type(torch.int).detach().cpu(), 
-                        y_true=torch.nn.functional.one_hot(
-                            labels.flatten().detach().cpu(),
-                            num_classes=4,
-                        ),
-                        zero_division=0,
-                        average='macro',
-                    )
-                    if self.current_epoch<10:
-                        metric_value /= 10
-                    if metric_name=='f1_score':
-                        sum_score = sum_score + metric_value if sum_score else metric_value
-                elif 'stat' in metric_name:
-                    metric_value = metric_function(task_outputs)
-                self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True)            
+            if task == 'elm_classifier':
+                labels = batch[task][1][0.5]
+                for metric_name, metric_function in metrics.items():
+                    if 'loss' in metric_name:
+                        metric_value = metric_function(
+                            input=task_outputs.reshape_as(labels),
+                            target=labels.type_as(task_outputs),
+                        )
+                        sum_loss = sum_loss + metric_value if sum_loss else metric_value
+                    elif 'score' in metric_name:
+                        metric_value = metric_function(
+                            y_pred=(task_outputs.detach().cpu() >= 0.0).type(torch.int), 
+                            y_true=labels.detach().cpu(),
+                            zero_division=0,
+                        )
+                        if self.current_epoch<10:
+                            metric_value /= 10
+                        if metric_name=='f1_score':
+                            sum_score = sum_score + metric_value if sum_score else metric_value
+                    elif 'stat' in metric_name:
+                        metric_value = metric_function(task_outputs)
+                    self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True)
+            elif task == 'conf_classifier':
+                labels = batch[task][1]
+                for metric_name, metric_function in metrics.items():
+                    if 'loss' in metric_name:
+                        metric_value = metric_function(
+                            input=task_outputs,
+                            target=labels.flatten(),
+                        )
+                        sum_loss = sum_loss + metric_value if sum_loss else metric_value
+                    elif 'score' in metric_name:
+                        metric_value = metric_function(
+                            y_pred=(task_outputs > 0.0).type(torch.int).detach().cpu(), 
+                            y_true=torch.nn.functional.one_hot(
+                                labels.flatten().detach().cpu(),
+                                num_classes=4,
+                            ),
+                            zero_division=0,
+                            average='macro',
+                        )
+                        if self.current_epoch<10:
+                            metric_value /= 10
+                        if metric_name=='f1_score':
+                            sum_score = sum_score + metric_value if sum_score else metric_value
+                    elif 'stat' in metric_name:
+                        metric_value = metric_function(task_outputs)
+                    self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True)
+            else:
+                raise ValueError
 
         self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True)
         self.log(f"sum_score/{stage}", sum_score, sync_dist=True)
@@ -382,7 +356,6 @@ class Model(LightningModule, _Base_Class):
     def forward(
             self, 
             batch: torch.Tensor, 
-            # task: str = '',
     ) -> dict[str,torch.Tensor]:
         results = {}
         for task in batch:
@@ -1530,7 +1503,7 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
         signals = self.signal_list[elm_index]
         signal_window = signals[..., i_t0 : i_t0 + self.signal_window_size, :, :]
         quantile_binary_label = {q: int(time_to_elm<=qval) for q, qval in self.time_to_elm_quantiles.items()}
-        return signal_window, time_to_elm, quantile_binary_label
+        return signal_window, quantile_binary_label, time_to_elm
 
 
 class Confinement_TrainValTest_Dataset(torch.utils.data.Dataset):
@@ -1826,7 +1799,7 @@ if __name__=='__main__':
         conf_classifier=True,
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/labeled_elm_events.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
-        max_elms=50,
+        max_elms=1000,
         batch_size=256,
         lr=1e-3,
         max_epochs=1,
