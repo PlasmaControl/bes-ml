@@ -66,7 +66,7 @@ class Model(LightningModule, _Base_Class):
     # lr_layerwise_decrement: float = 1.
     weight_decay: float = 1e-6
     leaky_relu_slope: float = 2e-2
-    monitor_metric: str = 'sum_score/val'
+    monitor_metric: str = 'elm_classifier/f1_score/val'
     use_optimizer: str = 'SGD'
     # feature_batchnorm: bool = True
     # task_batchnorm: bool = False
@@ -287,19 +287,22 @@ class Model(LightningModule, _Base_Class):
 
     def update_step(
             self, 
-            batch: dict, 
+            batch: dict|list, 
             batch_idx = None, 
             dataloader_idx = None,
             stage: str = '', 
     ) -> torch.Tensor:
         sum_loss = torch.Tensor([0.0])
-        sum_score = torch.Tensor([0.0])
+        # sum_score = torch.Tensor([0.0])
         model_outputs = self(batch)
         for task in model_outputs:
             task_outputs = model_outputs[task]
             metrics = self.task_metrics[task]
-            if task == 'elm_classifier':
-                labels = batch[task][1][0.5]
+            if task == 'elm_classifier' and (dataloader_idx is None or dataloader_idx==0):
+                if isinstance(batch, dict):
+                    labels = batch[task][1][0.5]
+                else:
+                    labels = batch[1][0.5]
                 for metric_name, metric_function in metrics.items():
                     if 'loss' in metric_name:
                         metric_value = metric_function(
@@ -315,13 +318,16 @@ class Model(LightningModule, _Base_Class):
                         )
                         if self.current_epoch<10:
                             metric_value /= 10
-                        if metric_name=='f1_score':
-                            sum_score = sum_score + metric_value if sum_score else metric_value
+                        # if metric_name=='f1_score':
+                        #     sum_score = sum_score + metric_value if sum_score else metric_value
                     elif 'stat' in metric_name:
                         metric_value = metric_function(task_outputs)
-                    self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True)
-            elif task == 'conf_classifier':
-                labels = batch[task][1]
+                    self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
+            elif task == 'conf_classifier' and (dataloader_idx is None or dataloader_idx==1):
+                if isinstance(batch, dict):
+                    labels = batch[task][1]
+                else:
+                    labels = batch[1]
                 for metric_name, metric_function in metrics.items():
                     if 'loss' in metric_name:
                         metric_value = metric_function(
@@ -341,25 +347,25 @@ class Model(LightningModule, _Base_Class):
                         )
                         if self.current_epoch<10:
                             metric_value /= 10
-                        if metric_name=='f1_score':
-                            sum_score = sum_score + metric_value if sum_score else metric_value
+                        # if metric_name=='f1_score':
+                            # sum_score = sum_score + metric_value if sum_score else metric_value
                     elif 'stat' in metric_name:
                         metric_value = metric_function(task_outputs)
-                    self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True)
-            else:
-                raise ValueError
-
-        self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True)
-        self.log(f"sum_score/{stage}", sum_score, sync_dist=True)
+                    self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
+        # self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True, add_dataloader_idx=False)
+        # self.log(f"sum_score/{stage}", sum_score, sync_dist=True, add_dataloader_idx=False)
         return sum_loss
 
     def forward(
             self, 
-            batch: dict, 
+            batch: dict|list, 
     ) -> dict[str,torch.Tensor]:
         results = {}
-        for task in batch:
-            results[task] = self.task_models[task](self.feature_model(batch[task][0]))
+        for task in self.task_models:
+            if isinstance(batch, dict):
+                results[task] = self.task_models[task](self.feature_model(batch[task][0]))
+            else:
+                results[task] = self.task_models[task](self.feature_model(batch[0]))
         return results
 
     def on_fit_start(self):
@@ -444,6 +450,7 @@ class Data(_Base_Class, LightningDataModule):
     n_cols: int = 8
     mask_sigma_outliers: float = None  # remove signal windows with abs(standardized_signals) > n_sigma
     prepare_data_per_node: bool = True  # hack to avoid error between dataclass and LightningDataModule
+    max_confinement_event_length: int = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -854,6 +861,8 @@ class Data(_Base_Class, LightningDataModule):
                     event_label: int = event['labels'][0].item()
                     assert event_label < self.num_classes
                     event_duration: int = event['signals'].shape[1]
+                    if self.max_confinement_event_length and event_duration>self.max_confinement_event_length:
+                        event_duration = self.max_confinement_event_length
                     if event_duration < self.signal_window_size:
                         continue
                     shot_events.append({
@@ -871,8 +880,6 @@ class Data(_Base_Class, LightningDataModule):
                     continue
                 global_shot_data[int(shot)] = {
                     'events': shot_events, 
-                    # 'labels_in_shot': shot_labels, 
-                    # 'duration_per_label': shot_label_duration,
                     'metadata': metadata,
                 }
         # BES location exclusions
@@ -958,19 +965,6 @@ class Data(_Base_Class, LightningDataModule):
         t_tmp = time.time()
         self.zprint(f"  Setup confinement data for stage {stage.upper()}")
         events = self.stage_to_events[stage]
-        # event_times = []
-        # label_times = {i: 0 for i in range(self.num_classes)}
-        # label_shots = {i: set() for i in range(self.num_classes)}
-        # shots = set()
-        # for event in events:
-        #     # shots.add(event['shot'])
-        #     event_times.append(event['duration'])
-        #     label_times[event['label']] += event['duration']
-        #     # label_shots[event['label']].add(event['shot'])
-        # self.zprint(f"    Stage {stage.upper()} with {len(events)} events, {len(shots)} shots, and total time {sum(event_times)/1e3:.1f} ms")
-        # for i in range(self.num_classes):
-        #     self.zprint(f"      Label {i}:  {len(label_shots[i])} shots and time {label_times[i]/1e3:.1f} ms")
-        #     assert label_shots[i], f"Label {i} has not data"
         if stage == 'train' and self.trainer.world_size > 1:
             self.zprint("    Creating chunks")
             chunked_events = [[] for _ in range(self.trainer.world_size)]
@@ -988,7 +982,6 @@ class Data(_Base_Class, LightningDataModule):
                 self.zprint(f"    Chunk {i} events: {len(chunk)}, total time: {chunk_time:.1f}")
             # Determine the chunk for this GPU
             chunk_events = chunked_events[self.trainer.global_rank]
-            # chunk_events = {i:events[i] for i in chunks[self.trainer.global_rank]}
         else:
             chunk_events = events
 
@@ -1024,8 +1017,10 @@ class Data(_Base_Class, LightningDataModule):
                 event_group = root[str(shot)][str(event)]
                 # Retrieve signals and reshape according to inboard_order
                 labels = np.array(event_group["labels"], dtype=int)
-
                 signals = np.array(event_group["signals"][:, :], dtype=np.float32)
+                if self.max_confinement_event_length and labels.size>self.max_confinement_event_length:
+                    labels = labels[:self.max_confinement_event_length]
+                    signals = signals[:,:self.max_confinement_event_length]
                 signals = np.transpose(signals, (1, 0)).reshape(-1, self.n_rows, self.n_cols)
                 if self.b_coeffs is not None and signals.shape[0] > self.fir_taps:
                     signals = np.array(
@@ -1052,10 +1047,7 @@ class Data(_Base_Class, LightningDataModule):
         self.zprint(f"    Time for confinement data read: {time.time()-t_tmp:.1f} s")
 
         packaged_labels = np.concatenate([confinement_mode['labels'] for confinement_mode in confinement_data], axis=0)
-
         packaged_valid_t0 = np.concatenate([confinement_mode['valid_t0'] for confinement_mode in confinement_data], axis=0)
-
-        # start indices for each confinement mode event in concatenated dataset
         packaged_window_start = []
         index = 0
         for confinement_mode in confinement_data:
@@ -1106,7 +1098,6 @@ class Data(_Base_Class, LightningDataModule):
         # valid t0 indices
         packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
         packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
-        # packaged_valid_t0_indices = packaged_valid_t0_indices[::self.signal_window_size//8]
         assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices]))
         self.zprint("    Raw data stats")
         stats = _get_statistics2(
@@ -1133,8 +1124,8 @@ class Data(_Base_Class, LightningDataModule):
             self.zprint(f"    Standardized signal stats")
             packaged_signals = (packaged_signals - self.confinement_raw_signal_mean) / self.confinement_raw_signal_stdev
             
-        self.rprint(f"  Stage {stage.upper()} valid indices: {len(packaged_valid_t0_indices)}")
-        self.rprint(f"  Stage {stage.upper()} Rank batches per epoch: {len(packaged_valid_t0_indices)/self.batch_size_per_rank:.1f}")
+        self.rprint(f"  Stage {stage.upper()}: Valid indices: {len(packaged_valid_t0_indices)}")
+        self.rprint(f"  Stage {stage.upper()}: Rank batches per epoch: {len(packaged_valid_t0_indices)/self.batch_size_per_rank:.1f}")
         self.zprint(f"  Stage {stage.upper()}: Load/preprocess confinement data time: {time.time()-t_tmp:.1f} s")
 
         if stage == 'train':
@@ -1402,7 +1393,7 @@ def main(
         weight_decay = 1e-4,
         lr_scheduler_patience = 20,
         lr_warmup_epochs: int = 5,
-        monitor_metric = 'sum_score/val',
+        monitor_metric = 'elm_classifier/f1_score/val',
         use_optimizer = 'SGD',
         # loggers
         log_freq = 100,
@@ -1429,6 +1420,7 @@ def main(
         fir_bp_high = None,
         epochs_per_batch_size_reduction: int = 50,
         max_shots_per_class: int = None,
+        max_confinement_event_length: int = None,
 ):
 
     # SLURM/MPI environment
@@ -1576,6 +1568,7 @@ def main(
         fir_bp_high=fir_bp_high,
         epochs_per_batch_size_reduction=epochs_per_batch_size_reduction,
         max_shots_per_class=max_shots_per_class,
+        max_confinement_event_length=max_confinement_event_length,
     )
 
     if skip_train is False:
@@ -1592,13 +1585,13 @@ if __name__=='__main__':
         conf_classifier=True,
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/labeled_elm_events.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
-        max_elms=500,
+        max_elms=200,
         batch_size=256,
         lr=1e-3,
         max_epochs=1,
         num_workers=0,
         log_freq=20,
-        fraction_validation=0.25,
+        fraction_validation=0.2,
         fraction_test=0.0,
         time_to_elm_quantile_min=0.4,
         time_to_elm_quantile_max=0.6,
@@ -1608,4 +1601,5 @@ if __name__=='__main__':
         # use_wandb=True,
         epochs_per_batch_size_reduction=10,
         max_shots_per_class=6,
+        max_confinement_event_length=int(2e4),
     )
