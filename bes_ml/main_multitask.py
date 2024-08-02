@@ -94,6 +94,7 @@ class Model(LightningModule, _Base_Class):
         # Sub-model: ELM median time-to-ELM binary classifier
         if self.elm_classifier:
             task_name = 'elm_classifier'
+            self.zprint(f"Task {task_name}")
             self.task_models[task_name] = self.make_mlp_classifier()
             self.task_metrics[task_name] = {
                 'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
@@ -107,6 +108,7 @@ class Model(LightningModule, _Base_Class):
         # sub-model: Confinement mode multi-class classifier
         if self.conf_classifier:
             task_name = 'conf_classifier'
+            self.zprint(f"Task {task_name}")
             self.task_models[task_name] = self.make_mlp_classifier(n_out=4)
             self.task_metrics[task_name] = {
                 'ce_loss': torch.nn.functional.cross_entropy,
@@ -121,15 +123,18 @@ class Model(LightningModule, _Base_Class):
 
         self.zprint("Initializing model to uniform random weights and biases=0")
         for name, param in self.named_parameters():
-            if 'bn' in name: continue
             if name.endswith("bias"):
                 self.zprint(f"  {name}: initialized to zeros (numel {param.data.numel()})")
                 param.data.fill_(0)
             elif name.endswith("weight"):
-                n_in = np.prod(param.shape[1:])
-                sqrt_k = np.sqrt(3. / n_in)
-                param.data.uniform_(-sqrt_k, sqrt_k)
-                self.zprint(f"  {name}: initialized to uniform +- {sqrt_k:.1e} n*var: {n_in*torch.var(param.data):.3f} (n {param.data.numel()})")
+                if 'BatchNorm' in name:
+                    self.zprint(f"  {name}: initialized to ones (numel {param.data.numel()})")
+                    param.data.fill_(1)
+                else:
+                    n_in = np.prod(param.shape[1:])
+                    sqrt_k = np.sqrt(3. / n_in)
+                    self.zprint(f"  {name}: initialized to uniform +- {sqrt_k:.1e} n*var: {n_in*torch.var(param.data):.3f} (n {param.data.numel()})")
+                    param.data.uniform_(-sqrt_k, sqrt_k)
             else:
                 raise ValueError
 
@@ -407,8 +412,8 @@ class Model(LightningModule, _Base_Class):
         if self.is_global_zero and self.global_step > 0:
             logged_metrics = self.trainer.logged_metrics
             line =  f"Ep {self.current_epoch:03d}  "
-            line += f"train/val loss {logged_metrics['sum_loss/train']:.3f}/"
-            # line += f"{logged_metrics['sum_loss/val']:.3f}  "
+            line += f"train/val loss {logged_metrics[self.monitor_metric]:.3f}/"
+            line += f"{logged_metrics[self.monitor_metric]:.3f}  "
             line += f"ep/gl steps {epoch_steps:,d}/{self.global_step:,d}  "
             line += f"ep/gl time (min): {epoch_time/60:.1f}/{global_time/60:.1f}  " 
             print(line)
@@ -834,8 +839,6 @@ class Data(_Base_Class, LightningDataModule):
         self.zprint("  Creating global confinement data split")
         if self.bad_shots is None:
             self.bad_shots = []  # Initialize to empty list if None
-        # def check_bounds(value, bounds):
-        #     return bounds[0] <= value <= bounds[1] if bounds else True
         check_bounds = lambda value, bounds: bounds[0] <= value <= bounds[1] if bounds else True
         shot_data = {}
         r_avg_exclusions = z_avg_exclusions = delz_avg_exclusions = 0
@@ -843,16 +846,16 @@ class Data(_Base_Class, LightningDataModule):
         with h5py.File(self.confinement_data_file) as root:
             for shot in root:
                 if shot in self.bad_shots:
-                    self.zprint(f"    Skipping bad shot: {shot}")
+                    # self.zprint(f"    Skipping bad shot: {shot}")
                     continue
                 inboard_order = root[shot].attrs.get("inboard_column_channel_order", None)
                 if inboard_order is None or len(inboard_order)==0:
-                    self.zprint(f"    Skipping shot {shot} due to missing inboard order")
+                    # self.zprint(f"    Skipping shot {shot} due to missing inboard order")
                     continue
                 if not np.array_equal(inboard_order, np.arange(8, dtype=int)*8+1):
-                    self.zprint(f"    Skipping shot {shot} due to bad inboard order")
+                    # self.zprint(f"    Skipping shot {shot} due to bad inboard order")
                     continue
-                print(f"{shot} IB order: {inboard_order}")
+                # self.zprint(f"{shot} inboard order: {inboard_order}")
                 metadata = {
                     'r_avg': root[shot].attrs.get('r_avg'),
                     'z_avg': root[shot].attrs.get('z_avg'),
@@ -871,9 +874,8 @@ class Data(_Base_Class, LightningDataModule):
                         delz_avg_exclusions += 1
                     continue
                 events = {}
-                labels_in_shot = [False] * self.num_classes
+                labels_present_for_shot = [False] * self.num_classes
                 time_per_label = [0.] * self.num_classes
-                # event_signal_length = []
                 for event_key, event in root[shot].items():
                     if 'labels' not in event:
                         continue
@@ -887,18 +889,14 @@ class Data(_Base_Class, LightningDataModule):
                         'label': label,
                         'signal_length': signal_length,
                     }
-                    labels_in_shot[label] = True
+                    labels_present_for_shot[label] = True
                     time_per_label[label] += signal_length
                     shots_by_class[label].add(int(shot))
-                    # event_labels.append(event['labels'][0])
-                    # event_signal_length.append(signal_length)
                 if not events:
                     continue
-                # label_in_shot = tuple(class_id in event_labels for class_id in range(self.num_classes))  
-                # events_and_labels = [(shot, event, root[shot][event]['labels'][0]) for event in root[shot] if 'labels' in root[shot][event]]
                 shot_data[int(shot)] = {
                     'events': events, 
-                    'labels_in_shot': labels_in_shot, 
+                    'labels_in_shot': labels_present_for_shot, 
                     'time_per_label': time_per_label,
                     'metadata': metadata,
                 }
@@ -936,6 +934,8 @@ class Data(_Base_Class, LightningDataModule):
             self.zprint(f"    Number of r_avg exclusions: {r_avg_exclusions}")
             self.zprint(f"    Number of z_avg exclusions: {z_avg_exclusions}")
             self.zprint(f"    Number of delz_avg exclusions: {delz_avg_exclusions}")
+        # data read
+        self.zprint(f"  Confinement data file has {len(shot_data)} shots and {sum([len(shot_data[shot]['events']) for shot in shot_data])} event windows")
         # Forced shots
         forced_test_shots_data = {}
         forced_validation_shots_data = {}
@@ -1117,22 +1117,24 @@ class Data(_Base_Class, LightningDataModule):
             self.zprint("    Creating chunks")
             # Create balanced chunks
             # Create a mapping from indices to times
-            index_to_time = {i: t for i, t in zip(events, event_times)}
             # Create a list to hold the chunks, and a list to hold the total time for each chunk
-            chunks = [[] for _ in range(self.trainer.world_size)]
+            # chunks = [[] for _ in range(self.trainer.world_size)]
+            chunks = [[]] * self.trainer.world_size
             chunk_times = [0] * self.trainer.world_size
             # Iterate over the indices, sorted by time from largest to smallest
+            index_to_time = {i: t for i, t in zip(range(len(events)), event_times)}
             for index, t in sorted(index_to_time.items(), key=lambda item: item[1], reverse=True):
                 # Find the chunk with the shortest total time so far
                 min_time_chunk_idx = min(range(self.trainer.world_size), key=lambda i: chunk_times[i])
                 # Add this index to that chunk
-                chunks[min_time_chunk_idx].append(index)
+                chunks[min_time_chunk_idx].append(events[index])
                 # Update the total time for that chunk
                 chunk_times[min_time_chunk_idx] += t
             for i, (chunk, chunk_time) in enumerate(zip(chunks, chunk_times)):
-                self.zprint(f"    Chunk {i} size: {len(chunk)}, total time: {sum(index_to_time[index] for index in chunk)}")
+                self.zprint(f"    Chunk {i} events: {len(chunk)}, total time: {chunk_time:.1f}")
             # Determine the chunk for this GPU
             chunk_events = chunks[self.trainer.global_rank]
+            # chunk_events = {i:events[i] for i in chunks[self.trainer.global_rank]}
         else:
             chunk_events = events
 
@@ -1362,6 +1364,8 @@ class Data(_Base_Class, LightningDataModule):
             #     signals=packaged_signals,
             # )
             
+        self.rprint(f"  Stage {stage.upper()} valid indices: {len(packaged_valid_t0_indices)}")
+        self.rprint(f"  Stage {stage.upper()} Rank batches per epoch: {len(packaged_valid_t0_indices)/self.batch_size_per_rank:.1f}")
         self.zprint(f"  Stage {stage.upper()}: Load/preprocess confinement data time: {time.time()-t_tmp:.1f} s")
 
         if stage == 'train':
@@ -1552,7 +1556,7 @@ class Confinement_TrainValTest_Dataset(torch.utils.data.Dataset):
         ), "Signals have incorrect shape"
         self.labels = torch.from_numpy(labels)
         # assert self.labels.ndim == 1, "Labels have incorrect shape"
-        print(signals.shape, labels.shape)
+        # print(signals.shape, labels.shape)
         # assert self.labels.numel() == self.signals.size(1), "Labels and signals have different time dimensions"
         self.n_rows = n_rows
         self.n_cols = n_cols
@@ -1658,7 +1662,7 @@ def main(
         fir_bp_low = None,
         fir_bp_high = None,
         epochs_per_batch_size_reduction: int = 50,
-        max_shots_per_class: int = 5,
+        max_shots_per_class: int = None,
 ):
 
     # SLURM/MPI environment
@@ -1669,9 +1673,19 @@ def main(
     node_rank = int(os.getenv("SLURM_NODEID", default=0))
 
     is_global_zero = (rank == 0)
-    if is_global_zero:
-        print(f"World size {world_size} on {num_nodes} node(s)")
-    print(f"Rank {rank} of world size {world_size} (local rank {local_rank} on node {node_rank})")
+
+    def zprint(text):
+        if is_global_zero:
+            print(text)
+
+    def rprint(text):
+        if world_size==1:
+            print(text)
+        else:
+            print(f"Rank {rank}: {text}")
+
+    zprint(f"World size {world_size} on {num_nodes} node(s)")
+    rprint(f"Local rank {local_rank} on node {node_rank}")
 
     ### model
     lit_model = Model(
@@ -1722,8 +1736,7 @@ def main(
     )
     loggers.append(tb_logger)
     trial_dir = Path(tb_logger.log_dir).absolute()
-    if is_global_zero:
-        print(f"Trial directory: {trial_dir}")
+    zprint(f"Trial directory: {trial_dir}")
     if use_wandb:
         wandb.login()
         wandb_logger = WandbLogger(
@@ -1738,9 +1751,8 @@ def main(
         )
         loggers.append(wandb_logger)
 
-    if is_global_zero:
-        print("Model Summary:")
-        print(ModelSummary(lit_model, max_depth=-1))
+    zprint("Model Summary:")
+    zprint(ModelSummary(lit_model, max_depth=-1))
 
     ### initialize trainer
     if precision is None:
