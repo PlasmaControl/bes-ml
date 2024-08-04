@@ -387,10 +387,10 @@ class Model(LightningModule, _Base_Class):
         if self.is_global_zero and self.global_step > 0:
             logged_metrics = self.trainer.logged_metrics
             line =  f"Ep {self.current_epoch:03d}  "
-            line += f"train/val loss {logged_metrics[self.monitor_metric]:.3f}/"
-            line += f"{logged_metrics[self.monitor_metric]:.3f}  "
+            line += f"train/val score {logged_metrics['elm_classifier/f1_score/train']:.4f}/"
+            line += f"{logged_metrics[self.monitor_metric]:.4f}  "
             line += f"ep/gl steps {epoch_steps:,d}/{self.global_step:,d}  "
-            line += f"ep/gl time (min): {epoch_time/60:.1f}/{global_time/60:.1f}  " 
+            line += f"ep/gl time (min): {epoch_time/60:.2f}/{global_time/60:.2f}  " 
             print(line)
 
     def on_before_optimizer_step(self, optimizer):
@@ -533,6 +533,9 @@ class Data(_Base_Class, LightningDataModule):
         t_tmp = time.time()
         self.zprint(f"**** Setup stage: {stage.upper()}")
 
+        if self.num_workers is None:
+            self.num_workers = 8 if self.trainer.world_size>1 else 0
+
         assert stage in ['fit', 'test', 'predict']
         assert self.is_global_zero == self.trainer.is_global_zero
 
@@ -604,16 +607,19 @@ class Data(_Base_Class, LightningDataModule):
             if self.max_elms and len(datafile_elms) > self.max_elms:
                 self.rng.shuffle(datafile_elms)
                 datafile_elms = datafile_elms[:self.max_elms]
-                datafile_shots = set([int(root['elms'][f"{elm_index:06d}"].attrs['shot']) for elm_index in datafile_elms])
-                datafile_shots = list(datafile_shots)
+                datafile_shots = [int(root['elms'][f"{elm_index:06d}"].attrs['shot']) for elm_index in datafile_elms]
+                datafile_shots = list(set(datafile_shots))
                 self.zprint(f"    ELMs/shots for analysis: {len(datafile_elms):,d} / {len(datafile_shots):,d}")
             # shuffle shots in dataset
-            self.zprint(f"    Shuffling global shots with seed={self.seed}")
+            self.zprint(f"    Shuffling global shots with seed {self.seed}")
             self.rng.shuffle(datafile_shots)
-            self.rprint(f"    Shuffled shot order: {datafile_shots[:4]}")
+            # self.rprint(f"    Shuffled shot order: {datafile_shots[:5]}")
             self.barrier()
+            rank0_shuffled_shots = self.broadcast(datafile_shots[:5])
+            for i, shot in enumerate(rank0_shuffled_shots):
+                assert shot == datafile_shots[i]
+            self.zprint(f"    Shuffled shots are consistent across ranks")
             # order ELMs by shuffled shots
-            self.zprint(f"    Ordering ELMs by shuffled shots")
             new_datafile_elms = []
             datafile_elms = sorted(datafile_elms)
             for shot in datafile_shots:
@@ -638,6 +644,12 @@ class Data(_Base_Class, LightningDataModule):
                     if root['elms'][f"{i_elm:06d}"].attrs['shot'] in self.global_shot_split[stage]
                 ]
                 self.zprint(f"      {stage.upper()}: Global ELM/shot count {len(self.global_elm_split[stage]):,d} ({len(self.global_elm_split[stage])/len(datafile_elms)*1e2:.1f}%) / {self.global_shot_split[stage].size} ({self.global_shot_split[stage].size/len(datafile_shots)*1e2:.1f}%)")
+            for st in ['validation', 'train']:
+                rank0_shots = self.broadcast(self.global_shot_split[st][:5])
+                assert np.array_equal(rank0_shots, self.global_shot_split[st][:5])
+                rank0_elms = self.broadcast(self.global_elm_split[st][:5])
+                assert np.array_equal(rank0_elms, self.global_elm_split[st][:5])
+            self.zprint("    Shot and ELM split are consistent across ranks")
 
     def _setup_elm_data(self, st: str):
         self.zprint(f"  ELM {st.upper()} data setup")
@@ -651,6 +663,8 @@ class Data(_Base_Class, LightningDataModule):
         global_sw_metadata: list = []
         global_outliers = 0
         skipped_short_pre_elm_time = 0
+        if self.outlier_value:
+            self.zprint(f"    Removing outliers with max(abs(signal windows)) > {self.outlier_value:.3f} V")
         with h5py.File(self.elm_data_file, 'r') as h5_file:
             elms: h5py.Group = h5_file['elms']
             for i_elm, elm_index in enumerate(elm_indices):
@@ -730,7 +744,7 @@ class Data(_Base_Class, LightningDataModule):
         mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
         stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
         exkurt = np.sum(cummulative_hist * ((bin_center - mean)/stdev) ** 4) / np.sum(cummulative_hist) - 3
-        self.rprint(f"    Global raw signals:  mean {mean:.2f}  stdev {stdev:.2f}  exkurt {exkurt:.2f}  min/max {signal_min:.2f}/{signal_max:.2f}")
+        self.zprint(f"    Global raw signals:  mean {mean:.3f}  stdev {stdev:.3f}  exkurt {exkurt:.3f}  min/max {signal_min:.3f}/{signal_max:.3f}")
         self.barrier()
         # time-to-ELM quantiles
         # time_to_elm_list = [e['time_to_elm'] for e in global_sw_metadata]
@@ -749,15 +763,20 @@ class Data(_Base_Class, LightningDataModule):
         self.elm_raw_signal_stdev = self.broadcast(self.elm_raw_signal_stdev)
 
         # time-to-ELM quantiles
-        if st == 'train':
+        if st == 'train' and not self.time_to_elm_quantiles:
             quantiles = (0.5,)
             time_to_elm_labels = [sig_win['time_to_elm'] for sig_win in global_sw_metadata]
             quantile_values = np.quantile(time_to_elm_labels, quantiles)
             self.time_to_elm_quantiles = {q: qval.item() for q, qval in zip(quantiles, quantile_values)}
-            self.save_hyperparameters({'time_to_elm_quantiles': self.time_to_elm_quantiles})
+            self.save_hyperparameters({
+                'time_to_elm_quantiles': self.time_to_elm_quantiles,
+            })
             self.zprint(f"    Time-to-ELM quantiles for binary labels:")
             for q, qval in self.time_to_elm_quantiles.items():
                 self.zprint(f"      Quantile {q:.2f}: {qval:.1f} ms")
+            self.barrier()
+            rank0_values = self.broadcast(quantile_values)
+            assert np.array_equal(rank0_values, quantile_values)
         assert self.time_to_elm_quantiles
 
         # restrict data according to quantiles
@@ -782,14 +801,20 @@ class Data(_Base_Class, LightningDataModule):
         assert len(global_sw_metadata) % self.trainer.world_size == 0
         n_signal_windows = len(global_sw_metadata)
         self.zprint(f"    Global signal windows: {n_signal_windows:,d}")
-        self.zprint(f"    Global steps per epoch: {n_signal_windows/self.batch_size:,.3f}")
+        self.zprint(f"    Batches per epoch: {n_signal_windows/self.batch_size:,.1f}")
 
         # split signal windows by rank
         rankwise_sw_split = np.array_split(global_sw_metadata, self.trainer.world_size)
+        self.barrier()
+        for ir in range(self.trainer.world_size):
+            rank0_values = self.broadcast(rankwise_sw_split[ir][:5])
+            for i, d in enumerate(rank0_values):
+                assert d['elm_index'] == rankwise_sw_split[ir][i]['elm_index']
+        self.zprint("    Consistent data split across ranks")
         sw_for_rank = list(rankwise_sw_split[self.trainer.global_rank])
         elms_for_rank = np.unique(np.array([item['elm_index'] for item in sw_for_rank],dtype=int))
         shots_for_rank = np.unique(np.array([item['shot'] for item in sw_for_rank],dtype=int))
-        self.rprint(f"    Shots/ELMs/SigWin: {len(shots_for_rank):,d}/{len(elms_for_rank):,d}/{len(sw_for_rank):,d}")
+        self.rprint(f"    Shots {len(shots_for_rank):,d}, ELMs {len(elms_for_rank):,d}, Signal Windows {len(sw_for_rank):,d}")
 
         # get rank-wise ELM signals
         signals_for_rank = {}
@@ -813,7 +838,6 @@ class Data(_Base_Class, LightningDataModule):
                 quantile_max=self.time_to_elm_quantile_max,
                 contrastive_learning=self.contrastive_learning,
             )
-            self.rprint(f"    Dataset size: {len(self.elm_datasets[st]):,d}")
         self.barrier()
         
         if st in ['test', 'predict']:
@@ -1423,7 +1447,7 @@ def main(
         batch_size = 64,
         fraction_validation = 0.12,
         fraction_test = 0.0,
-        num_workers = 0,
+        num_workers = None,
         time_to_elm_quantile_min: float|Any = None,
         time_to_elm_quantile_max: float|Any = None,
         contrastive_learning: bool = True,
@@ -1438,11 +1462,11 @@ def main(
     # SLURM/MPI environment
     num_nodes = int(os.getenv('SLURM_NNODES', default=1))
     world_size = int(os.getenv("SLURM_NTASKS", default=1))
-    rank = int(os.getenv("SLURM_PROCID", default=0))
+    global_rank = int(os.getenv("SLURM_PROCID", default=0))
     local_rank = int(os.getenv("SLURM_LOCALID", default=0))
     node_rank = int(os.getenv("SLURM_NODEID", default=0))
 
-    is_global_zero = (rank == 0)
+    is_global_zero = (global_rank == 0)
 
     def zprint(text):
         if is_global_zero:
@@ -1452,10 +1476,7 @@ def main(
         if world_size==1:
             print(text)
         else:
-            print(f"Rank {rank}: {text}")
-
-    zprint(f"World size {world_size} on {num_nodes} node(s)")
-    rprint(f"Local rank {local_rank} on node {node_rank}")
+            print(f"Global rank {global_rank}: {text}")
 
     ### model
     lit_model = Model(
@@ -1471,6 +1492,12 @@ def main(
         is_global_zero=is_global_zero,
     )
     monitor_metric = lit_model.monitor_metric
+    lit_model.save_hyperparameters({
+        'gradient_clip_val': gradient_clip_val, 
+        'gradient_clip_algorithm': gradient_clip_algorithm, 
+        'precision': precision,
+    })
+
     ### callbacks
     metric_mode = 'min' if 'loss' in monitor_metric else 'max'
     callbacks = [
@@ -1521,6 +1548,9 @@ def main(
         )
         loggers.append(wandb_logger)
 
+    zprint(f"World size {world_size} on {num_nodes} node(s)")
+    rprint(f"Local rank {local_rank} on node {node_rank}")
+
     zprint("Model Summary:")
     zprint(ModelSummary(lit_model, max_depth=-1))
 
@@ -1548,16 +1578,11 @@ def main(
         num_sanity_val_steps=0,
         reload_dataloaders_every_n_epochs=10,
     )
-    lit_model.save_hyperparameters({
-        'gradient_clip_val': gradient_clip_val, 
-        'gradient_clip_algorithm': gradient_clip_algorithm, 
-        'precision': precision,
-    })
 
     assert trainer.node_rank == node_rank
     assert trainer.world_size == world_size
     assert trainer.local_rank == local_rank
-    assert trainer.global_rank == rank
+    assert trainer.global_rank == global_rank
     assert trainer.is_global_zero == is_global_zero
 
     ### data
