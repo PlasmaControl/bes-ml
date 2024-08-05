@@ -66,7 +66,7 @@ class Model(LightningModule, _Base_Class):
     # lr_layerwise_decrement: float = 1.
     weight_decay: float = 1e-6
     leaky_relu_slope: float = 2e-2
-    monitor_metric: str = 'elm_classifier/f1_score/val'
+    monitor_metric: str = None
     use_optimizer: str = 'SGD'
     # feature_batchnorm: bool = True
     # task_batchnorm: bool = False
@@ -104,6 +104,8 @@ class Model(LightningModule, _Base_Class):
                 'mean_stat': torch.mean,
                 'std_stat': torch.std,
             }
+            if self.monitor_metric is None:
+                self.monitor_metric = f'{task_name}/f1_score/val'
 
         # sub-model: Confinement mode multi-class classifier
         if self.conf_classifier:
@@ -118,6 +120,8 @@ class Model(LightningModule, _Base_Class):
                 'mean_stat': torch.mean,
                 'std_stat': torch.std,
             }
+            if self.monitor_metric is None:
+                self.monitor_metric = f'{task_name}/f1_score/val'
 
         self.task_names = list(self.task_models.keys())
 
@@ -261,20 +265,20 @@ class Model(LightningModule, _Base_Class):
         ]
         return (return_optim_list, return_lr_scheduler_list)
 
-    def training_step(self, batch, batch_idx, dataloader_idx=0) -> torch.Tensor:
+    def training_step(self, batch, batch_idx, dataloader_idx=None) -> torch.Tensor:
         return self.update_step(
             batch, 
             batch_idx, 
             stage='train',
-            dataloader_idx=None if isinstance(batch, dict) else dataloader_idx,
+            dataloader_idx=dataloader_idx,
         )
 
-    def validation_step(self, batch, batch_idx, dataloader_idx=0) -> None:
+    def validation_step(self, batch, batch_idx, dataloader_idx=None) -> None:
         self.update_step(
             batch, 
             batch_idx, 
             stage='val',
-            dataloader_idx=None if isinstance(batch, dict) else dataloader_idx,
+            dataloader_idx=dataloader_idx,
         )
 
     def test_step(self, batch, batch_idx, dataloader_idx=0) -> None:
@@ -293,16 +297,12 @@ class Model(LightningModule, _Base_Class):
             stage: str = '', 
     ) -> torch.Tensor:
         sum_loss = torch.Tensor([0.0])
-        # sum_score = torch.Tensor([0.0])
         model_outputs = self(batch)
         for task in model_outputs:
             task_outputs = model_outputs[task]
             metrics = self.task_metrics[task]
-            if task == 'elm_classifier' and (dataloader_idx is None or dataloader_idx==0):
-                if isinstance(batch, dict):
-                    labels = batch[task][1][0.5]
-                else:
-                    labels = batch[1][0.5]
+            if task == 'elm_classifier' and dataloader_idx in [None, 0]:
+                labels = batch[task][1][0.5] if isinstance(batch, dict) else batch[1][0.5]
                 for metric_name, metric_function in metrics.items():
                     if 'loss' in metric_name:
                         metric_value = metric_function(
@@ -318,16 +318,11 @@ class Model(LightningModule, _Base_Class):
                         )
                         if self.current_epoch<10:
                             metric_value /= 10
-                        # if metric_name=='f1_score':
-                        #     sum_score = sum_score + metric_value if sum_score else metric_value
                     elif 'stat' in metric_name:
                         metric_value = metric_function(task_outputs)
                     self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
-            elif task == 'conf_classifier' and (dataloader_idx is None or dataloader_idx==1):
-                if isinstance(batch, dict):
-                    labels = batch[task][1]
-                else:
-                    labels = batch[1]
+            elif task == 'conf_classifier' and dataloader_idx in [None, 1]:
+                labels = batch[task][1] if isinstance(batch, dict) else batch[1]
                 for metric_name, metric_function in metrics.items():
                     if 'loss' in metric_name:
                         metric_value = metric_function(
@@ -347,13 +342,9 @@ class Model(LightningModule, _Base_Class):
                         )
                         if self.current_epoch<10:
                             metric_value /= 10
-                        # if metric_name=='f1_score':
-                            # sum_score = sum_score + metric_value if sum_score else metric_value
                     elif 'stat' in metric_name:
                         metric_value = metric_function(task_outputs)
                     self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
-        # self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True, add_dataloader_idx=False)
-        # self.log(f"sum_score/{stage}", sum_score, sync_dist=True, add_dataloader_idx=False)
         return sum_loss
 
     def forward(
@@ -363,8 +354,10 @@ class Model(LightningModule, _Base_Class):
         results = {}
         for task in self.task_models:
             if isinstance(batch, dict):
+                # dict batches for training
                 results[task] = self.task_models[task](self.feature_model(batch[task][0]))
             else:
+                # list batches for val/test/predict
                 results[task] = self.task_models[task](self.feature_model(batch[0]))
         return results
 
@@ -385,12 +378,13 @@ class Model(LightningModule, _Base_Class):
         global_time = time.time() - self.t_fit_start
         epoch_steps = self.global_step-self.s_train_epoch_start
         if self.is_global_zero and self.global_step > 0:
-            logged_metrics = self.trainer.logged_metrics
             line =  f"Ep {self.current_epoch:03d}  "
-            line += f"train/val score {logged_metrics['elm_classifier/f1_score/train']:.4f}/"
-            line += f"{logged_metrics[self.monitor_metric]:.4f}  "
             line += f"ep/gl steps {epoch_steps:,d}/{self.global_step:,d}  "
-            line += f"ep/gl time (min): {epoch_time/60:.2f}/{global_time/60:.2f}  " 
+            line += f"ep/gl minutes: {epoch_time/60:.2f}/{global_time/60:.2f}  " 
+            for task in self.task_models:
+                train_score = self.trainer.logged_metrics[f'{task}/f1_score/train']
+                val_score = self.trainer.logged_metrics[f'{task}/f1_score/val']
+                line += f"{task} tr/val score {train_score:.4f}/{val_score:.4f}  "
             print(line)
 
     def on_before_optimizer_step(self, optimizer):
@@ -433,6 +427,7 @@ class Data(_Base_Class, LightningDataModule):
     contrastive_learning: bool = False
     min_pre_elm_time: float|Any = None
     epochs_per_batch_size_reduction: int = None
+    max_pow2_batch_size_reduction: int = 2
     fir_taps: int = 501  # Number of taps in the filter
     fir_bp_low: float|Any = None  # bandpass filter cut-on freq in kHz
     fir_bp_high: float|Any = None  # bandpass filter cut-off freq in kHz
@@ -531,7 +526,7 @@ class Data(_Base_Class, LightningDataModule):
         t_tmp = time.time()
         self.zprint(f"**** Setup stage: {stage.upper()}")
 
-        self._modified_batch_size_per_rank: int|Any = None
+        # self._modified_batch_size_per_rank: int|Any = None
         if self.seed is None:
             self.seed = np.random.default_rng().integers(0, 2**32-1)
         self.seed = self.broadcast(self.seed)
@@ -699,7 +694,8 @@ class Data(_Base_Class, LightningDataModule):
                 assert (signals.shape[1] == 8) and (signals.shape[2] == 8)
                 while True:
                     i_window_start = i_window_stop - self.signal_window_size
-                    if i_window_start < i_start: break
+                    if i_window_start < i_start:
+                        break  # break while loop
                     if self.outlier_value:  # raw signal outlier filter
                         signal_window = signals[i_window_start:i_window_stop, ...]
                         assert signal_window.shape[0] == self.signal_window_size
@@ -752,9 +748,9 @@ class Data(_Base_Class, LightningDataModule):
         self.zprint(f"    Global raw signals:  mean {mean:.3f}  stdev {stdev:.3f}  exkurt {exkurt:.3f}  min/max {signal_min:.3f}/{signal_max:.3f}")
         self.barrier()
         if self.is_global_zero and st == 'train' and not self.elm_raw_signal_mean:
+            self.zprint(f"    Using {st.upper()} for standardizing mean and stdev")
             self.elm_raw_signal_mean = mean.item()
             self.elm_raw_signal_stdev = stdev.item()
-            # self.time_to_elm_quantiles = {q: qval.item() for q, qval in zip(quantiles, quantile_values)}
             self.save_hyperparameters({
                 'raw_signal_mean': self.elm_raw_signal_mean,
                 'raw_signal_stdev': self.elm_raw_signal_stdev,
@@ -762,6 +758,7 @@ class Data(_Base_Class, LightningDataModule):
         self.barrier()
         self.elm_raw_signal_mean = self.broadcast(self.elm_raw_signal_mean)
         self.elm_raw_signal_stdev = self.broadcast(self.elm_raw_signal_stdev)
+        self.rprint(f"  Stage {st.upper()}: Standarizing signals with mean {self.elm_raw_signal_mean:.3f} and std {self.elm_raw_signal_stdev:.3f}")
 
         # time-to-ELM quantiles
         if st == 'train' and not self.time_to_elm_quantiles:
@@ -854,17 +851,17 @@ class Data(_Base_Class, LightningDataModule):
         global_class_duration: list[int] = [0] * self.num_classes
         global_class_to_events: list[int] = [0] * self.num_classes
         r_avg_exclusions = z_avg_exclusions = delz_avg_exclusions = 0
+        missing_inboard = bad_inboard = 0
         with h5py.File(self.confinement_data_file) as root:
             for shot in root:
                 if shot in self.bad_shots:
-                    # self.zprint(f"    Skipping bad shot: {shot}")
                     continue
                 inboard_order = root[shot].attrs.get("inboard_column_channel_order", None)
                 if inboard_order is None or len(inboard_order)==0:
-                    # self.zprint(f"    Skipping shot {shot} due to missing inboard order")
+                    missing_inboard += 1
                     continue
                 if not np.array_equal(inboard_order, np.arange(8, dtype=int)*8+1):
-                    # self.zprint(f"    Skipping shot {shot} due to bad inboard order")
+                    bad_inboard += 1
                     continue
                 metadata = {
                     'r_avg': root[shot].attrs.get('r_avg'),
@@ -884,8 +881,8 @@ class Data(_Base_Class, LightningDataModule):
                         delz_avg_exclusions += 1
                     continue
                 shot_events: list[dict] = []
-                shot_labels: list[bool] = [False] * self.num_classes
-                shot_label_duration: list[int] = [0.] * self.num_classes
+                # shot_labels: list[bool] = [False] * self.num_classes
+                # shot_label_duration: list[int] = [0.] * self.num_classes
                 for event_key in root[shot]:
                     event = root[shot][event_key]
                     if 'labels' not in event:
@@ -903,8 +900,8 @@ class Data(_Base_Class, LightningDataModule):
                         'label': event_label,
                         'duration': event_duration,
                     })
-                    shot_labels[event_label] = True
-                    shot_label_duration[event_label] += event_duration
+                    # shot_labels[event_label] = True
+                    # shot_label_duration[event_label] += event_duration
                     global_class_to_shots[event_label].add(int(shot))
                     global_class_duration[event_label] += event_duration
                     global_class_to_events[event_label] += 1
@@ -915,10 +912,11 @@ class Data(_Base_Class, LightningDataModule):
                     'metadata': metadata,
                 }
         # BES location exclusions
-        if r_avg_exclusions or z_avg_exclusions or delz_avg_exclusions:
-            self.zprint(f"    Number of r_avg exclusions: {r_avg_exclusions}")
-            self.zprint(f"    Number of z_avg exclusions: {z_avg_exclusions}")
-            self.zprint(f"    Number of delz_avg exclusions: {delz_avg_exclusions}")
+        self.zprint(f"    missing inboard shot exclusions: {missing_inboard}")
+        self.zprint(f"    bad inboard shot exclusions: {bad_inboard}")
+        self.zprint(f"    r_avg shot exclusions: {r_avg_exclusions}")
+        self.zprint(f"    z_avg shot exclusions: {z_avg_exclusions}")
+        self.zprint(f"    delz_avg shot exclusions: {delz_avg_exclusions}")
         # data read
         self.zprint("  Data file summary")
         self.zprint(f"    Shots: {len(global_shot_data)}")
@@ -1049,7 +1047,7 @@ class Data(_Base_Class, LightningDataModule):
             for i, event in enumerate(events):
                 shot = event['shot']
                 event = event['event']
-                if i % (len(events)//10) == 0:
+                if len(events) >= 10 and i % (len(events)//10) == 0:
                     self.zprint(f"    Reading event {i:04d}/{len(events):04d}")
                 event_group = root[str(shot)][str(event)]
                 # Retrieve signals and reshape according to inboard_order
@@ -1119,7 +1117,7 @@ class Data(_Base_Class, LightningDataModule):
             mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
             stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
             exkurt = np.sum(cummulative_hist * ((bin_center - mean)/stdev) ** 4) / np.sum(cummulative_hist) - 3
-            self.rprint(f"    Stats: mean {mean:.3f} stdev {stdev:.3f} exkurt {exkurt:.3f} min/max {signal_min:.3f}/{signal_max:.3f}")
+            self.zprint(f"    Stats: mean {mean:.3f} stdev {stdev:.3f} exkurt {exkurt:.3f} min/max {signal_min:.3f}/{signal_max:.3f}")
             return {
                 'count': sample_indices.size,
                 'min': signal_min,
@@ -1143,8 +1141,8 @@ class Data(_Base_Class, LightningDataModule):
         assert packaged_labels.size == packaged_valid_t0.size
 
         # standardize signals based on training data
-        if stage == 'train' and None in [self.confinement_raw_signal_mean, self.confinement_raw_signal_stdev]:
-            self.zprint(f"    Using {stage.upper()} for normalizing mean and stdev")
+        if self.is_global_zero and stage == 'train' and not self.confinement_raw_signal_mean:
+            self.zprint(f"    Using {stage.upper()} for standarizing mean and stdev")
             self.confinement_raw_signal_mean = stats['mean']
             self.confinement_raw_signal_stdev = stats['stdev']
             self.save_hyperparameters({
@@ -1154,7 +1152,6 @@ class Data(_Base_Class, LightningDataModule):
         self.barrier()
         self.confinement_raw_signal_mean = self.broadcast(self.confinement_raw_signal_mean)
         self.confinement_raw_signal_stdev = self.broadcast(self.confinement_raw_signal_stdev)
-
         self.rprint(f"  Stage {stage.upper()}: Standarizing signals with mean {self.confinement_raw_signal_mean:.3f} and std {self.confinement_raw_signal_stdev:.3f}")
         packaged_signals = (packaged_signals - self.confinement_raw_signal_mean) / self.confinement_raw_signal_stdev
 
@@ -1258,21 +1255,20 @@ class Data(_Base_Class, LightningDataModule):
             if stage == 'train'
             else torch.utils.data.SequentialSampler(data_source=self.elm_datasets[stage])
         )
-        # if self.num_workers is None:
-        #     self.num_workers = 2 if self.trainer.world_size==1 else 0
-        batch_size_reduction_factor = (
-            min(2, self.trainer.current_epoch//self.epochs_per_batch_size_reduction) 
-            if stage=='train' and self.epochs_per_batch_size_reduction
-            else 0
-        )
-        new_batch_size_per_rank = self.batch_size_per_rank // (2**batch_size_reduction_factor)
-        if self._modified_batch_size_per_rank and self._modified_batch_size_per_rank != new_batch_size_per_rank:
-            self.zprint(f"New global batchsize: {new_batch_size_per_rank*self.trainer.world_size}")
-        self._modified_batch_size_per_rank = new_batch_size_per_rank
+        if self.epochs_per_batch_size_reduction and stage == 'train':
+            batch_size_reduction_pow2_factor = min(
+                self.max_pow2_batch_size_reduction, 
+                self.trainer.current_epoch//self.epochs_per_batch_size_reduction,
+            ) 
+            batch_size_per_rank = self.batch_size_per_rank // (2**batch_size_reduction_pow2_factor)
+            if batch_size_per_rank != self.batch_size_per_rank:
+                self.zprint(f"Reduced global batch size: {batch_size_per_rank}")
+        else:
+            batch_size_per_rank = self.batch_size_per_rank
         return torch.utils.data.DataLoader(
             dataset=self.elm_datasets[stage],
             sampler=sampler,
-            batch_size=self._modified_batch_size_per_rank,  # batch size per rank
+            batch_size=batch_size_per_rank,  # batch size per rank
             num_workers=self.num_workers,
             prefetch_factor=2 if self.num_workers else None,
             pin_memory=True,
@@ -1431,7 +1427,7 @@ def main(
         weight_decay = 1e-4,
         lr_scheduler_patience = 20,
         lr_warmup_epochs: int = 5,
-        monitor_metric = 'elm_classifier/f1_score/val',
+        monitor_metric = None,
         use_optimizer = 'SGD',
         # loggers
         log_freq = 100,
@@ -1621,17 +1617,17 @@ def main(
 
 if __name__=='__main__':
     main(
-        elm_classifier=False,
+        elm_classifier=True,
         conf_classifier=True,
-        # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/labeled_elm_events.hdf5',
+        elm_data_file='/global/homes/d/drsmith/scratch-ml/data/labeled_elm_events.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
-        max_elms=200,
+        max_elms=100,
         batch_size=128,
         lr=1e-3,
-        max_epochs=1,
-        num_workers=0,
+        max_epochs=2,
+        num_workers=2,
         log_freq=50,
-        fraction_validation=0.2,
+        fraction_validation=0.25,
         fraction_test=0.0,
         time_to_elm_quantile_min=0.4,
         time_to_elm_quantile_max=0.6,
@@ -1639,6 +1635,6 @@ if __name__=='__main__':
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
         max_shots_per_class=6,
-        max_confinement_event_length=int(1e4),
+        max_confinement_event_length=int(20e3),
         # use_wandb=True,
     )
