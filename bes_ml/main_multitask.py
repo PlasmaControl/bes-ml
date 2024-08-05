@@ -453,14 +453,15 @@ class Data(_Base_Class, LightningDataModule):
         super(_Base_Class, self).__init__()
         self.save_hyperparameters()
 
+        if self.is_global_zero:
+            print_fields(self)
+
         self.trainer: Trainer|Any = None
         self.batch_size_per_rank: int = 0
         self.a_coeffs = self.b_coeffs = None
 
-        if self.num_workers is None:
-            self.num_workers = 8 if self.trainer.world_size>1 else 0
-
         self.tasks = []
+        self.state_items = []
 
         if self.elm_classifier:
             self.elm_data_file = Path(self.elm_data_file).absolute()
@@ -469,103 +470,242 @@ class Data(_Base_Class, LightningDataModule):
 
             self.global_shot_split: dict[str,np.ndarray] = {}
             self.global_elm_split: dict[str,Sequence] = {}
-            self.elm_datasets: dict[str,torch.utils.data.Dataset] = {}
             self.time_to_elm_quantiles: dict[float,float] = {}
             self.elm_raw_signal_mean: float|Any = None
             self.elm_raw_signal_stdev: float|Any = None
+            self.state_items.extend([
+                'global_shot_split',
+                'global_elm_split',
+                'elm_raw_signal_mean',
+                'elm_raw_signal_stdev',
+                'time_to_elm_quantiles',
+            ])
+            self.elm_datasets: dict[str,torch.utils.data.Dataset] = {}
 
         if self.conf_classifier:
             self.confinement_data_file = Path(self.confinement_data_file).absolute()
             assert self.confinement_data_file.exists()
             self.tasks.append('conf_classifier')
 
-            self.confinement_datasets: dict[str,torch.utils.data.Dataset] = {}
             self.global_confinement_shot_split: dict[str,Sequence] = {}
-            self.stage_to_events: dict = {}
             self.confinement_raw_signal_mean: float|Any = None
             self.confinement_raw_signal_stdev: float|Any = None
-            self.confinement_train_dataloader: torch.utils.data.DataLoader|Any = None
-            self.confinement_mask_lb: float|Any = None
-            self.confinement_mask_ub: float|Any = None
-            self.train_confinement_events: list = []
-            self.validation_confinement_events: list = []
-            self.test_confinement_events: list = []
-
-        if self.is_global_zero:
-            print_fields(self)
-
-        self.state_items = []
-        if self.elm_classifier:
-            self.state_items.extend([
-                'global_elm_split',
-                'global_shot_split',
-                'elm_raw_signal_mean',
-                'elm_raw_signal_stdev',
-                'time_to_elm_quantiles',
-            ])
-        if self.conf_classifier:
             self.state_items.extend([
                 'global_confinement_shot_split',
                 'confinement_raw_signal_mean',
                 'confinement_raw_signal_stdev',
-                'confinement_mask_lb',
-                'confinement_mask_ub',
             ])
+            self.confinement_datasets: dict[str,torch.utils.data.Dataset] = {}
+            self.stage_to_events: dict = {}
+            self.confinement_train_dataloader: torch.utils.data.DataLoader|Any = None
+            self.train_confinement_events: list = []
+            self.validation_confinement_events: list = []
+            self.test_confinement_events: list = []
 
         for item in self.state_items:
             assert hasattr(self, item)
 
-    def barrier(self) -> None:
-        if self.trainer.world_size > 1:
-            self.trainer.strategy.barrier()
-
-    def broadcast(self, obj):
-        if self.trainer.world_size == 0:
-            return obj
-        else:
-            obj = self.trainer.strategy.broadcast(obj)
-            return obj
-
     def prepare_data(self):
-        self.zprint(f"**** Prepare data")
+        # called for rank 0 only !!
+        self.zprint(f"**** Prepare data (rank 0 only)")
         if self.seed is None:
             self.seed = np.random.default_rng().integers(0, 2**32-1)
         self.rng = np.random.default_rng(self.seed)
-        # make global shot split and global ELM split
-        self.zprint("  Creating global ELM data split")
-        with h5py.File(self.elm_data_file, 'r') as root:
-            datafile_shots = set([int(shot_key) for shot_key in root['shots']])
-            self.zprint(f"    Shots in data file: {len(datafile_shots):,d}")
-            datafile_shots_from_elms = set([int(elm_group.attrs['shot']) for elm_group in root['elms'].values()])
-            assert len(datafile_shots ^ datafile_shots_from_elms) == 0
-            datafile_shots = list(datafile_shots)
-            datafile_elms = [int(elm_key) for elm_key in root['elms']]
-            self.zprint(f"    ELMs in data file: {len(datafile_elms):,d}")
-            # limit max ELMs
-            if self.max_elms and len(datafile_elms) > self.max_elms:
-                self.rng.shuffle(datafile_elms)
-                datafile_elms = datafile_elms[:self.max_elms]
-                datafile_shots = [int(root['elms'][f"{elm_index:06d}"].attrs['shot']) for elm_index in datafile_elms]
-                datafile_shots = list(set(datafile_shots))
-                self.zprint(f"    ELMs/shots for analysis: {len(datafile_elms):,d} / {len(datafile_shots):,d}")
-            # shuffle shots in dataset
-            self.zprint(f"    Shuffling global shots")
-            self.rng.shuffle(datafile_shots)
-            # global shot split
-            self.zprint("    Global shot split")
-            n_test_shots = int(self.fraction_test * len(datafile_shots))
-            n_validation_shots = int(self.fraction_validation * len(datafile_shots))
-            self.global_shot_split['test'], self.global_shot_split['validation'], self.global_shot_split['train'] = \
-                np.split(datafile_shots, [n_test_shots, n_test_shots+n_validation_shots])
-            for stage in ['train','validation','test']:
-                self.zprint(f"      {stage.upper()}: Global shots: {self.global_shot_split[stage].size} ({self.global_shot_split[stage].size/len(datafile_shots)*1e2:.1f}%)")
-            # global ELM split
-            for stage in ['train','validation','test']:
-                self.global_elm_split[stage] = [
-                    i_elm for i_elm in datafile_elms
-                    if root['elms'][f"{i_elm:06d}"].attrs['shot'] in self.global_shot_split[stage]
-                ]
-                self.zprint(f"      {stage.upper()}: Global ELM count {len(self.global_elm_split[stage]):,d} ({len(self.global_elm_split[stage])/len(datafile_elms)*1e2:.1f}%)")
+        if self.elm_classifier and not self.global_shot_split:
+            self._prepare_elm_data()
+        if self.conf_classifier and True:
+            self._prepare_confinement_data()
+
+    def _prepare_elm_data(self):
+            self.zprint("  Creating global ELM data split")
+            with h5py.File(self.elm_data_file, 'r') as root:
+                datafile_shots = set([int(shot_key) for shot_key in root['shots']])
+                self.zprint(f"    Shots in data file: {len(datafile_shots):,d}")
+                datafile_shots_from_elms = set([int(elm_group.attrs['shot']) for elm_group in root['elms'].values()])
+                assert len(datafile_shots ^ datafile_shots_from_elms) == 0
+                datafile_shots = list(datafile_shots)
+                datafile_elms = [int(elm_key) for elm_key in root['elms']]
+                self.zprint(f"    ELMs in data file: {len(datafile_elms):,d}")
+                # limit max ELMs
+                if self.max_elms and len(datafile_elms) > self.max_elms:
+                    self.rng.shuffle(datafile_elms)
+                    datafile_elms = datafile_elms[:self.max_elms]
+                    datafile_shots = [int(root['elms'][f"{elm_index:06d}"].attrs['shot']) for elm_index in datafile_elms]
+                    datafile_shots = list(set(datafile_shots))
+                    self.zprint(f"    ELMs/shots for analysis: {len(datafile_elms):,d} / {len(datafile_shots):,d}")
+                # shuffle shots in dataset
+                self.zprint(f"    Shuffling global shots")
+                self.rng.shuffle(datafile_shots)
+                # global shot split
+                self.zprint("    Global shot split")
+                n_test_shots = int(self.fraction_test * len(datafile_shots))
+                n_validation_shots = int(self.fraction_validation * len(datafile_shots))
+                self.global_shot_split['test'], self.global_shot_split['validation'], self.global_shot_split['train'] = \
+                    np.split(datafile_shots, [n_test_shots, n_test_shots+n_validation_shots])
+                for stage in ['train','validation','test']:
+                    self.zprint(f"      {stage.upper()}: Global shots: {self.global_shot_split[stage].size} ({self.global_shot_split[stage].size/len(datafile_shots)*1e2:.1f}%)")
+                # global ELM split
+                for stage in ['train','validation','test']:
+                    self.global_elm_split[stage] = [
+                        i_elm for i_elm in datafile_elms
+                        if root['elms'][f"{i_elm:06d}"].attrs['shot'] in self.global_shot_split[stage]
+                    ]
+                    self.zprint(f"      {stage.upper()}: Global ELM count {len(self.global_elm_split[stage]):,d} ({len(self.global_elm_split[stage])/len(datafile_elms)*1e2:.1f}%)")
+
+    def _prepare_confinement_data(self):
+            self.zprint("  Creating global confinement data split")
+            if self.bad_shots is None:
+                self.bad_shots = []  # Initialize to empty list if None
+            check_bounds = lambda value, bounds: bounds[0] <= value <= bounds[1] if bounds else True
+            global_shot_to_events: dict[int,list] = {}
+            global_class_to_shots: list[list] = [[] for _ in range(self.num_classes)]
+            global_class_duration: list[int] = [0] * self.num_classes
+            global_class_to_events: list[int] = [0] * self.num_classes
+            r_avg_exclusions = z_avg_exclusions = delz_avg_exclusions = 0
+            missing_inboard = bad_inboard = 0
+            with h5py.File(self.confinement_data_file) as root:
+                for shot in root:
+                    # shot exclusions
+                    if shot in self.bad_shots:
+                        continue
+                    inboard_order = root[shot].attrs.get("inboard_column_channel_order", None)
+                    if inboard_order is None or len(inboard_order)==0:
+                        missing_inboard += 1
+                        continue
+                    if not np.array_equal(inboard_order, np.arange(8, dtype=int)*8+1):
+                        bad_inboard += 1
+                        continue
+                    metadata = {
+                        'r_avg': root[shot].attrs.get('r_avg'),
+                        'z_avg': root[shot].attrs.get('z_avg'),
+                        'delz_avg': root[shot].attrs.get('delz_avg')
+                    }
+                    if not all(
+                        check_bounds(metadata[key], self.metadata_bounds[key]) 
+                        for key in ['r_avg', 'z_avg', 'delz_avg'] 
+                        if key in self.metadata_bounds
+                    ):
+                        if metadata['r_avg'] is None or not check_bounds(metadata['r_avg'], self.metadata_bounds['r_avg']):
+                            r_avg_exclusions += 1
+                        if metadata['z_avg'] is None or not check_bounds(metadata['z_avg'], self.metadata_bounds['z_avg']):
+                            z_avg_exclusions += 1
+                        if metadata['delz_avg'] is None or not check_bounds(metadata['delz_avg'], self.metadata_bounds['delz_avg']):
+                            delz_avg_exclusions += 1
+                        continue
+                    # loop over events in shot
+                    events: list[dict] = []
+                    for event_key in root[shot]:
+                        event = root[shot][event_key]
+                        if 'labels' not in event:
+                            continue
+                        event_label: int = event['labels'][0].item()
+                        assert event_label < self.num_classes
+                        event_duration: int = event['signals'].shape[1]
+                        if event_duration < self.signal_window_size:
+                            continue
+                        if self.max_confinement_event_length and event_duration>self.max_confinement_event_length:
+                            event_duration = self.max_confinement_event_length
+                        events.append({
+                            'shot': int(shot),
+                            'event': int(event_key),
+                            'label': event_label,
+                            'duration': event_duration,
+                        })
+                        global_class_to_shots[event_label].append(int(shot))
+                        global_class_duration[event_label] += event_duration
+                        global_class_to_events[event_label] += 1
+                    if not events:
+                        continue
+                    global_shot_to_events[int(shot)] = events
+            global_class_to_shots = [list(set(item)) for item in global_class_to_shots]
+            # BES location exclusions
+            self.zprint(f"    missing inboard shot exclusions: {missing_inboard}")
+            self.zprint(f"    bad inboard shot exclusions: {bad_inboard}")
+            self.zprint(f"    r_avg shot exclusions: {r_avg_exclusions}")
+            self.zprint(f"    z_avg shot exclusions: {z_avg_exclusions}")
+            self.zprint(f"    delz_avg shot exclusions: {delz_avg_exclusions}")
+            # data read
+            self.zprint("  Data file summary (some shots maybe excluded)")
+            self.zprint(f"    Shots: {len(global_shot_to_events)}")
+            for i in range(self.num_classes):
+                self.zprint(f"      Class {i}:  shots {len(global_class_to_shots[i])}  events {global_class_to_events[i]}  duration {global_class_duration[i]:,d}")
+                assert global_class_duration[i]
+            # Forced shots
+            forced_test_shots_data = {}
+            forced_validation_shots_data = {}
+            if self.force_test_shots:
+                for shot_number in self.force_test_shots:
+                    forced_test_shots_data[shot_number] = global_shot_to_events.pop(shot_number)
+            if self.force_validation_shots:
+                for shot_number in self.force_validation_shots:
+                    forced_validation_shots_data[shot_number] = global_shot_to_events.pop(shot_number)
+            if self.max_shots_per_class is not None:
+                for i_class in range(len(global_class_to_shots)-1, -1, -1):
+                    class_shots = global_class_to_shots[i_class]
+                    if len(class_shots) > self.max_shots_per_class:
+                        # down-select shots for each class
+                        global_class_to_shots[i_class] = self.rng.choice(
+                            a=class_shots, 
+                            size=self.max_shots_per_class, 
+                            replace=False,
+                        ).tolist()
+                global_shot_to_events = {shot: global_shot_to_events[shot] for shots in global_class_to_shots for shot in shots}
+            shot_numbers = list(global_shot_to_events.keys())
+
+            # split global data into train, val, test
+            good_split = False
+            while good_split == False:
+                self.rng.shuffle(shot_numbers)
+                good_split = True
+                self.global_confinement_shot_split = {st:[] for st in ['train','validation','test']}
+                self.global_confinement_shot_split['train'], _test_val_shots = train_test_split(
+                    shot_numbers, 
+                    test_size=self.fraction_test + self.fraction_validation, 
+                    random_state=self.rng.integers(0, 2**32-1),
+                )
+                if self.fraction_test:
+                    self.global_confinement_shot_split['test'], self.global_confinement_shot_split['validation'] = train_test_split(
+                        _test_val_shots,
+                        test_size=self.fraction_validation/(self.fraction_test + self.fraction_validation),
+                        random_state=self.rng.integers(0, 2**32-1),
+                    )
+                else:
+                    self.global_confinement_shot_split['validation'] = _test_val_shots
+                    self.global_confinement_shot_split['test'] = []
+
+                if forced_test_shots_data or forced_validation_shots_data:
+                    global_shot_to_events.update(forced_validation_shots_data)
+                    global_shot_to_events.update(forced_test_shots_data)
+                    self.global_confinement_shot_split['validation'].extend(list(forced_validation_shots_data.keys()))
+                    self.global_confinement_shot_split['test'].extend(list(forced_test_shots_data.keys()))
+
+                # Assign events to datasets
+                self.zprint("  Final data for computation")
+                self.stage_to_events = {}
+                for st in self.global_confinement_shot_split:
+                    self.stage_to_events[st] = [event for shot in self.global_confinement_shot_split[st] for event in global_shot_to_events[shot]['events']]
+                    if len(self.global_confinement_shot_split[st]) == 0:
+                        self.zprint(f"    {st.capitalize()} data: {len(self.global_confinement_shot_split[st])} shots and {len(self.stage_to_events[st])} events")
+                        continue
+                    class_to_shots = [[] for _ in range(self.num_classes)]
+                    class_to_events = [0] * self.num_classes
+                    class_to_duration = [0] * self.num_classes
+                    for event in self.stage_to_events[st]:
+                        class_to_shots[event['label']].append(event['shot'])
+                        class_to_events[event['label']] += 1
+                        class_to_duration[event['label']] += event['duration']
+                    class_to_shots = [list(set(l)) for l in class_to_shots]
+                    if (0 in class_to_events) or good_split == False:
+                        good_split = False
+                        self.zprint("        Bad split, re-running")
+                        continue
+                    self.zprint(f"    {st.capitalize()} data: {len(self.global_confinement_shot_split[st])} shots and {len(self.stage_to_events[st])} events")
+                    for i in range(self.num_classes):
+                        self.zprint(f"      Class {i}: {len(class_to_shots[i])} shots, {class_to_events[i]} events, {class_to_duration[i]:,d} timepoints")
+                        assert len(class_to_shots[i]) > 0
+                # set predict dataset
+                self.global_confinement_shot_split['predict'] = self.global_confinement_shot_split['test']
+                self.stage_to_events['predict'] = self.stage_to_events['test']
 
     def setup(self, stage: str):
         t_tmp = time.time()
@@ -578,6 +718,9 @@ class Data(_Base_Class, LightningDataModule):
         self.batch_size_per_rank = self.batch_size // self.trainer.world_size
         self.zprint(f"  Global batch size: {self.batch_size}")
         self.zprint(f"  Rank batch size: {self.batch_size_per_rank}")
+
+        if self.num_workers is None:
+            self.num_workers = 8 if self.trainer.world_size>1 else 0
 
         if self.fir_bp_low is None and self.fir_bp_high is None:
             self.zprint("  Using raw BES signals with no FIR filter")
@@ -610,22 +753,18 @@ class Data(_Base_Class, LightningDataModule):
             self.global_elm_split = self.broadcast(self.global_elm_split)
             self.global_shot_split = self.broadcast(self.global_shot_split)
             for st in stages:
-                self._prepare_elm_data_for_stage(st)
+                self._setup_elm_data_for_stage(st)
             self.zprint(f"  ELM data setup time: {time.time()-t_tmp:0.1f} s")
             self.barrier()
 
 
         if self.conf_classifier:
             self.zprint("**** Confinement data preparation")
-            if 'train' not in self.global_confinement_shot_split:
-                self._get_confinement_events_and_split()
-            else:
-                self.zprint("  Reusing saved global confinement data split")
             for st in stages:
                 self._setup_confinement_data(st)
             self.zprint(f"  Confinement data setup time: {time.time()-t_tmp:.1f} s")
 
-    def _prepare_elm_data_for_stage(self, st: str):
+    def _setup_elm_data_for_stage(self, st: str):
         self.zprint(f"  ELM {st.upper()} data setup")
         if st in self.elm_datasets and isinstance(self.elm_datasets[st], torch.utils.data.Dataset):
             self.zprint(f"    Using saved dataset")
@@ -811,168 +950,6 @@ class Data(_Base_Class, LightningDataModule):
         
         if st in ['test', 'predict']:
             pass
-
-    def _get_confinement_events_and_split(self):
-        self.zprint("  Creating global confinement data split")
-        if self.bad_shots is None:
-            self.bad_shots = []  # Initialize to empty list if None
-        check_bounds = lambda value, bounds: bounds[0] <= value <= bounds[1] if bounds else True
-        global_shot_to_events: dict[int,list] = {}
-        global_class_to_shots: list[list] = [[] for _ in range(self.num_classes)]
-        global_class_duration: list[int] = [0] * self.num_classes
-        global_class_to_events: list[int] = [0] * self.num_classes
-        r_avg_exclusions = z_avg_exclusions = delz_avg_exclusions = 0
-        missing_inboard = bad_inboard = 0
-        with h5py.File(self.confinement_data_file) as root:
-            for shot in root:
-                # shot exclusions
-                if shot in self.bad_shots:
-                    continue
-                inboard_order = root[shot].attrs.get("inboard_column_channel_order", None)
-                if inboard_order is None or len(inboard_order)==0:
-                    missing_inboard += 1
-                    continue
-                if not np.array_equal(inboard_order, np.arange(8, dtype=int)*8+1):
-                    bad_inboard += 1
-                    continue
-                metadata = {
-                    'r_avg': root[shot].attrs.get('r_avg'),
-                    'z_avg': root[shot].attrs.get('z_avg'),
-                    'delz_avg': root[shot].attrs.get('delz_avg')
-                }
-                if not all(
-                    check_bounds(metadata[key], self.metadata_bounds[key]) 
-                    for key in ['r_avg', 'z_avg', 'delz_avg'] 
-                    if key in self.metadata_bounds
-                ):
-                    if metadata['r_avg'] is None or not check_bounds(metadata['r_avg'], self.metadata_bounds['r_avg']):
-                        r_avg_exclusions += 1
-                    if metadata['z_avg'] is None or not check_bounds(metadata['z_avg'], self.metadata_bounds['z_avg']):
-                        z_avg_exclusions += 1
-                    if metadata['delz_avg'] is None or not check_bounds(metadata['delz_avg'], self.metadata_bounds['delz_avg']):
-                        delz_avg_exclusions += 1
-                    continue
-                # loop over events in shot
-                events: list[dict] = []
-                for event_key in root[shot]:
-                    event = root[shot][event_key]
-                    if 'labels' not in event:
-                        continue
-                    event_label: int = event['labels'][0].item()
-                    assert event_label < self.num_classes
-                    event_duration: int = event['signals'].shape[1]
-                    if self.max_confinement_event_length and event_duration>self.max_confinement_event_length:
-                        event_duration = self.max_confinement_event_length
-                    if event_duration < self.signal_window_size:
-                        continue
-                    events.append({
-                        'shot': int(shot),
-                        'event': int(event_key),
-                        'label': event_label,
-                        'duration': event_duration,
-                    })
-                    global_class_to_shots[event_label].append(int(shot))
-                    global_class_duration[event_label] += event_duration
-                    global_class_to_events[event_label] += 1
-                if not events:
-                    continue
-                global_shot_to_events[int(shot)] = events
-                # {
-                #     'events': shot_events, 
-                #     'metadata': metadata,
-                # }
-        global_class_to_shots = [list(set(item)) for item in global_class_to_shots]
-        # BES location exclusions
-        self.zprint(f"    missing inboard shot exclusions: {missing_inboard}")
-        self.zprint(f"    bad inboard shot exclusions: {bad_inboard}")
-        self.zprint(f"    r_avg shot exclusions: {r_avg_exclusions}")
-        self.zprint(f"    z_avg shot exclusions: {z_avg_exclusions}")
-        self.zprint(f"    delz_avg shot exclusions: {delz_avg_exclusions}")
-        # data read
-        self.zprint("  Data file summary (some shots maybe excluded)")
-        self.zprint(f"    Shots: {len(global_shot_to_events)}")
-        for i in range(self.num_classes):
-            self.zprint(f"      Class {i}:  shots {len(global_class_to_shots[i])}  events {global_class_to_events[i]}  duration {global_class_duration[i]:,d}")
-            assert global_class_duration[i]
-        # Forced shots
-        forced_test_shots_data = {}
-        forced_validation_shots_data = {}
-        if self.force_test_shots:
-            for shot_number in self.force_test_shots:
-                forced_test_shots_data[shot_number] = global_shot_to_events.pop(shot_number)
-        if self.force_validation_shots:
-            for shot_number in self.force_validation_shots:
-                forced_validation_shots_data[shot_number] = global_shot_to_events.pop(shot_number)
-        if self.max_shots_per_class is not None:
-            for i_class in range(len(global_class_to_shots)-1, -1, -1):
-                class_shots = global_class_to_shots[i_class]
-                if len(class_shots) > self.max_shots_per_class:
-                    # down-select shots for each class
-                    global_class_to_shots[i_class] = self.rng.choice(
-                        a=class_shots, 
-                        size=self.max_shots_per_class, 
-                        replace=False,
-                    ).tolist()
-            global_shot_to_events = {shot: global_shot_to_events[shot] for shots in global_class_to_shots for shot in shots}
-        shot_numbers = list(global_shot_to_events.keys())
-        if self.test_only:
-            return
-
-        # split global data into train, val, test
-        good_split = False
-        while good_split == False:
-            self.rng.shuffle(shot_numbers)
-            good_split = True
-            self.global_confinement_shot_split = {st:[] for st in ['train','validation','test']}
-            self.global_confinement_shot_split['train'], _test_val_shots = train_test_split(
-                shot_numbers, 
-                test_size=self.fraction_test + self.fraction_validation, 
-                random_state=self.rng.integers(0, 2**32-1),
-            )
-            if self.fraction_test:
-                self.global_confinement_shot_split['test'], self.global_confinement_shot_split['validation'] = train_test_split(
-                    _test_val_shots,
-                    test_size=self.fraction_validation/(self.fraction_test + self.fraction_validation),
-                    random_state=self.rng.integers(0, 2**32-1),
-                )
-            else:
-                self.global_confinement_shot_split['validation'] = _test_val_shots
-                self.global_confinement_shot_split['test'] = []
-
-            if forced_test_shots_data or forced_validation_shots_data:
-                global_shot_to_events.update(forced_validation_shots_data)
-                global_shot_to_events.update(forced_test_shots_data)
-                self.global_confinement_shot_split['validation'].extend(list(forced_validation_shots_data.keys()))
-                self.global_confinement_shot_split['test'].extend(list(forced_test_shots_data.keys()))
-
-            # Assign events to datasets
-            self.zprint("  Final data for computation")
-            self.stage_to_events = {}
-            for st in self.global_confinement_shot_split:
-                self.stage_to_events[st] = [event for shot in self.global_confinement_shot_split[st] for event in global_shot_to_events[shot]['events']]
-                if len(self.global_confinement_shot_split[st]) == 0:
-                    self.zprint(f"    {st.capitalize()} data: {len(self.global_confinement_shot_split[st])} shots and {len(self.stage_to_events[st])} events")
-                    continue
-                class_to_shots = [[] for _ in range(self.num_classes)]
-                class_to_events = [0] * self.num_classes
-                class_to_duration = [0] * self.num_classes
-                for event in self.stage_to_events[st]:
-                    class_to_shots[event['label']].append(event['shot'])
-                    class_to_events[event['label']] += 1
-                    class_to_duration[event['label']] += event['duration']
-                class_to_shots = [list(set(l)) for l in class_to_shots]
-                if (0 in class_to_events) or good_split == False:
-                    good_split = False
-                    self.zprint("        Bad split, re-running")
-                    continue
-                self.zprint(f"    {st.capitalize()} data: {len(self.global_confinement_shot_split[st])} shots and {len(self.stage_to_events[st])} events")
-                for i in range(self.num_classes):
-                    self.zprint(f"      Class {i}: {len(class_to_shots[i])} shots, {class_to_events[i]} events, {class_to_duration[i]:,d} timepoints")
-                    assert len(class_to_shots[i]) > 0
-            # set predict dataset
-            self.global_confinement_shot_split['predict'] = self.global_confinement_shot_split['test']
-            self.stage_to_events['predict'] = self.stage_to_events['test']
-        return
 
     def _setup_confinement_data(self, stage: str):
         t_tmp = time.time()
@@ -1430,6 +1407,15 @@ class Data(_Base_Class, LightningDataModule):
             self.barrier()
         else:
             print(text)
+
+    def barrier(self):
+        if self.trainer.world_size > 0:
+            self.trainer.strategy.barrier()
+
+    def broadcast(self, obj):
+        if self.trainer.world_size > 0:
+            obj = self.trainer.strategy.broadcast(obj)
+        return obj
 
 
 @dataclasses.dataclass(eq=False)
