@@ -384,7 +384,7 @@ class Model(LightningModule, _Base_Class):
             for task in self.task_models:
                 train_score = self.trainer.logged_metrics[f'{task}/f1_score/train']
                 val_score = self.trainer.logged_metrics[f'{task}/f1_score/val']
-                line += f"{task} tr/val score {train_score:.4f}/{val_score:.4f}  "
+                line += f"{task} tr/val score {train_score:.3f}/{val_score:.3f}  "
             print(line)
 
     def on_before_optimizer_step(self, optimizer):
@@ -729,6 +729,8 @@ class Data(_Base_Class, LightningDataModule):
         self.batch_size_per_rank = self.batch_size // self.trainer.world_size
         self.zprint(f"  Global batch size: {self.batch_size}")
         self.zprint(f"  Rank batch size: {self.batch_size_per_rank}")
+        if self.outlier_value:
+            self.zprint(f"  Removing raw data outliers with max(abs(signal windows)) > {self.outlier_value:.3f} V")
 
         if self.num_workers is None:
             self.num_workers = 8 if self.trainer.world_size>1 else 0
@@ -736,7 +738,7 @@ class Data(_Base_Class, LightningDataModule):
         if self.fir_bp_low is None and self.fir_bp_high is None:
             self.zprint("  Using raw BES signals with no FIR filter")
         else:
-            self.zprint(f"  FIRfilter with f_low-f_high: {self.fir_bp_low} - {self.fir_bp_high} kHz")
+            self.zprint(f"  FIR filter with f_low-f_high: {self.fir_bp_low} - {self.fir_bp_high} kHz")
             if self.fir_bp_low and self.fir_bp_high:
                 pass_zero = 'bandpass'
                 cutoff = [self.fir_bp_low, self.fir_bp_high]
@@ -774,22 +776,20 @@ class Data(_Base_Class, LightningDataModule):
             self.zprint(f"  Confinement data setup time: {time.time()-t_tmp:.1f} s")
         self.barrier()
 
-    def _setup_elm_data_for_stage(self, st: str):
+    def _setup_elm_data_for_stage(self, stage: str):
         # ELM/shot splits from "prepare_data()"
         self.global_elm_split = self.broadcast(self.global_elm_split)
         self.global_shot_split = self.broadcast(self.global_shot_split)
-        self.zprint(f"  {st.upper()}")
-        if st in self.elm_datasets and isinstance(self.elm_datasets[st], torch.utils.data.Dataset):
+        self.zprint(f"  {stage.upper()}")
+        if stage in self.elm_datasets and isinstance(self.elm_datasets[stage], torch.utils.data.Dataset):
             self.zprint(f"    Using existing dataset")
             return
         if self.is_global_zero:
-            elm_indices = self.global_elm_split[st]
+            elm_indices = self.global_elm_split[stage]
             self.zprint(f"    ELM count: {len(elm_indices)}")
             stage_sw_metadata: list = []
             outliers = 0
             skipped_short_pre_elm_time = 0
-            if self.outlier_value:
-                self.zprint(f"    Removing outliers with max(abs(signal windows)) > {self.outlier_value:.3f} V")
             with h5py.File(self.elm_data_file, 'r') as h5_file:
                 elms: h5py.Group = h5_file['elms']
                 for i_elm, elm_index in enumerate(elm_indices):
@@ -834,7 +834,6 @@ class Data(_Base_Class, LightningDataModule):
             self.zprint(f"    Skipped ELMs for short pre-ELM time: {skipped_short_pre_elm_time}")
             self.zprint(f"    Skipped outliers: {outliers:,d}")
 
-        stage_sw_metadata = self.broadcast(stage_sw_metadata)
         self.zprint(f"    Signal window count (unprocessed): {len(stage_sw_metadata):,d}")
 
         # stats
@@ -875,8 +874,8 @@ class Data(_Base_Class, LightningDataModule):
             stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
             exkurt = np.sum(cummulative_hist * ((bin_center - mean)/stdev) ** 4) / np.sum(cummulative_hist) - 3
             self.zprint(f"    Signal stats (post-FIR, if used):  mean {mean:.3f}  stdev {stdev:.3f}  exkurt {exkurt:.3f}  min/max {signal_min:.3f}/{signal_max:.3f}")
-            if st == 'train' and not self.elm_raw_signal_mean:
-                self.zprint(f"    Using {st.upper()} for standardizing mean and stdev")
+            if stage == 'train' and not self.elm_raw_signal_mean:
+                self.zprint(f"    Using {stage.upper()} for standardizing mean and stdev")
                 self.elm_raw_signal_mean = mean.item()
                 self.elm_raw_signal_stdev = stdev.item()
                 self.save_hyperparameters({
@@ -889,7 +888,7 @@ class Data(_Base_Class, LightningDataModule):
 
         # time-to-ELM quantiles
         if self.is_global_zero:
-            if st == 'train' and not self.time_to_elm_quantiles:
+            if stage == 'train' and not self.time_to_elm_quantiles:
                 quantiles = [0.5]
                 time_to_elm_labels = [sig_win['time_to_elm'] for sig_win in stage_sw_metadata]
                 quantile_values = np.quantile(time_to_elm_labels, quantiles)
@@ -953,8 +952,8 @@ class Data(_Base_Class, LightningDataModule):
         self.rprint(f"    Signal memory size: {signal_memory_size/(1024**3):.2f} GB")
 
         # rank-wise datasets
-        if st in ['train', 'validation', 'test']:
-            self.elm_datasets[st] = ELM_TrainValTest_Dataset(
+        if stage in ['train', 'validation', 'test']:
+            self.elm_datasets[stage] = ELM_TrainValTest_Dataset(
                 signal_window_size=self.signal_window_size,
                 time_to_elm_quantiles=self.time_to_elm_quantiles,
                 sw_list=sw_for_rank,
@@ -963,7 +962,7 @@ class Data(_Base_Class, LightningDataModule):
                 quantile_max=self.time_to_elm_quantile_max,
                 contrastive_learning=self.contrastive_learning,
             )
-        elif st == 'predict':
+        elif stage == 'predict':
             pass
 
     def _setup_confinement_data(self, stage: str):
@@ -1028,11 +1027,14 @@ class Data(_Base_Class, LightningDataModule):
                 valid_t0[self.signal_window_size-1::self.signal_window_size//8] = 1
                 valid_t0_indices = np.arange(valid_t0.size, dtype=int)
                 valid_t0_indices = valid_t0_indices[valid_t0 == 1]
+                for i in valid_t0_indices:
+                    assert i - self.signal_window_size + 1 >= 0  # start slice test
+                    assert i+1 <= valid_t0.size  # end slice test
                 assert len(valid_t0_indices) == sw_count
                 # remove outliers in raw signals
                 if self.outlier_value:
                     for ii in valid_t0_indices:
-                        if np.max(np.abs(signals[ii:ii+self.signal_window_size,...])) > self.outlier_value:
+                        if np.max(np.abs(signals[ii-self.signal_window_size+1:ii+1, ...])) > self.outlier_value:
                             outlier_count += 1
                             valid_t0[ii] = 0
                 # FIR filter, if used
@@ -1050,10 +1052,10 @@ class Data(_Base_Class, LightningDataModule):
 
         self.rprint(f"    Outlier count: {outlier_count}")
         assert start_index == packaged_signals.shape[0]
-        print(packaged_signals.min(), packaged_signals.max())
         packaged_labels = np.concatenate([confinement_mode['labels'] for confinement_mode in rankwise_events_2], axis=0)
         packaged_valid_t0 = np.concatenate([confinement_mode['valid_t0'] for confinement_mode in rankwise_events_2], axis=0)
         assert packaged_labels.size == packaged_valid_t0.size
+
         packaged_window_start = []
         index = 0
         for event in rankwise_events_2:
@@ -1071,7 +1073,11 @@ class Data(_Base_Class, LightningDataModule):
         packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
         packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
         assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices]))
+        for i in packaged_valid_t0_indices:
+            assert i - self.signal_window_size + 1 >= 0  # start slice
+            assert i+1 <= packaged_valid_t0.size  # end slice
 
+        # stats
         if self.is_global_zero:
             signal_min = np.inf
             signal_max = -np.inf
@@ -1080,7 +1086,7 @@ class Data(_Base_Class, LightningDataModule):
             stat_interval = max(1, packaged_valid_t0_indices.size//int(10e3))
             for i in packaged_valid_t0_indices[::stat_interval]:
                 # signals are post-FIR, if used
-                signal_window = packaged_signals[i:i+self.signal_window_size, ...]
+                signal_window = packaged_signals[i-self.signal_window_size+1:i+1, ...]
                 signal_min = min(signal_min, signal_window.min())
                 signal_max = max(signal_max, signal_window.max())
                 hist, bin_edges = np.histogram(
@@ -1105,6 +1111,10 @@ class Data(_Base_Class, LightningDataModule):
 
         self.confinement_raw_signal_mean = self.broadcast(self.confinement_raw_signal_mean)
         self.confinement_raw_signal_stdev = self.broadcast(self.confinement_raw_signal_stdev)
+        if self.elm_raw_signal_mean and self.elm_raw_signal_stdev:
+            self.zprint(f"    Using ELM data mean/stdev")
+            self.confinement_raw_signal_mean = self.elm_raw_signal_mean
+            self.confinement_raw_signal_stdev = self.elm_raw_signal_stdev
         self.zprint(f"    Standarizing signals with mean {self.confinement_raw_signal_mean:.3f} and std {self.confinement_raw_signal_stdev:.3f}")
         packaged_signals = (packaged_signals - self.confinement_raw_signal_mean) / self.confinement_raw_signal_stdev
 
@@ -1113,16 +1123,19 @@ class Data(_Base_Class, LightningDataModule):
         self.zprint(f"    Batches per epoch: {len(packaged_valid_t0_indices)/self.batch_size:.1f}")
         self.zprint(f"    {stage.upper()} data time: {time.time()-t_tmp:.1f} s")
 
-        self.confinement_datasets[stage] = Confinement_TrainValTest_Dataset(
-                signals=packaged_signals,
-                n_rows=self.n_rows,
-                n_cols=self.n_cols,
-                labels=packaged_labels,
-                sample_indices=packaged_valid_t0_indices,
-                window_start_indices=packaged_window_start,
-                signal_window_size=self.signal_window_size,
-                confinement_mode_keys=packaged_shot_event_key,
-            )
+        if stage in ['train', 'validation', 'test']:
+            self.confinement_datasets[stage] = Confinement_TrainValTest_Dataset(
+                    signals=packaged_signals,
+                    n_rows=self.n_rows,
+                    n_cols=self.n_cols,
+                    labels=packaged_labels,
+                    sample_indices=packaged_valid_t0_indices,
+                    window_start_indices=packaged_window_start,
+                    signal_window_size=self.signal_window_size,
+                    shot_event_keys=packaged_shot_event_key,
+                )
+        elif stage == 'predict':
+            pass
 
         # if stage == 'train':
         #     dataset = Confinement_TrainValTest_Dataset(
@@ -1175,7 +1188,7 @@ class Data(_Base_Class, LightningDataModule):
         if self.elm_classifier:
             result['elm_classifier'] = self._elm_train_val_test_dataloaders('train')
         if self.conf_classifier:
-            result['conf_classifier'] = self.confinement_train_dataloader
+            result['conf_classifier'] = self._conf_train_val_test_dataloaders('train')
         return result
 
     def val_dataloader(self) -> dict[str, torch.utils.data.DataLoader]:
@@ -1183,51 +1196,57 @@ class Data(_Base_Class, LightningDataModule):
         if self.elm_classifier:
             result['elm_classifier'] = self._elm_train_val_test_dataloaders('validation')
         if self.conf_classifier:
-            sampler = (
-                torch.utils.data.DistributedSampler(
-                    dataset=self.confinement_datasets['validation'],
-                    shuffle=False,
-                    drop_last=True,
-                )
-                if self.trainer.world_size > 1
-                else torch.utils.data.SequentialSampler(self.confinement_datasets['validation'])
-            )
-            confinement_val_dl = torch.utils.data.DataLoader(
-                dataset=self.confinement_datasets['validation'],
-                sampler=sampler,
-                batch_size=self.batch_size,
-                num_workers=self.num_workers,
-                # pin_memory=True,
-                persistent_workers=(self.num_workers > 0),
-            )
-            result['conf_classifier'] = confinement_val_dl
+            result['conf_classifier'] = self._conf_train_val_test_dataloaders('validation')
         return result
 
     def test_dataloader(self) -> dict[str, torch.utils.data.DataLoader]:
-        confinement_test_dl = torch.utils.data.DataLoader(
-            dataset=self.confinement_datasets['test'],
-            sampler=torch.utils.data.DistributedSampler(
-                self.confinement_datasets['test'],
-                shuffle=False,
-                drop_last=True,
-            ),
-            batch_size=self.batch_size,
-            num_workers=self.num_workers,
-            # pin_memory=True,
-            persistent_workers=(self.num_workers > 0),
-        ) 
-        return {
-            'elm_classifier': self._elm_train_val_test_dataloaders('test'),
-            'conf_classifier': confinement_test_dl,
-        }
+        result = {}
+        if self.elm_classifier:
+            result['elm_classifier'] = self._elm_train_val_test_dataloaders('test')
+        if self.conf_classifier:
+            result['conf_classifier'] = self._conf_train_val_test_dataloaders('test')
+        return result
 
     def predict_dataloader(self) -> None:
         pass
 
+    # if stage == 'train':
+    #     self.confinement_train_dataloader = torch.utils.data.DataLoader(
+    #         dataset, 
+    #         batch_size=self.batch_size,
+    #         shuffle=True,             
+    #         num_workers=self.num_workers,
+    #         persistent_workers=(self.num_workers > 0),
+    #         drop_last=True,
+    #     )
+    def _conf_train_val_test_dataloaders(self, stage: str) -> torch.utils.data.DataLoader:
+        sampler = (
+            torch.utils.data.RandomSampler(self.confinement_datasets[stage]) if stage == 'train'
+            else torch.utils.data.SequentialSampler(self.confinement_datasets[stage])
+        )
+        if stage == 'train' and self.epochs_per_batch_size_reduction:
+            batch_size_reduction_pow2_factor = min(
+                self.max_pow2_batch_size_reduction, 
+                self.trainer.current_epoch//self.epochs_per_batch_size_reduction,
+            ) 
+            batch_size_per_rank = self.batch_size_per_rank // (2**batch_size_reduction_pow2_factor)
+            if batch_size_per_rank != self.batch_size_per_rank:
+                self.zprint(f"Reduced global batch size: {batch_size_per_rank}")
+        else:
+            batch_size_per_rank = self.batch_size_per_rank
+        return torch.utils.data.DataLoader(
+            dataset=self.confinement_datasets[stage],
+            sampler=sampler,
+            batch_size=batch_size_per_rank,  # batch size per rank
+            num_workers=self.num_workers,
+            prefetch_factor=2 if self.num_workers else None,
+            pin_memory=True,
+            drop_last=True if stage in ['train','validation'] else False,
+        )
+
     def _elm_train_val_test_dataloaders(self, stage: str) -> torch.utils.data.DataLoader:
         sampler = (
-            torch.utils.data.RandomSampler(data_source=self.elm_datasets[stage])
-            if stage == 'train'
+            torch.utils.data.RandomSampler(data_source=self.elm_datasets[stage]) if stage == 'train'
             else torch.utils.data.SequentialSampler(data_source=self.elm_datasets[stage])
         )
         if self.epochs_per_batch_size_reduction and stage == 'train':
@@ -1247,7 +1266,7 @@ class Data(_Base_Class, LightningDataModule):
             num_workers=self.num_workers,
             prefetch_factor=2 if self.num_workers else None,
             pin_memory=True,
-            drop_last=True,
+            drop_last=True if stage in ['train','validation'] else False,
         )
 
     def get_state_dict(self) -> dict:
@@ -1311,43 +1330,38 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
         return signal_window, quantile_binary_label, time_to_elm
 
 
+@dataclasses.dataclass(eq=False)
 class Confinement_TrainValTest_Dataset(torch.utils.data.Dataset):
+    signals: np.ndarray
+    n_rows: int
+    n_cols: int
+    labels: np.ndarray
+    sample_indices: np.ndarray
+    window_start_indices: np.ndarray
+    signal_window_size: int
+    shot_event_keys: np.ndarray
 
-    def __init__(
-            self,
-            signals: np.ndarray,
-            n_rows: int,
-            n_cols: int,
-            labels: np.ndarray,
-            sample_indices: np.ndarray,
-            window_start_indices: np.ndarray,
-            signal_window_size: int,
-            confinement_mode_keys: np.ndarray,
-    ) -> None:
-        # Create a contiguous copy of the array and then convert it to a PyTorch tensor
-        self.signals = torch.from_numpy(np.ascontiguousarray(signals)[np.newaxis, ...])
+    def __post_init__(self) -> None:
+        self.labels = torch.from_numpy(self.labels)
+        self.signals = torch.from_numpy(np.ascontiguousarray(self.signals)[np.newaxis, ...])
+        self.window_start_indices = torch.from_numpy(self.window_start_indices)
+        self.sample_indices = torch.from_numpy(self.sample_indices)
+
         assert (
             self.signals.ndim == 4 and
-            self.signals.size(0) == 1 and
-            self.signals.size(2) == n_rows and
-            self.signals.size(3) == n_cols
+            self.signals.shape[0] == 1 and
+            self.signals.shape[2] == self.n_rows and
+            self.signals.shape[3] == self.n_cols
         ), "Signals have incorrect shape"
-        self.labels = torch.from_numpy(labels)
-        self.n_rows = n_rows
-        self.n_cols = n_cols
-        self.signal_window_size = signal_window_size
-        self.window_start_indices = torch.from_numpy(window_start_indices)
-        self.sample_indices = torch.from_numpy(sample_indices)
-        self.confinement_mode_keys = confinement_mode_keys
+        assert self.signals.shape[1] == self.labels.shape[0]
         assert torch.max(self.sample_indices) < self.labels.shape[0]
 
-
         # Create a dictionary to map confinement_mode_keys to start and end indices
-        self.confinement_mode_id_to_indices = {}
-        for idx, key in enumerate(self.confinement_mode_keys):
-            start_idx = self.window_start_indices[idx]
-            end_idx = self.window_start_indices[idx + 1] if idx + 1 < len(self.window_start_indices) else self.signals.size(1)
-            self.confinement_mode_id_to_indices[key] = (start_idx, end_idx)
+        # self.shot_event_key_to_indices = {}
+        # for i_key, key in enumerate(self.shot_event_keys):
+        #     start_idx = self.window_start_indices[i_key]
+        #     end_idx = self.window_start_indices[i_key + 1] if i_key + 1 < len(self.window_start_indices) else self.signals.shape[1]
+        #     self.shot_event_key_to_indices[key] = (start_idx, end_idx)
 
     def __len__(self) -> int:
         return self.sample_indices.numel()
@@ -1362,10 +1376,10 @@ class Confinement_TrainValTest_Dataset(torch.utils.data.Dataset):
         # The label is typically the current index in real-time scenarios
         label = self.labels[i_t0: i_t0 + 1]
         # Look up the correct confinement_mode_key based on i_t0
-        confinement_mode_idx = (self.window_start_indices <= i_t0).nonzero().max()
-        confinement_mode_key = self.confinement_mode_keys[confinement_mode_idx]
+        i_key = (self.window_start_indices <= i_t0).nonzero().max()
+        shot_event_key = self.shot_event_keys[i_key]
         # Convert the key to an integer by removing non-numeric characters and converting to int
-        confinement_mode_id_int = int(confinement_mode_key.replace('/', ''))
+        confinement_mode_id_int = int(shot_event_key.replace('/', ''))
         # Convert to tensor
         confinement_mode_id_tensor = torch.tensor([confinement_mode_id_int], dtype=torch.int64)
         return signal_window, label, confinement_mode_id_tensor
@@ -1598,11 +1612,11 @@ if __name__=='__main__':
         conf_classifier=True,
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/labeled_elm_events.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
-        max_elms=200,
-        batch_size=128,
+        max_elms=500,
+        batch_size=64,
         lr=1e-3,
-        max_epochs=1,
-        num_workers=0,
+        max_epochs=2,
+        num_workers=2,
         log_freq=50,
         fraction_validation=0.25,
         fraction_test=0.0,
@@ -1611,7 +1625,7 @@ if __name__=='__main__':
         contrastive_learning=True,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
-        max_shots_per_class=6,
-        max_confinement_event_length=int(10e3),
+        max_shots_per_class=10,
+        max_confinement_event_length=int(20e3),
         # use_wandb=True,
     )
