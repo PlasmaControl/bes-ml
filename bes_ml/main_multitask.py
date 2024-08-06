@@ -496,220 +496,222 @@ class Data(_Base_Class, LightningDataModule):
                 'confinement_raw_signal_stdev',
             ])
             self.confinement_datasets: dict[str,torch.utils.data.Dataset] = {}
-            self.stage_to_events: dict = {}
-            self.confinement_train_dataloader: torch.utils.data.DataLoader|Any = None
-            self.train_confinement_events: list = []
-            self.validation_confinement_events: list = []
-            self.test_confinement_events: list = []
+            self.global_stage_to_events: dict = {}
+            # self.confinement_train_dataloader: torch.utils.data.DataLoader|Any = None
+            # self.train_confinement_events: list = []
+            # self.validation_confinement_events: list = []
+            # self.test_confinement_events: list = []
 
         for item in self.state_items:
             assert hasattr(self, item)
 
     def prepare_data(self):
-        # called for rank 0 only !!
+        # called for rank 0 only!
         self.zprint(f"**** Prepare data (rank 0 only)")
         if self.seed is None:
             self.seed = np.random.default_rng().integers(0, 2**32-1)
         self.rng = np.random.default_rng(self.seed)
-        if self.elm_classifier and not self.global_shot_split:
+        if self.elm_classifier and not self.global_shot_split and not self.global_elm_split:
             self._prepare_elm_data()
-        if self.conf_classifier and True:
+        if self.conf_classifier and not self.global_confinement_shot_split:
             self._prepare_confinement_data()
 
     def _prepare_elm_data(self):
-            self.zprint("  Creating global ELM data split")
-            with h5py.File(self.elm_data_file, 'r') as root:
-                datafile_shots = set([int(shot_key) for shot_key in root['shots']])
-                self.zprint(f"    Shots in data file: {len(datafile_shots):,d}")
-                datafile_shots_from_elms = set([int(elm_group.attrs['shot']) for elm_group in root['elms'].values()])
-                assert len(datafile_shots ^ datafile_shots_from_elms) == 0
-                datafile_shots = list(datafile_shots)
-                datafile_elms = [int(elm_key) for elm_key in root['elms']]
-                self.zprint(f"    ELMs in data file: {len(datafile_elms):,d}")
-                # limit max ELMs
-                if self.max_elms and len(datafile_elms) > self.max_elms:
-                    self.rng.shuffle(datafile_elms)
-                    datafile_elms = datafile_elms[:self.max_elms]
-                    datafile_shots = [int(root['elms'][f"{elm_index:06d}"].attrs['shot']) for elm_index in datafile_elms]
-                    datafile_shots = list(set(datafile_shots))
-                    self.zprint(f"    ELMs/shots for analysis: {len(datafile_elms):,d} / {len(datafile_shots):,d}")
-                # shuffle shots in dataset
-                self.zprint(f"    Shuffling global shots")
-                self.rng.shuffle(datafile_shots)
-                # global shot split
-                self.zprint("    Global shot split")
-                n_test_shots = int(self.fraction_test * len(datafile_shots))
-                n_validation_shots = int(self.fraction_validation * len(datafile_shots))
-                self.global_shot_split['test'], self.global_shot_split['validation'], self.global_shot_split['train'] = \
-                    np.split(datafile_shots, [n_test_shots, n_test_shots+n_validation_shots])
-                for stage in ['train','validation','test']:
-                    self.zprint(f"      {stage.upper()}: Global shots: {self.global_shot_split[stage].size} ({self.global_shot_split[stage].size/len(datafile_shots)*1e2:.1f}%)")
-                # global ELM split
-                for stage in ['train','validation','test']:
-                    self.global_elm_split[stage] = [
-                        i_elm for i_elm in datafile_elms
-                        if root['elms'][f"{i_elm:06d}"].attrs['shot'] in self.global_shot_split[stage]
-                    ]
-                    self.zprint(f"      {stage.upper()}: Global ELM count {len(self.global_elm_split[stage]):,d} ({len(self.global_elm_split[stage])/len(datafile_elms)*1e2:.1f}%)")
+        self.zprint("  Global ELM data split")
+        with h5py.File(self.elm_data_file, 'r') as root:
+            datafile_shots = set([int(shot_key) for shot_key in root['shots']])
+            self.zprint(f"    Shots in data file: {len(datafile_shots):,d}")
+            datafile_shots_from_elms = set([int(elm_group.attrs['shot']) for elm_group in root['elms'].values()])
+            assert len(datafile_shots ^ datafile_shots_from_elms) == 0
+            datafile_shots = list(datafile_shots)
+            datafile_elms = [int(elm_key) for elm_key in root['elms']]
+            self.zprint(f"    ELMs in data file: {len(datafile_elms):,d}")
+            # limit max ELMs
+            if self.max_elms and len(datafile_elms) > self.max_elms:
+                self.rng.shuffle(datafile_elms)
+                datafile_elms = datafile_elms[:self.max_elms]
+                datafile_shots = [int(root['elms'][f"{elm_index:06d}"].attrs['shot']) for elm_index in datafile_elms]
+                datafile_shots = list(set(datafile_shots))
+                self.zprint(f"    ELMs/shots for analysis: {len(datafile_elms):,d} / {len(datafile_shots):,d}")
+            # shuffle shots in dataset
+            self.zprint(f"    Shuffling global shots")
+            self.rng.shuffle(datafile_shots)
+            # global shot split
+            self.zprint("    Global shot split")
+            n_test_shots = int(self.fraction_test * len(datafile_shots))
+            n_validation_shots = int(self.fraction_validation * len(datafile_shots))
+            self.global_shot_split['test'], self.global_shot_split['validation'], self.global_shot_split['train'] = \
+                np.split(datafile_shots, [n_test_shots, n_test_shots+n_validation_shots])
+            for stage in ['train','validation','test']:
+                self.zprint(f"      {stage.upper()} shot count: {self.global_shot_split[stage].size} ({self.global_shot_split[stage].size/len(datafile_shots)*1e2:.1f}%)")
+            # global ELM split
+            self.zprint("    Global ELM split")
+            for stage in ['train','validation','test']:
+                self.global_elm_split[stage] = [
+                    i_elm for i_elm in datafile_elms
+                    if root['elms'][f"{i_elm:06d}"].attrs['shot'] in self.global_shot_split[stage]
+                ]
+                self.zprint(f"      {stage.upper()} ELM count: {len(self.global_elm_split[stage]):,d} ({len(self.global_elm_split[stage])/len(datafile_elms)*1e2:.1f}%)")
 
     def _prepare_confinement_data(self):
-            self.zprint("  Creating global confinement data split")
-            if self.bad_shots is None:
-                self.bad_shots = []  # Initialize to empty list if None
-            check_bounds = lambda value, bounds: bounds[0] <= value <= bounds[1] if bounds else True
-            global_shot_to_events: dict[int,list] = {}
-            global_class_to_shots: list[list] = [[] for _ in range(self.num_classes)]
-            global_class_duration: list[int] = [0] * self.num_classes
-            global_class_to_events: list[int] = [0] * self.num_classes
-            r_avg_exclusions = z_avg_exclusions = delz_avg_exclusions = 0
-            missing_inboard = bad_inboard = 0
-            with h5py.File(self.confinement_data_file) as root:
-                for shot in root:
-                    # shot exclusions
-                    if shot in self.bad_shots:
+        self.zprint("  Creating global confinement data split")
+        if self.bad_shots is None:
+            self.bad_shots = []  # Initialize to empty list if None
+        check_bounds = lambda value, bounds: bounds[0] <= value <= bounds[1] if bounds else True
+        global_shot_to_events: dict[int,list] = {}
+        global_class_to_shots: list[list] = [[] for _ in range(self.num_classes)]
+        global_class_duration: list[int] = [0] * self.num_classes
+        global_class_to_events: list[int] = [0] * self.num_classes
+        r_avg_exclusions = z_avg_exclusions = delz_avg_exclusions = 0
+        missing_inboard = bad_inboard = 0
+        with h5py.File(self.confinement_data_file) as root:
+            for shot in root:
+                # shot exclusions
+                if shot in self.bad_shots:
+                    continue
+                inboard_order = root[shot].attrs.get("inboard_column_channel_order", None)
+                if inboard_order is None or len(inboard_order)==0:
+                    missing_inboard += 1
+                    continue
+                if not np.array_equal(inboard_order, np.arange(8, dtype=int)*8+1):
+                    bad_inboard += 1
+                    continue
+                metadata = {
+                    'r_avg': root[shot].attrs.get('r_avg'),
+                    'z_avg': root[shot].attrs.get('z_avg'),
+                    'delz_avg': root[shot].attrs.get('delz_avg')
+                }
+                if not all(
+                    check_bounds(metadata[key], self.metadata_bounds[key]) 
+                    for key in ['r_avg', 'z_avg', 'delz_avg'] 
+                    if key in self.metadata_bounds
+                ):
+                    if metadata['r_avg'] is None or not check_bounds(metadata['r_avg'], self.metadata_bounds['r_avg']):
+                        r_avg_exclusions += 1
+                    if metadata['z_avg'] is None or not check_bounds(metadata['z_avg'], self.metadata_bounds['z_avg']):
+                        z_avg_exclusions += 1
+                    if metadata['delz_avg'] is None or not check_bounds(metadata['delz_avg'], self.metadata_bounds['delz_avg']):
+                        delz_avg_exclusions += 1
+                    continue
+                # loop over events in shot
+                events: list[dict] = []
+                for event_key in root[shot]:
+                    event = root[shot][event_key]
+                    if 'labels' not in event:
                         continue
-                    inboard_order = root[shot].attrs.get("inboard_column_channel_order", None)
-                    if inboard_order is None or len(inboard_order)==0:
-                        missing_inboard += 1
+                    event_label: int = event['labels'][0].item()
+                    assert event_label < self.num_classes
+                    event_duration: int = event['signals'].shape[1]
+                    if event_duration < self.signal_window_size:
                         continue
-                    if not np.array_equal(inboard_order, np.arange(8, dtype=int)*8+1):
-                        bad_inboard += 1
-                        continue
-                    metadata = {
-                        'r_avg': root[shot].attrs.get('r_avg'),
-                        'z_avg': root[shot].attrs.get('z_avg'),
-                        'delz_avg': root[shot].attrs.get('delz_avg')
-                    }
-                    if not all(
-                        check_bounds(metadata[key], self.metadata_bounds[key]) 
-                        for key in ['r_avg', 'z_avg', 'delz_avg'] 
-                        if key in self.metadata_bounds
-                    ):
-                        if metadata['r_avg'] is None or not check_bounds(metadata['r_avg'], self.metadata_bounds['r_avg']):
-                            r_avg_exclusions += 1
-                        if metadata['z_avg'] is None or not check_bounds(metadata['z_avg'], self.metadata_bounds['z_avg']):
-                            z_avg_exclusions += 1
-                        if metadata['delz_avg'] is None or not check_bounds(metadata['delz_avg'], self.metadata_bounds['delz_avg']):
-                            delz_avg_exclusions += 1
-                        continue
-                    # loop over events in shot
-                    events: list[dict] = []
-                    for event_key in root[shot]:
-                        event = root[shot][event_key]
-                        if 'labels' not in event:
-                            continue
-                        event_label: int = event['labels'][0].item()
-                        assert event_label < self.num_classes
-                        event_duration: int = event['signals'].shape[1]
-                        if event_duration < self.signal_window_size:
-                            continue
-                        if self.max_confinement_event_length and event_duration>self.max_confinement_event_length:
-                            event_duration = self.max_confinement_event_length
-                        events.append({
-                            'shot': int(shot),
-                            'event': int(event_key),
-                            'label': event_label,
-                            'duration': event_duration,
-                        })
-                        global_class_to_shots[event_label].append(int(shot))
-                        global_class_duration[event_label] += event_duration
-                        global_class_to_events[event_label] += 1
-                    if not events:
-                        continue
-                    global_shot_to_events[int(shot)] = events
-            global_class_to_shots = [list(set(item)) for item in global_class_to_shots]
-            # BES location exclusions
-            self.zprint(f"    missing inboard shot exclusions: {missing_inboard}")
-            self.zprint(f"    bad inboard shot exclusions: {bad_inboard}")
-            self.zprint(f"    r_avg shot exclusions: {r_avg_exclusions}")
-            self.zprint(f"    z_avg shot exclusions: {z_avg_exclusions}")
-            self.zprint(f"    delz_avg shot exclusions: {delz_avg_exclusions}")
-            # data read
-            self.zprint("  Data file summary (some shots maybe excluded)")
-            self.zprint(f"    Shots: {len(global_shot_to_events)}")
-            for i in range(self.num_classes):
-                self.zprint(f"      Class {i}:  shots {len(global_class_to_shots[i])}  events {global_class_to_events[i]}  duration {global_class_duration[i]:,d}")
-                assert global_class_duration[i]
-            # Forced shots
-            forced_test_shots_data = {}
-            forced_validation_shots_data = {}
-            if self.force_test_shots:
-                for shot_number in self.force_test_shots:
-                    forced_test_shots_data[shot_number] = global_shot_to_events.pop(shot_number)
-            if self.force_validation_shots:
-                for shot_number in self.force_validation_shots:
-                    forced_validation_shots_data[shot_number] = global_shot_to_events.pop(shot_number)
-            if self.max_shots_per_class is not None:
-                for i_class in range(len(global_class_to_shots)-1, -1, -1):
-                    class_shots = global_class_to_shots[i_class]
-                    if len(class_shots) > self.max_shots_per_class:
-                        # down-select shots for each class
-                        global_class_to_shots[i_class] = self.rng.choice(
-                            a=class_shots, 
-                            size=self.max_shots_per_class, 
-                            replace=False,
-                        ).tolist()
-                global_shot_to_events = {shot: global_shot_to_events[shot] for shots in global_class_to_shots for shot in shots}
-            shot_numbers = list(global_shot_to_events.keys())
+                    if self.max_confinement_event_length and event_duration>self.max_confinement_event_length:
+                        event_duration = self.max_confinement_event_length
+                    events.append({
+                        'shot': int(shot),
+                        'event': int(event_key),
+                        'label': event_label,
+                        'duration': event_duration,
+                    })
+                    global_class_to_shots[event_label].append(int(shot))
+                    global_class_duration[event_label] += event_duration
+                    global_class_to_events[event_label] += 1
+                if not events:
+                    continue
+                global_shot_to_events[int(shot)] = events
+        global_class_to_shots = [list(set(item)) for item in global_class_to_shots]
+        # BES location exclusions
+        self.zprint("    Confinement data exclusion")
+        self.zprint(f"      missing inboard shot exclusions: {missing_inboard}")
+        self.zprint(f"      bad inboard shot exclusions: {bad_inboard}")
+        self.zprint(f"      r_avg shot exclusions: {r_avg_exclusions}")
+        self.zprint(f"      z_avg shot exclusions: {z_avg_exclusions}")
+        self.zprint(f"      delz_avg shot exclusions: {delz_avg_exclusions}")
+        # data read
+        self.zprint("    Data file summary (some shots maybe excluded)")
+        self.zprint(f"      Shots: {len(global_shot_to_events)}")
+        for i in range(self.num_classes):
+            self.zprint(f"        Class {i}:  shots {len(global_class_to_shots[i])}  events {global_class_to_events[i]}  duration {global_class_duration[i]:,d}")
+            assert global_class_duration[i]
+        # Forced shots
+        forced_test_shots_data = {}
+        forced_validation_shots_data = {}
+        if self.force_test_shots:
+            for shot_number in self.force_test_shots:
+                forced_test_shots_data[shot_number] = global_shot_to_events.pop(shot_number)
+        if self.force_validation_shots:
+            for shot_number in self.force_validation_shots:
+                forced_validation_shots_data[shot_number] = global_shot_to_events.pop(shot_number)
+        if self.max_shots_per_class is not None:
+            for i_class in range(len(global_class_to_shots)-1, -1, -1):
+                class_shots = global_class_to_shots[i_class]
+                if len(class_shots) > self.max_shots_per_class:
+                    # down-select shots for each class
+                    global_class_to_shots[i_class] = self.rng.choice(
+                        a=class_shots, 
+                        size=self.max_shots_per_class, 
+                        replace=False,
+                    ).tolist()
+            global_shot_to_events = {shot: global_shot_to_events[shot] for shots in global_class_to_shots for shot in shots}
 
-            # split global data into train, val, test
-            good_split = False
-            while good_split == False:
-                self.rng.shuffle(shot_numbers)
-                good_split = True
-                self.global_confinement_shot_split = {st:[] for st in ['train','validation','test']}
-                self.global_confinement_shot_split['train'], _test_val_shots = train_test_split(
-                    shot_numbers, 
-                    test_size=self.fraction_test + self.fraction_validation, 
+        # split global data into train, val, test
+        shot_numbers = list(global_shot_to_events.keys())
+        good_split = False
+        while good_split == False:
+            self.rng.shuffle(shot_numbers)
+            good_split = True
+            self.global_confinement_shot_split = {st:[] for st in ['train','validation','test']}
+            self.global_confinement_shot_split['train'], _test_val_shots = train_test_split(
+                shot_numbers, 
+                test_size=self.fraction_test + self.fraction_validation, 
+                random_state=self.rng.integers(0, 2**32-1),
+            )
+            if self.fraction_test:
+                self.global_confinement_shot_split['test'], self.global_confinement_shot_split['validation'] = train_test_split(
+                    _test_val_shots,
+                    test_size=self.fraction_validation/(self.fraction_test + self.fraction_validation),
                     random_state=self.rng.integers(0, 2**32-1),
                 )
-                if self.fraction_test:
-                    self.global_confinement_shot_split['test'], self.global_confinement_shot_split['validation'] = train_test_split(
-                        _test_val_shots,
-                        test_size=self.fraction_validation/(self.fraction_test + self.fraction_validation),
-                        random_state=self.rng.integers(0, 2**32-1),
-                    )
-                else:
-                    self.global_confinement_shot_split['validation'] = _test_val_shots
-                    self.global_confinement_shot_split['test'] = []
+            else:
+                self.global_confinement_shot_split['validation'] = _test_val_shots
+                self.global_confinement_shot_split['test'] = []
 
-                if forced_test_shots_data or forced_validation_shots_data:
-                    global_shot_to_events.update(forced_validation_shots_data)
-                    global_shot_to_events.update(forced_test_shots_data)
-                    self.global_confinement_shot_split['validation'].extend(list(forced_validation_shots_data.keys()))
-                    self.global_confinement_shot_split['test'].extend(list(forced_test_shots_data.keys()))
+            if forced_test_shots_data or forced_validation_shots_data:
+                global_shot_to_events.update(forced_validation_shots_data)
+                global_shot_to_events.update(forced_test_shots_data)
+                self.global_confinement_shot_split['validation'].extend(list(forced_validation_shots_data.keys()))
+                self.global_confinement_shot_split['test'].extend(list(forced_test_shots_data.keys()))
 
-                # Assign events to datasets
-                self.zprint("  Final data for computation")
-                self.stage_to_events = {}
-                for st in self.global_confinement_shot_split:
-                    self.stage_to_events[st] = [event for shot in self.global_confinement_shot_split[st] for event in global_shot_to_events[shot]['events']]
-                    if len(self.global_confinement_shot_split[st]) == 0:
-                        self.zprint(f"    {st.capitalize()} data: {len(self.global_confinement_shot_split[st])} shots and {len(self.stage_to_events[st])} events")
-                        continue
-                    class_to_shots = [[] for _ in range(self.num_classes)]
-                    class_to_events = [0] * self.num_classes
-                    class_to_duration = [0] * self.num_classes
-                    for event in self.stage_to_events[st]:
-                        class_to_shots[event['label']].append(event['shot'])
-                        class_to_events[event['label']] += 1
-                        class_to_duration[event['label']] += event['duration']
-                    class_to_shots = [list(set(l)) for l in class_to_shots]
-                    if (0 in class_to_events) or good_split == False:
-                        good_split = False
-                        self.zprint("        Bad split, re-running")
-                        continue
-                    self.zprint(f"    {st.capitalize()} data: {len(self.global_confinement_shot_split[st])} shots and {len(self.stage_to_events[st])} events")
-                    for i in range(self.num_classes):
-                        self.zprint(f"      Class {i}: {len(class_to_shots[i])} shots, {class_to_events[i]} events, {class_to_duration[i]:,d} timepoints")
-                        assert len(class_to_shots[i]) > 0
-                # set predict dataset
-                self.global_confinement_shot_split['predict'] = self.global_confinement_shot_split['test']
-                self.stage_to_events['predict'] = self.stage_to_events['test']
+            self.global_confinement_shot_split['predict'] = self.global_confinement_shot_split['test']
+
+        # map events to stages
+        self.zprint("    Final data for computation")
+        self.global_stage_to_events = {}
+        for st in self.global_confinement_shot_split:
+            self.global_stage_to_events[st] = [event for shot in self.global_confinement_shot_split[st] for event in global_shot_to_events[shot]]
+            if len(self.global_confinement_shot_split[st]) == 0:
+                self.zprint(f"    {st.capitalize()} data: {len(self.global_confinement_shot_split[st])} shots and {len(self.global_stage_to_events[st])} events")
+                continue
+            class_to_shots = [[] for _ in range(self.num_classes)]
+            class_to_events = [0] * self.num_classes
+            class_to_duration = [0] * self.num_classes
+            for event in self.global_stage_to_events[st]:
+                class_to_shots[event['label']].append(event['shot'])
+                class_to_events[event['label']] += 1
+                class_to_duration[event['label']] += event['duration']
+            class_to_shots = [list(set(l)) for l in class_to_shots]
+            if (0 in class_to_events) or good_split == False:
+                good_split = False
+                self.zprint("    Bad split, re-running")
+                continue
+            self.zprint(f"      {st.capitalize()} data: {len(self.global_confinement_shot_split[st])} shots and {len(self.global_stage_to_events[st])} events")
+            for i in range(self.num_classes):
+                self.zprint(f"        Class {i}: {len(class_to_shots[i])} shots, {class_to_events[i]} events, {class_to_duration[i]:,d} timepoints")
+                assert len(class_to_shots[i]) > 0
 
     def setup(self, stage: str):
+        # called on all ranks after "prepare_data()"
         t_tmp = time.time()
-        self.zprint(f"**** Setup stage: {stage.upper()}")
+        self.zprint(f"**** Setup: {stage.upper()} (all ranks)")
 
         assert stage in ['fit', 'test', 'predict']
         assert self.is_global_zero == self.trainer.is_global_zero
@@ -749,178 +751,172 @@ class Data(_Base_Class, LightningDataModule):
 
         if self.elm_classifier:
             t_tmp = time.time()
-            self.zprint("**** ELM data setup")
-            self.global_elm_split = self.broadcast(self.global_elm_split)
-            self.global_shot_split = self.broadcast(self.global_shot_split)
+            self.zprint("  **** ELM data setup")
             for st in stages:
                 self._setup_elm_data_for_stage(st)
             self.zprint(f"  ELM data setup time: {time.time()-t_tmp:0.1f} s")
-            self.barrier()
-
+        self.barrier()
 
         if self.conf_classifier:
-            self.zprint("**** Confinement data preparation")
+            self.zprint("    Confinement data preparation")
             for st in stages:
                 self._setup_confinement_data(st)
             self.zprint(f"  Confinement data setup time: {time.time()-t_tmp:.1f} s")
+        self.barrier()
 
     def _setup_elm_data_for_stage(self, st: str):
+        # ELM/shot splits from "prepare_data()"
+        self.global_elm_split = self.broadcast(self.global_elm_split)
+        self.global_shot_split = self.broadcast(self.global_shot_split)
         self.zprint(f"  ELM {st.upper()} data setup")
         if st in self.elm_datasets and isinstance(self.elm_datasets[st], torch.utils.data.Dataset):
-            self.zprint(f"    Using saved dataset")
+            self.zprint(f"    Using existing dataset")
             return
-        elm_indices = self.global_elm_split[st]
-        n_elms = len(elm_indices)
-        self.zprint(f"    ELM count: {n_elms}")
-        assert n_elms > 0
-        stage_sw_metadata: list = []
-        outliers = 0
-        skipped_short_pre_elm_time = 0
-        if self.outlier_value:
-            self.zprint(f"    Removing outliers with max(abs(signal windows)) > {self.outlier_value:.3f} V")
-        with h5py.File(self.elm_data_file, 'r') as h5_file:
-            elms: h5py.Group = h5_file['elms']
-            for i_elm, elm_index in enumerate(elm_indices):
-                if i_elm%(n_elms//10) == 0:
-                    self.zprint(f"    Reading ELM event {i_elm:04d}/{len(elm_indices):04d}")
-                elm_event: h5py.Group = elms[f"{elm_index:06d}"]
-                shot = int(elm_event.attrs['shot'])
-                assert elm_event["bes_signals"].shape[0] == 64
-                assert elm_event['bes_time'].size == elm_event["bes_signals"].shape[1]
-                bes_time = np.array(elm_event['bes_time'], dtype=np.float32)
-                t_start: float = elm_event.attrs['t_start']
-                t_stop: float = elm_event.attrs['t_stop'] - 0.05
-                if self.min_pre_elm_time and (t_stop-t_start) < self.min_pre_elm_time:
-                    skipped_short_pre_elm_time += 1
-                    continue
-                i_start: int = np.flatnonzero(bes_time >= t_start)[0]
-                i_stop: int = np.flatnonzero(bes_time <= t_stop)[-1]
-                i_window_stop = i_stop
-                signals = np.array(elm_event["bes_signals"], dtype=np.float32)  # (64, <time>)
-                signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (bes_time, pol, rad)
-                assert signals.shape[0] == bes_time.size
-                assert (signals.shape[1] == 8) and (signals.shape[2] == 8)
-                while True:
-                    i_window_start = i_window_stop - self.signal_window_size
-                    if i_window_start < i_start:
-                        break  # break while loop
-                    if self.outlier_value:  # raw signal outlier filter
-                        signal_window = signals[i_window_start:i_window_stop, ...]
-                        assert signal_window.shape[0] == self.signal_window_size
-                        if np.abs(signal_window).max() > self.outlier_value:
-                            i_window_stop -= self.signal_window_size // self.stride_factor
-                            outliers += 1
-                            continue
-                    stage_sw_metadata.append({
-                        'elm_index': elm_index,
-                        'shot': shot,
-                        'i_t0': i_window_start,
-                        'time_to_elm': bes_time[i_stop] - bes_time[i_window_stop]
-                    })
-                    i_window_stop -= self.signal_window_size // self.stride_factor
+        if self.is_global_zero:
+            elm_indices = self.global_elm_split[st]
+            self.zprint(f"    ELM count: {len(elm_indices)}")
+            stage_sw_metadata: list = []
+            outliers = 0
+            skipped_short_pre_elm_time = 0
+            if self.outlier_value:
+                self.zprint(f"    Removing outliers with max(abs(signal windows)) > {self.outlier_value:.3f} V")
+            with h5py.File(self.elm_data_file, 'r') as h5_file:
+                elms: h5py.Group = h5_file['elms']
+                for i_elm, elm_index in enumerate(elm_indices):
+                    if i_elm%(len(elm_indices)//10) == 0:
+                        self.zprint(f"    Reading ELM event {i_elm:04d}/{len(elm_indices):04d}")
+                    elm_event: h5py.Group = elms[f"{elm_index:06d}"]
+                    shot = int(elm_event.attrs['shot'])
+                    assert elm_event["bes_signals"].shape[0] == 64
+                    assert elm_event['bes_time'].size == elm_event["bes_signals"].shape[1]
+                    bes_time = np.array(elm_event['bes_time'], dtype=np.float32)
+                    t_start: float = elm_event.attrs['t_start']
+                    t_stop: float = elm_event.attrs['t_stop'] - 0.05
+                    if self.min_pre_elm_time and (t_stop-t_start) < self.min_pre_elm_time:
+                        skipped_short_pre_elm_time += 1
+                        continue
+                    i_start: int = np.flatnonzero(bes_time >= t_start)[0]
+                    i_stop: int = np.flatnonzero(bes_time <= t_stop)[-1]
+                    i_window_stop = i_stop
+                    signals = np.array(elm_event["bes_signals"], dtype=np.float32)  # (64, <time>)
+                    signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (bes_time, pol, rad)
+                    assert signals.shape[0] == bes_time.size
+                    assert (signals.shape[1] == 8) and (signals.shape[2] == 8)
+                    while True:
+                        i_window_start = i_window_stop - self.signal_window_size
+                        if i_window_start < i_start:
+                            break  # break while loop
+                        if self.outlier_value:  # raw signal outlier filter
+                            signal_window = signals[i_window_start:i_window_stop, ...]
+                            assert signal_window.shape[0] == self.signal_window_size
+                            if np.abs(signal_window).max() > self.outlier_value:
+                                i_window_stop -= self.signal_window_size // self.stride_factor
+                                outliers += 1
+                                continue
+                        stage_sw_metadata.append({
+                            'elm_index': elm_index,
+                            'shot': shot,
+                            'i_t0': i_window_start,
+                            'time_to_elm': bes_time[i_stop] - bes_time[i_window_stop]
+                        })
+                        i_window_stop -= self.signal_window_size // self.stride_factor
+            self.zprint(f"    Skipped ELMs for short pre-ELM time: {skipped_short_pre_elm_time}")
+            self.zprint(f"    Skipped outliers: {outliers:,d}")
 
-        self.zprint(f"    Skipped ELMs for short pre-ELM time: {skipped_short_pre_elm_time}")
-
-        n_signal_windows = len(stage_sw_metadata)
-        self.zprint(f"    Signal windows (unprocessed): {n_signal_windows:,d}  ({outliers:,d} outliers removed)")
+        stage_sw_metadata = self.broadcast(stage_sw_metadata)
+        self.zprint(f"    Signal window count (unprocessed): {len(stage_sw_metadata):,d}")
 
         # stats
-        signal_min = np.array(np.inf)
-        signal_max = np.array(-np.inf)
-        n_bins = 200
-        cummulative_hist = np.zeros(n_bins, dtype=int)
-        stat_interval = np.max([self.stride_factor, len(stage_sw_metadata)//int(10e3)])
-        last_elm_index = -1
-        with h5py.File(self.elm_data_file) as root:
-            for sw in stage_sw_metadata[::stat_interval]:
-                elm_index = sw['elm_index']
-                if elm_index != last_elm_index:
-                    elm_event: h5py.Group = root['elms'][f'{elm_index:06d}']
-                    signals = np.array(elm_event["bes_signals"], dtype=np.float32)  # (64, <time>)
-                    signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (time, pol, rad)
-                last_elm_index = elm_index
-                i_t0 = sw['i_t0']
-                signal_window = signals[i_t0: i_t0 + self.signal_window_size, :, :]
-                assert signal_window.shape[0] == self.signal_window_size
-                signal_min = np.min([signal_min, signal_window.min()])
-                signal_max = np.max([signal_max, signal_window.max()])
-                hist, bin_edges = np.histogram(
-                    signal_window,
-                    bins=n_bins,
-                    range=(-10.4, 10.4),
-                )
-                cummulative_hist += hist
-        bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
-        mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
-        stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
-        exkurt = np.sum(cummulative_hist * ((bin_center - mean)/stdev) ** 4) / np.sum(cummulative_hist) - 3
-        self.zprint(f"    Stage raw signal stats:  mean {mean:.3f}  stdev {stdev:.3f}  exkurt {exkurt:.3f}  min/max {signal_min:.3f}/{signal_max:.3f}")
-        self.barrier()
-        if self.is_global_zero and st == 'train' and not self.elm_raw_signal_mean:
-            self.zprint(f"    Using {st.upper()} for standardizing mean and stdev")
-            self.elm_raw_signal_mean = mean.item()
-            self.elm_raw_signal_stdev = stdev.item()
-            self.save_hyperparameters({
-                'raw_signal_mean': self.elm_raw_signal_mean,
-                'raw_signal_stdev': self.elm_raw_signal_stdev,
-            })
-        self.barrier()
+        if self.is_global_zero:
+            signal_min = np.array(np.inf)
+            signal_max = np.array(-np.inf)
+            n_bins = 200
+            cummulative_hist = np.zeros(n_bins, dtype=int)
+            stat_interval = np.max([self.stride_factor, len(stage_sw_metadata)//int(10e3)])
+            last_elm_index = -1
+            with h5py.File(self.elm_data_file) as root:
+                for sw in stage_sw_metadata[::stat_interval]:
+                    elm_index = sw['elm_index']
+                    if elm_index != last_elm_index:
+                        elm_event: h5py.Group = root['elms'][f'{elm_index:06d}']
+                        signals = np.array(elm_event["bes_signals"], dtype=np.float32)  # (64, <time>)
+                        signals = np.transpose(signals, (1, 0)).reshape(-1, 8, 8)  # reshape to (time, pol, rad)
+                    last_elm_index = elm_index
+                    i_t0 = sw['i_t0']
+                    signal_window = signals[i_t0: i_t0 + self.signal_window_size, :, :]
+                    assert signal_window.shape[0] == self.signal_window_size
+                    signal_min = np.min([signal_min, signal_window.min()])
+                    signal_max = np.max([signal_max, signal_window.max()])
+                    hist, bin_edges = np.histogram(
+                        signal_window,
+                        bins=n_bins,
+                        range=(-10.4, 10.4),
+                    )
+                    cummulative_hist += hist
+            bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
+            mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
+            stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
+            exkurt = np.sum(cummulative_hist * ((bin_center - mean)/stdev) ** 4) / np.sum(cummulative_hist) - 3
+            self.zprint(f"    Raw signal stats:  mean {mean:.3f}  stdev {stdev:.3f}  exkurt {exkurt:.3f}  min/max {signal_min:.3f}/{signal_max:.3f}")
+            if st == 'train' and not self.elm_raw_signal_mean:
+                self.zprint(f"    Using {st.upper()} for standardizing mean and stdev")
+                self.elm_raw_signal_mean = mean.item()
+                self.elm_raw_signal_stdev = stdev.item()
+                self.save_hyperparameters({
+                    'raw_signal_mean': self.elm_raw_signal_mean,
+                    'raw_signal_stdev': self.elm_raw_signal_stdev,
+                })
         self.elm_raw_signal_mean = self.broadcast(self.elm_raw_signal_mean)
         self.elm_raw_signal_stdev = self.broadcast(self.elm_raw_signal_stdev)
         self.rprint(f"    Standarizing signals with mean {self.elm_raw_signal_mean:.3f} and std {self.elm_raw_signal_stdev:.3f}")
 
         # time-to-ELM quantiles
-        if st == 'train' and not self.time_to_elm_quantiles:
-            quantiles = [0.5]
-            time_to_elm_labels = [sig_win['time_to_elm'] for sig_win in stage_sw_metadata]
-            quantile_values = np.quantile(time_to_elm_labels, quantiles)
-            self.time_to_elm_quantiles = {q: qval.item() for q, qval in zip(quantiles, quantile_values)}
-            self.save_hyperparameters({
-                'time_to_elm_quantiles': self.time_to_elm_quantiles,
-            })
-            self.zprint(f"    Time-to-ELM quantiles for binary labels:")
-            for q, qval in self.time_to_elm_quantiles.items():
-                self.zprint(f"      Quantile {q:.2f}: {qval:.1f} ms")
-            self.barrier()
-            rank0_values = self.broadcast(quantile_values)
-            assert np.array_equal(rank0_values, quantile_values)
-        assert self.time_to_elm_quantiles
+        if self.is_global_zero:
+            if st == 'train' and not self.time_to_elm_quantiles:
+                quantiles = [0.5]
+                time_to_elm_labels = [sig_win['time_to_elm'] for sig_win in stage_sw_metadata]
+                quantile_values = np.quantile(time_to_elm_labels, quantiles)
+                self.time_to_elm_quantiles = {q: qval.item() for q, qval in zip(quantiles, quantile_values)}
+                self.save_hyperparameters({
+                    'time_to_elm_quantiles': self.time_to_elm_quantiles,
+                })
+                self.zprint(f"    Time-to-ELM quantiles for binary labels:")
+                for q, qval in self.time_to_elm_quantiles.items():
+                    self.zprint(f"      Quantile {q:.2f}: {qval:.1f} ms")
+        self.time_to_elm_quantiles = self.broadcast(self.time_to_elm_quantiles)
 
         # restrict data according to quantiles
-        if self.time_to_elm_quantile_min is not None and self.time_to_elm_quantile_max is not None:
-            time_to_elm_labels = np.array([sig_win['time_to_elm'] for sig_win in stage_sw_metadata])
-            time_to_elm_min, time_to_elm_max = np.quantile(time_to_elm_labels, (self.time_to_elm_quantile_min, self.time_to_elm_quantile_max))
-            if self.contrastive_learning:
-                self.zprint(f"    Contrastive learning with time-to-ELM quantiles 0.0-{self.time_to_elm_quantile_min:.2f} and {self.time_to_elm_quantile_max:.2f}-1.0")
-                for i in np.arange(len(stage_sw_metadata)-1, -1, -1, dtype=int):
-                    if (stage_sw_metadata[i]['time_to_elm'] > time_to_elm_min) and \
-                        (stage_sw_metadata[i]['time_to_elm'] < time_to_elm_max):
-                        stage_sw_metadata.pop(i)
-            else:
-                self.zprint(f"    Restricting time-to-ELM labels to quantile range: {self.time_to_elm_quantile_min:.2f}-{self.time_to_elm_quantile_max:.2f}")
-                for i in np.arange(len(stage_sw_metadata)-1, -1, -1, dtype=int):
-                    if (stage_sw_metadata[i]['time_to_elm'] < time_to_elm_min) or \
-                        (stage_sw_metadata[i]['time_to_elm'] > time_to_elm_max):
-                        stage_sw_metadata.pop(i)
-        remainder = len(stage_sw_metadata) % self.trainer.world_size
-        if remainder:
-            stage_sw_metadata = stage_sw_metadata[:-remainder]
-        assert len(stage_sw_metadata) % self.trainer.world_size == 0
-        n_signal_windows = len(stage_sw_metadata)
-        self.zprint(f"    Stage signal windows (final): {n_signal_windows:,d}")
-        self.zprint(f"    Batches per epoch: {n_signal_windows/self.batch_size:,.1f}")
+        if self.is_global_zero:
+            if self.time_to_elm_quantile_min is not None and self.time_to_elm_quantile_max is not None:
+                time_to_elm_labels = np.array([sig_win['time_to_elm'] for sig_win in stage_sw_metadata])
+                time_to_elm_min, time_to_elm_max = np.quantile(time_to_elm_labels, (self.time_to_elm_quantile_min, self.time_to_elm_quantile_max))
+                if self.contrastive_learning:
+                    self.zprint(f"    Contrastive learning with time-to-ELM quantiles 0.0-{self.time_to_elm_quantile_min:.2f} and {self.time_to_elm_quantile_max:.2f}-1.0")
+                    for i in np.arange(len(stage_sw_metadata)-1, -1, -1, dtype=int):
+                        if (stage_sw_metadata[i]['time_to_elm'] > time_to_elm_min) and \
+                            (stage_sw_metadata[i]['time_to_elm'] < time_to_elm_max):
+                            stage_sw_metadata.pop(i)
+                else:
+                    self.zprint(f"    Restricting time-to-ELM labels to quantile range: {self.time_to_elm_quantile_min:.2f}-{self.time_to_elm_quantile_max:.2f}")
+                    for i in np.arange(len(stage_sw_metadata)-1, -1, -1, dtype=int):
+                        if (stage_sw_metadata[i]['time_to_elm'] < time_to_elm_min) or \
+                            (stage_sw_metadata[i]['time_to_elm'] > time_to_elm_max):
+                            stage_sw_metadata.pop(i)
+            remainder = len(stage_sw_metadata) % self.trainer.world_size
+            if remainder:
+                stage_sw_metadata = stage_sw_metadata[:-remainder]
+            assert len(stage_sw_metadata) % self.trainer.world_size == 0
+            self.zprint(f"    Signal window count (final): {len(stage_sw_metadata):,d}")
+            self.zprint(f"    Batches per epoch: {len(stage_sw_metadata)/self.batch_size:,.1f}")
+        stage_sw_metadata = self.broadcast(stage_sw_metadata)
 
         # split signal windows across ranks
-        rankwise_sw_split = np.array_split(stage_sw_metadata, self.trainer.world_size)
-        for ir in range(self.trainer.world_size):
-            rank0_values = self.broadcast(rankwise_sw_split[ir][:5])
-            for i, d in enumerate(rank0_values):
-                assert d['elm_index'] == rankwise_sw_split[ir][i]['elm_index']
-        self.zprint("    Consistent signal window split across ranks")
-        sw_for_rank = list(rankwise_sw_split[self.trainer.global_rank])
-        self.rprint(f"    Signal windows {len(sw_for_rank):,d}")
+        if self.is_global_zero:
+            rankwise_sw_split = np.array_split(stage_sw_metadata, self.trainer.world_size)
+        rankwise_sw_split = self.broadcast(rankwise_sw_split)
 
         # get rank-wise ELM signals
+        sw_for_rank = list(rankwise_sw_split[self.trainer.global_rank])
         elms_for_rank = np.unique(np.array([item['elm_index'] for item in sw_for_rank],dtype=int))
         elm_to_signals = {}
         with h5py.File(self.elm_data_file) as root:
@@ -947,13 +943,9 @@ class Data(_Base_Class, LightningDataModule):
                 quantile_max=self.time_to_elm_quantile_max,
                 contrastive_learning=self.contrastive_learning,
             )
-        
-        if st in ['test', 'predict']:
+        elif st == 'predict':
             pass
 
-    def _setup_confinement_data(self, stage: str):
-        t_tmp = time.time()
-        self.zprint(f"  Stage {stage.upper()}: Setup confinement data")
         # if stage == 'train' and self.trainer.world_size > 1:
         #     self.zprint("    Creating chunks")
         #     chunked_events = [[] for _ in range(self.trainer.world_size)]
@@ -976,75 +968,107 @@ class Data(_Base_Class, LightningDataModule):
         # chunk_events = events
 
         # dataset = self._load_and_preprocess_confinement_data(events, stage)
-        events = self.stage_to_events[stage]
-        event_data = []
         # time_count = sum([event['duration'] for event in events])
         # packaged_signals = np.empty((time_count, self.n_rows, self.n_cols), dtype=np.float32)
         # start_index = 0
 
-        with h5py.File(self.confinement_data_file, 'r') as root:
-            for i, event_md in enumerate(events):
-                shot = event_md['shot']
-                event = event_md['event']
-                if len(events) >= 10 and i % (len(events)//10) == 0:
-                    self.zprint(f"    Reading event {i:04d}/{len(events):04d}")
-                event_group = root[str(shot)][str(event)]
-                # Retrieve signals and reshape according to inboard_order
-                labels = np.array(event_group["labels"], dtype=int)
-                # signals = np.array(event_group["signals"][:, :], dtype=np.float32)
-                if self.max_confinement_event_length and labels.size>self.max_confinement_event_length:
-                    labels = labels[:self.max_confinement_event_length]
-                    # signals = signals[:,:self.max_confinement_event_length]
-                # signals = np.transpose(signals, (1, 0)).reshape(-1, self.n_rows, self.n_cols)
-                # if self.b_coeffs is not None and signals.shape[0] > self.fir_taps:
-                #     signals = np.array(
-                #         scipy.signal.lfilter(
-                #             x=signals,
-                #             a=self.a_coeffs,
-                #             b=self.b_coeffs,
-                #         ),
-                #         dtype=np.float32,
-                #     )
-                # packaged_signals[start_index:start_index + signals.shape[0]] = signals
-                # start_index += signals.shape[0]
-                valid_t0 = np.zeros(labels.size, dtype=int)
-                first_valid_signal_window_start_index = self.signal_window_size - 1
-                valid_t0[first_valid_signal_window_start_index::self.signal_window_size//8] = 1
-                event_data.append({
-                    'labels': labels, 
-                    'valid_t0': valid_t0,
-                    'confinement_mode_key': f"{shot}/{event}",
-                    'shot': shot,
-                    'time': event,
-                })
+    def _setup_confinement_data(self, stage: str):
+        self.global_stage_to_events = self.broadcast(self.global_stage_to_events)
+        if self.is_global_zero:
+            # Confinement shot split from "prepare_data()"
+            self.zprint(f"  Stage {stage.upper()}: Setup confinement data")
+            global_stage_events = []
+            with h5py.File(self.confinement_data_file, 'r') as root:
+                for i, event_md in enumerate(self.global_stage_to_events[stage]):
+                    shot = event_md['shot']
+                    event = event_md['event']
+                    # if n_events >= 10 and i % (n_events//10) == 0:
+                    #     self.zprint(f"    Reading event {i:04d}/{len(global_stage_events):04d}")
+                    event_group = root[str(shot)][str(event)]
+                    labels = np.array(event_group["labels"], dtype=int)
+                    assert labels[0] == event_md['label'] and labels[-1] == event_md['label']
+                    # signals = np.array(event_group["signals"][:, :], dtype=np.float32)
+                    if self.max_confinement_event_length and labels.size>self.max_confinement_event_length:
+                        labels = labels[:self.max_confinement_event_length]
+                        # signals = signals[:,:self.max_confinement_event_length]
+                    # signals = np.transpose(signals, (1, 0)).reshape(-1, self.n_rows, self.n_cols)
+                    # if self.b_coeffs is not None and signals.shape[0] > self.fir_taps:
+                    #     signals = np.array(
+                    #         scipy.signal.lfilter(
+                    #             x=signals,
+                    #             a=self.a_coeffs,
+                    #             b=self.b_coeffs,
+                    #         ),
+                    #         dtype=np.float32,
+                    #     )
+                    # packaged_signals[start_index:start_index + signals.shape[0]] = signals
+                    # start_index += signals.shape[0]
+                    valid_t0 = np.zeros(labels.size, dtype=int)
+                    first_valid_signal_window_start_index = self.signal_window_size - 1
+                    valid_t0[first_valid_signal_window_start_index::self.signal_window_size//8] = 1
+                    valid_t0_indices = np.arange(valid_t0.size, dtype=int)
+                    valid_t0_indices = valid_t0_indices[valid_t0 == 1]
+                    # if self.outlier_value:
+                    #     for i in valid_t0_indices:
+                    #         if np.max(np.abs(signals[i:i+self.signal_window_size,...])) > self.outlier_value:
+                    #             valid_t0[i] = 0
+                    global_stage_events.append({
+                        # 'label': labels[0], 
+                        # 'valid_t0': valid_t0,
+                        'shot_time_key': f"{shot}/{event}",
+                        'shot': shot,
+                        'time': event,
+                        'sw_count': len(valid_t0_indices),
+                    })
+        global_stage_events = self.broadcast(global_stage_events)
 
-        self.zprint(f"    Time for confinement data read: {time.time()-t_tmp:.1f} s")
+        if self.is_global_zero:
+            if self.trainer.world_size == 0:
+                rankwise_stage_event_split = [global_stage_events]
+            else:
+                # sort events by largest to smallest sig win count
+                global_stage_events = sorted(
+                    global_stage_events,
+                    key=lambda e: e['sw_count'],
+                    reverse=True,
+                )
+                # assign each event to the rank with the smallest sig win count
+                rankwise_stage_event_split = [{'events':[], 'sw_count':0}] * self.trainer.world_size
+                for event in global_stage_events:
+                    rankwise_stage_event_split = sorted(
+                        rankwise_stage_event_split,
+                        key=lambda e: e['sw_count'],
+                    )
+                    rankwise_stage_event_split[0]['events'].append(event)
+                    rankwise_stage_event_split[0]['sw_count'] += event['sw_count']
+                rankwise_stage_event_split = [re['events'] for re in rankwise_stage_event_split]
+                test = [e['shot_time_key'] for re_list in rankwise_stage_event_split[1] for e in re_list[0:5]]
+        rankwise_stage_event_split = self.broadcast(rankwise_stage_event_split)
 
-        packaged_labels = np.concatenate([confinement_mode['labels'] for confinement_mode in event_data], axis=0)
-        packaged_valid_t0 = np.concatenate([confinement_mode['valid_t0'] for confinement_mode in event_data], axis=0)
+        # package data for each rank
+        rankwise_events = rankwise_stage_event_split[self.trainer.global_rank]
+        packaged_labels = np.concatenate([confinement_mode['labels'] for confinement_mode in global_stage_events], axis=0)
+        packaged_valid_t0 = np.concatenate([confinement_mode['valid_t0'] for confinement_mode in global_stage_events], axis=0)
         assert packaged_labels.size == packaged_valid_t0.size
         packaged_window_start = []
         index = 0
-        for confinement_mode in event_data:
+        for confinement_mode in global_stage_events:
             packaged_window_start.append(index)
             index += confinement_mode['labels'].size
         packaged_window_start = np.array(packaged_window_start, dtype=int)
-        assert len(event_data) == len(packaged_window_start)
+        assert len(global_stage_events) == len(packaged_window_start)
 
         packaged_confinement_mode_key = np.array(
-            [confinement_mode['confinement_mode_key'] for confinement_mode in event_data],
+            [confinement_mode['shot_time_key'] for confinement_mode in global_stage_events],
             dtype=str,
         )
-        assert len(event_data) == len(packaged_confinement_mode_key)
+        assert len(global_stage_events) == len(packaged_confinement_mode_key)
 
-        # valid t0 indices
         packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
         packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
         assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices]))
-        self.zprint(f"  Stage {stage.upper()}: Raw data stats")
-        # assert packaged_labels.size == packaged_signals.shape[0]
 
-        del event_data
+        del global_stage_events
 
         def _get_statistics2(sample_indices: np.ndarray, signals: np.ndarray) -> dict:
             signal_min = np.array(np.inf)
@@ -1078,6 +1102,7 @@ class Data(_Base_Class, LightningDataModule):
             }
 
         # standardize signals based on training data
+        self.zprint(f"  Stage {stage.upper()}: Raw data stats")
         stats = _get_statistics2(
             sample_indices=packaged_valid_t0_indices,
             signals=packaged_signals,
@@ -1090,7 +1115,6 @@ class Data(_Base_Class, LightningDataModule):
                 'signal_mean': self.confinement_raw_signal_mean.item(),
                 'signal_stdev': self.confinement_raw_signal_stdev.item(),
             })
-        self.barrier()
         self.confinement_raw_signal_mean = self.broadcast(self.confinement_raw_signal_mean)
         self.confinement_raw_signal_stdev = self.broadcast(self.confinement_raw_signal_stdev)
         self.rprint(f"  Stage {stage.upper()}: Standarizing signals with mean {self.confinement_raw_signal_mean:.3f} and std {self.confinement_raw_signal_stdev:.3f}")
@@ -1185,7 +1209,7 @@ class Data(_Base_Class, LightningDataModule):
         #         event_data.append({
         #             'labels': labels, 
         #             'valid_t0': valid_t0,
-        #             'confinement_mode_key': f"{shot}/{event}",
+        #             'shot_time_key': f"{shot}/{event}",
         #             'shot': shot,
         #             'time': event,
         #         })
@@ -1204,7 +1228,7 @@ class Data(_Base_Class, LightningDataModule):
         # assert len(event_data) == len(packaged_window_start)
 
         # packaged_confinement_mode_key = np.array(
-        #     [confinement_mode['confinement_mode_key'] for confinement_mode in event_data],
+        #     [confinement_mode['shot_time_key'] for confinement_mode in event_data],
         #     dtype=str,
         # )
         # assert len(event_data) == len(packaged_confinement_mode_key)
@@ -1402,9 +1426,7 @@ class Data(_Base_Class, LightningDataModule):
 
     def rprint(self, text: str = ''):
         if self.trainer.world_size > 1:
-            self.barrier()
             print(f"Rank {self.trainer.global_rank}: {text}")
-            self.barrier()
         else:
             print(text)
 
@@ -1744,11 +1766,11 @@ if __name__=='__main__':
         conf_classifier=True,
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/labeled_elm_events.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
-        max_elms=100,
+        max_elms=200,
         batch_size=128,
         lr=1e-3,
-        max_epochs=2,
-        num_workers=2,
+        max_epochs=1,
+        num_workers=0,
         log_freq=50,
         fraction_validation=0.25,
         fraction_test=0.0,
@@ -1757,7 +1779,7 @@ if __name__=='__main__':
         contrastive_learning=True,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
-        # max_shots_per_class=6,
-        # max_confinement_event_length=int(20e3),
+        max_shots_per_class=7,
+        max_confinement_event_length=int(20e3),
         # use_wandb=True,
     )
