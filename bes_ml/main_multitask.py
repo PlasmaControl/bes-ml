@@ -384,7 +384,7 @@ class Model(LightningModule, _Base_Class):
             for task in self.task_models:
                 train_score = self.trainer.logged_metrics[f'{task}/f1_score/train']
                 val_score = self.trainer.logged_metrics[f'{task}/f1_score/val']
-                line += f"{task} tr/val score {train_score:.3f}/{val_score:.3f}  "
+                line += f"{task} t/v score {train_score:.3f}/{val_score:.3f}  "
             print(line)
 
     def on_before_optimizer_step(self, optimizer):
@@ -694,7 +694,6 @@ class Data(_Base_Class, LightningDataModule):
 
             # map events to stages
             self.zprint("    Final data for computation")
-            self.global_stage_to_events = {}
             for st in self.global_confinement_shot_split:
                 self.global_stage_to_events[st] = [event for shot in self.global_confinement_shot_split[st] for event in global_shot_to_events[shot]]
                 if len(self.global_confinement_shot_split[st]) == 0:
@@ -784,10 +783,10 @@ class Data(_Base_Class, LightningDataModule):
         if stage in self.elm_datasets and isinstance(self.elm_datasets[stage], torch.utils.data.Dataset):
             self.zprint(f"    Using existing dataset")
             return
+        stage_sw_metadata: list = []
         if self.is_global_zero:
             elm_indices = self.global_elm_split[stage]
             self.zprint(f"    ELM count: {len(elm_indices)}")
-            stage_sw_metadata: list = []
             outliers = 0
             skipped_short_pre_elm_time = 0
             with h5py.File(self.elm_data_file, 'r') as h5_file:
@@ -833,11 +832,9 @@ class Data(_Base_Class, LightningDataModule):
                         i_window_stop -= self.signal_window_size // self.stride_factor
             self.zprint(f"    Skipped ELMs for short pre-ELM time: {skipped_short_pre_elm_time}")
             self.zprint(f"    Skipped outliers: {outliers:,d}")
+            self.zprint(f"    Global signal window count (unprocessed): {len(stage_sw_metadata):,d}")
 
-        self.zprint(f"    Signal window count (unprocessed): {len(stage_sw_metadata):,d}")
-
-        # stats
-        if self.is_global_zero:
+            # stats
             signal_min = np.array(np.inf)
             signal_max = np.array(-np.inf)
             n_bins = 200
@@ -882,9 +879,10 @@ class Data(_Base_Class, LightningDataModule):
                     'raw_signal_mean': self.elm_raw_signal_mean,
                     'raw_signal_stdev': self.elm_raw_signal_stdev,
                 })
+
         self.elm_raw_signal_mean = self.broadcast(self.elm_raw_signal_mean)
         self.elm_raw_signal_stdev = self.broadcast(self.elm_raw_signal_stdev)
-        self.rprint(f"    Standarizing signals with mean {self.elm_raw_signal_mean:.3f} and std {self.elm_raw_signal_stdev:.3f}")
+        self.zprint(f"    Standarizing signals with mean {self.elm_raw_signal_mean:.3f} and std {self.elm_raw_signal_stdev:.3f}")
 
         # time-to-ELM quantiles
         if self.is_global_zero:
@@ -922,11 +920,12 @@ class Data(_Base_Class, LightningDataModule):
             if remainder:
                 stage_sw_metadata = stage_sw_metadata[:-remainder]
             assert len(stage_sw_metadata) % self.trainer.world_size == 0
-            self.zprint(f"    Signal window count (final): {len(stage_sw_metadata):,d}")
+            self.zprint(f"    Global signal window count (final): {len(stage_sw_metadata):,d}")
             self.zprint(f"    Batches per epoch: {len(stage_sw_metadata)/self.batch_size:,.1f}")
         stage_sw_metadata = self.broadcast(stage_sw_metadata)
 
         # split signal windows across ranks
+        rankwise_sw_split = None
         if self.is_global_zero:
             rankwise_sw_split = np.array_split(stage_sw_metadata, self.trainer.world_size)
         rankwise_sw_split = self.broadcast(rankwise_sw_split)
@@ -949,7 +948,7 @@ class Data(_Base_Class, LightningDataModule):
                 elm_to_signals[elm_index] = (signals - self.elm_raw_signal_mean) / self.elm_raw_signal_stdev
         assert len(elm_to_signals) == len(elms_for_rank)
         signal_memory_size = sum([array.nbytes for array in elm_to_signals.values()])
-        self.rprint(f"    Signal memory size: {signal_memory_size/(1024**3):.2f} GB")
+        self.rprint(f"    Signal memory size: {signal_memory_size/(1024**3):.3f} GB")
 
         # rank-wise datasets
         if stage in ['train', 'validation', 'test']:
@@ -970,9 +969,10 @@ class Data(_Base_Class, LightningDataModule):
         self.zprint(f"  {stage.upper()}")
         self.global_stage_to_events = self.broadcast(self.global_stage_to_events)
         global_stage_events = self.global_stage_to_events[stage]
+        rankwise_stage_event_split = None
         if self.is_global_zero:
             if self.trainer.world_size == 0:
-                rankwise_stage_event_split = [global_stage_events]
+                rankwise_stage_event_split = [global_stage_events,]
             else:
                 # sort events by largest to smallest sig win count
                 global_stage_events = sorted(
@@ -981,17 +981,19 @@ class Data(_Base_Class, LightningDataModule):
                     reverse=True,
                 )
                 # assign each event to the rank with the smallest sig win count
-                rankwise_stage_event_split = [{'events':[], 'sw_count':0}] * self.trainer.world_size
-                for event_id in global_stage_events:
+                rankwise_stage_event_split = [{'events':[], 'sw_count':0} for _ in range(self.trainer.world_size)]
+                for event in global_stage_events:
                     rankwise_stage_event_split = sorted(
                         rankwise_stage_event_split,
                         key=lambda e: e['sw_count'],
                     )
-                    rankwise_stage_event_split[0]['events'].append(event_id)
-                    rankwise_stage_event_split[0]['sw_count'] += event_id['sw_count']
+                    rankwise_stage_event_split[0]['events'].append(event)
+                    rankwise_stage_event_split[0]['sw_count'] += event['sw_count']
                 rankwise_sw_counts = [rd['sw_count'] for rd in rankwise_stage_event_split]
                 self.zprint(f"    Rank-wise signal window count (approx): {rankwise_sw_counts}")
                 rankwise_stage_event_split = [re['events'] for re in rankwise_stage_event_split]
+                # for i, re in enumerate(rankwise_stage_event_split):
+                #     self.zprint(f"    Rank {i} shot/ev keys: {[e['shot_event_key'] for e in re[0:4]]}")
         rankwise_stage_event_split = self.broadcast(rankwise_stage_event_split)
 
         # package data for rank
@@ -1004,15 +1006,15 @@ class Data(_Base_Class, LightningDataModule):
         start_index = 0
         outlier_count = 0
         with h5py.File(self.confinement_data_file, 'r') as root:
-            for i, event in enumerate(rankwise_events):
+            for i, event_data in enumerate(rankwise_events):
                 if n_events >= 10 and i % (n_events//10) == 0:
                     self.zprint(f"    Reading event {i:04d}/{n_events:04d}")
-                shot = event['shot']
-                event_id = event['event']
-                label = event['label']
-                duration = event['duration']
-                sw_count = event['sw_count']
-                event_group = root[str(shot)][str(event_id)]
+                shot = event_data['shot']
+                event = event_data['event']
+                label = event_data['label']
+                duration = event_data['duration']
+                sw_count = event_data['sw_count']
+                event_group = root[str(shot)][str(event)]
                 labels = np.array(event_group["labels"], dtype=int)
                 assert labels[0] == label and labels[-1] == label
                 signals = np.array(event_group["signals"][:, :], dtype=np.float32)
@@ -1045,7 +1047,7 @@ class Data(_Base_Class, LightningDataModule):
                     )
                 packaged_signals[start_index:start_index + signals.shape[0], ...] = signals
                 start_index += signals.shape[0]
-                event_2 = event.copy()
+                event_2 = event_data.copy()
                 event_2['labels'] = labels
                 event_2['valid_t0'] = valid_t0
                 rankwise_events_2.append(event_2)
@@ -1076,6 +1078,16 @@ class Data(_Base_Class, LightningDataModule):
         for i in packaged_valid_t0_indices:
             assert i - self.signal_window_size + 1 >= 0  # start slice
             assert i+1 <= packaged_valid_t0.size  # end slice
+
+        # match valid t0 indices count across ranks
+        if self.trainer.world_size > 1:
+            count_valid_t0_indices = len(packaged_valid_t0_indices)
+            all_rank_count_valid_indices: list = [None for _ in range(self.trainer.world_size)]
+            for i in range(self.trainer.world_size):
+                all_rank_count_valid_indices[i] = self.trainer.strategy.broadcast(count_valid_t0_indices, src=i)
+            length_limit = min(all_rank_count_valid_indices)
+            packaged_valid_t0_indices = packaged_valid_t0_indices[:length_limit]
+
 
         # stats
         if self.is_global_zero:
@@ -1118,8 +1130,8 @@ class Data(_Base_Class, LightningDataModule):
         self.zprint(f"    Standarizing signals with mean {self.confinement_raw_signal_mean:.3f} and std {self.confinement_raw_signal_stdev:.3f}")
         packaged_signals = (packaged_signals - self.confinement_raw_signal_mean) / self.confinement_raw_signal_stdev
 
-        self.rprint(f"    Signal memory size: {packaged_signals.nbytes/(1024**3):.2f} GB")
         self.rprint(f"    Valid t0 indices: {len(packaged_valid_t0_indices):,d}")
+        self.rprint(f"    Signal memory size: {packaged_signals.nbytes/(1024**3):.3f} GB")
         self.zprint(f"    Batches per epoch: {len(packaged_valid_t0_indices)/self.batch_size:.1f}")
         self.zprint(f"    {stage.upper()} data time: {time.time()-t_tmp:.1f} s")
 
@@ -1284,7 +1296,9 @@ class Data(_Base_Class, LightningDataModule):
 
     def rprint(self, text: str = ''):
         if self.trainer.world_size > 1:
+            self.barrier()
             print(f"Rank {self.trainer.global_rank}: {text}")
+            self.barrier()
         else:
             print(text)
 
