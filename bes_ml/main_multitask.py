@@ -463,6 +463,8 @@ class Data(_Base_Class, LightningDataModule):
         self.tasks = []
         self.state_items = []
 
+        self.elm_raw_signal_mean: float|Any = None
+        self.elm_raw_signal_stdev: float|Any = None
         if self.elm_classifier:
             self.elm_data_file = Path(self.elm_data_file).absolute()
             assert self.elm_data_file.exists()
@@ -471,8 +473,6 @@ class Data(_Base_Class, LightningDataModule):
             self.global_shot_split: dict[str,np.ndarray] = {}
             self.global_elm_split: dict[str,Sequence] = {}
             self.time_to_elm_quantiles: dict[float,float] = {}
-            self.elm_raw_signal_mean: float|Any = None
-            self.elm_raw_signal_stdev: float|Any = None
             self.state_items.extend([
                 'global_shot_split',
                 'global_elm_split',
@@ -992,8 +992,8 @@ class Data(_Base_Class, LightningDataModule):
                 rankwise_sw_counts = [rd['sw_count'] for rd in rankwise_stage_event_split]
                 self.zprint(f"    Rank-wise signal window count (approx): {rankwise_sw_counts}")
                 rankwise_stage_event_split = [re['events'] for re in rankwise_stage_event_split]
-                # for i, re in enumerate(rankwise_stage_event_split):
-                #     self.zprint(f"    Rank {i} shot/ev keys: {[e['shot_event_key'] for e in re[0:4]]}")
+                for i, re in enumerate(rankwise_stage_event_split):
+                    self.zprint(f"    Rank {i} shot/ev keys: {[e['shot_event_key'] for e in re[0:4]]}")
         rankwise_stage_event_split = self.broadcast(rankwise_stage_event_split)
 
         # package data for rank
@@ -1057,6 +1057,7 @@ class Data(_Base_Class, LightningDataModule):
         packaged_labels = np.concatenate([confinement_mode['labels'] for confinement_mode in rankwise_events_2], axis=0)
         packaged_valid_t0 = np.concatenate([confinement_mode['valid_t0'] for confinement_mode in rankwise_events_2], axis=0)
         assert packaged_labels.size == packaged_valid_t0.size
+        assert packaged_labels.size == packaged_signals.shape[0]
 
         packaged_window_start = []
         index = 0
@@ -1081,7 +1082,9 @@ class Data(_Base_Class, LightningDataModule):
 
         # match valid t0 indices count across ranks
         if self.trainer.world_size > 1:
+            np.random.default_rng().shuffle(packaged_valid_t0_indices)
             count_valid_t0_indices = len(packaged_valid_t0_indices)
+            self.rprint(f"    Valid t0 indices (unmatched): {count_valid_t0_indices:,d}")
             all_rank_count_valid_indices: list = [None for _ in range(self.trainer.world_size)]
             for i in range(self.trainer.world_size):
                 all_rank_count_valid_indices[i] = self.trainer.strategy.broadcast(count_valid_t0_indices, src=i)
@@ -1131,7 +1134,7 @@ class Data(_Base_Class, LightningDataModule):
         packaged_signals = (packaged_signals - self.confinement_raw_signal_mean) / self.confinement_raw_signal_stdev
 
         self.rprint(f"    Valid t0 indices: {len(packaged_valid_t0_indices):,d}")
-        self.rprint(f"    Signal memory size: {packaged_signals.nbytes/(1024**3):.3f} GB")
+        self.rprint(f"    Signal memory size: {packaged_signals.nbytes/(1024**3):.4f} GB")
         self.zprint(f"    Batches per epoch: {len(packaged_valid_t0_indices)/self.batch_size:.1f}")
         self.zprint(f"    {stage.upper()} data time: {time.time()-t_tmp:.1f} s")
 
@@ -1149,51 +1152,55 @@ class Data(_Base_Class, LightningDataModule):
         elif stage == 'predict':
             pass
 
-        # if stage == 'train':
-        #     dataset = Confinement_TrainValTest_Dataset(
-        #         signals=packaged_signals,
-        #         n_rows=self.n_rows,
-        #         n_cols=self.n_cols,
-        #         labels=packaged_labels,
-        #         sample_indices=packaged_valid_t0_indices,
-        #         window_start_indices=packaged_window_start,
-        #         signal_window_size=self.signal_window_size,
-        #         confinement_mode_keys=packaged_shot_event_key,
-        #     )
-        #     return dataset
-        # elif stage in ['validation', 'test']:
-        #     self.confinement_datasets[stage] = Confinement_TrainValTest_Dataset(
-        #             signals=packaged_signals,
-        #             n_rows=self.n_rows,
-        #             n_cols=self.n_cols,
-        #             labels=packaged_labels,
-        #             sample_indices=packaged_valid_t0_indices,
-        #             window_start_indices=packaged_window_start,
-        #             signal_window_size=self.signal_window_size,
-        #             confinement_mode_keys=packaged_shot_event_key,
-        #         )
-        #     return
-        # elif stage == 'predict':
-        #     del self.confinement_train_dataloader
-        #     del self.confinement_datasets['validation']
-        # else:
-        #     raise ValueError
-            
-        # gc.collect()
-        # torch.cuda.empty_cache()
-        # self.rprint(f'The CPU usage is: {psutil.cpu_percent(4)}')
-        # self.rprint(f'RAM memory % used: {psutil.virtual_memory()[2]}')
-        # self.rprint(f'RAM Used (GB): {psutil.virtual_memory()[3]/1000000000}')    
-        # # Store the DataLoader for this GPU
-        # if stage == 'train':
-        #     self.confinement_train_dataloader = torch.utils.data.DataLoader(
-        #         dataset, 
-        #         batch_size=self.batch_size,
-        #         shuffle=True,             
-        #         num_workers=self.num_workers,
-        #         persistent_workers=(self.num_workers > 0),
-        #         drop_last=True,
-        #     )
+    def _elm_train_val_test_dataloaders(self, stage: str) -> torch.utils.data.DataLoader:
+        sampler = (
+            torch.utils.data.RandomSampler(data_source=self.elm_datasets[stage]) if stage == 'train'
+            else torch.utils.data.SequentialSampler(data_source=self.elm_datasets[stage])
+        )
+        if self.epochs_per_batch_size_reduction and stage == 'train':
+            batch_size_reduction_pow2_factor = min(
+                self.max_pow2_batch_size_reduction, 
+                self.trainer.current_epoch//self.epochs_per_batch_size_reduction,
+            ) 
+            batch_size_per_rank = self.batch_size_per_rank // (2**batch_size_reduction_pow2_factor)
+            if batch_size_per_rank != self.batch_size_per_rank:
+                self.zprint(f"Reduced global batch size: {batch_size_per_rank}")
+        else:
+            batch_size_per_rank = self.batch_size_per_rank
+        return torch.utils.data.DataLoader(
+            dataset=self.elm_datasets[stage],
+            sampler=sampler,
+            batch_size=batch_size_per_rank*self.trainer.world_size,  # batch size per rank
+            num_workers=self.num_workers,
+            prefetch_factor=2 if self.num_workers else None,
+            pin_memory=True,
+            drop_last=True if stage in ['train','validation'] else False,
+        )
+
+    def _conf_train_val_test_dataloaders(self, stage: str) -> torch.utils.data.DataLoader:
+        sampler = (
+            torch.utils.data.RandomSampler(self.confinement_datasets[stage]) if stage == 'train'
+            else torch.utils.data.SequentialSampler(self.confinement_datasets[stage])
+        )
+        if stage == 'train' and self.epochs_per_batch_size_reduction:
+            batch_size_reduction_pow2_factor = min(
+                self.max_pow2_batch_size_reduction, 
+                self.trainer.current_epoch//self.epochs_per_batch_size_reduction,
+            ) 
+            batch_size_per_rank = self.batch_size_per_rank // (2**batch_size_reduction_pow2_factor)
+            if batch_size_per_rank != self.batch_size_per_rank:
+                self.zprint(f"Reduced global batch size: {batch_size_per_rank}")
+        else:
+            batch_size_per_rank = self.batch_size_per_rank
+        return torch.utils.data.DataLoader(
+            dataset=self.confinement_datasets[stage],
+            sampler=sampler,
+            batch_size=batch_size_per_rank*self.trainer.world_size,  # batch size per rank
+            num_workers=self.num_workers,
+            prefetch_factor=2 if self.num_workers else None,
+            pin_memory=True,
+            drop_last=True if stage in ['train','validation'] else False,
+        )
 
     def train_dataloader(self) -> dict[str, torch.utils.data.DataLoader]:
         result = {}
@@ -1221,65 +1228,6 @@ class Data(_Base_Class, LightningDataModule):
 
     def predict_dataloader(self) -> None:
         pass
-
-    # if stage == 'train':
-    #     self.confinement_train_dataloader = torch.utils.data.DataLoader(
-    #         dataset, 
-    #         batch_size=self.batch_size,
-    #         shuffle=True,             
-    #         num_workers=self.num_workers,
-    #         persistent_workers=(self.num_workers > 0),
-    #         drop_last=True,
-    #     )
-    def _conf_train_val_test_dataloaders(self, stage: str) -> torch.utils.data.DataLoader:
-        sampler = (
-            torch.utils.data.RandomSampler(self.confinement_datasets[stage]) if stage == 'train'
-            else torch.utils.data.SequentialSampler(self.confinement_datasets[stage])
-        )
-        if stage == 'train' and self.epochs_per_batch_size_reduction:
-            batch_size_reduction_pow2_factor = min(
-                self.max_pow2_batch_size_reduction, 
-                self.trainer.current_epoch//self.epochs_per_batch_size_reduction,
-            ) 
-            batch_size_per_rank = self.batch_size_per_rank // (2**batch_size_reduction_pow2_factor)
-            if batch_size_per_rank != self.batch_size_per_rank:
-                self.zprint(f"Reduced global batch size: {batch_size_per_rank}")
-        else:
-            batch_size_per_rank = self.batch_size_per_rank
-        return torch.utils.data.DataLoader(
-            dataset=self.confinement_datasets[stage],
-            sampler=sampler,
-            batch_size=batch_size_per_rank,  # batch size per rank
-            num_workers=self.num_workers,
-            prefetch_factor=2 if self.num_workers else None,
-            pin_memory=True,
-            drop_last=True if stage in ['train','validation'] else False,
-        )
-
-    def _elm_train_val_test_dataloaders(self, stage: str) -> torch.utils.data.DataLoader:
-        sampler = (
-            torch.utils.data.RandomSampler(data_source=self.elm_datasets[stage]) if stage == 'train'
-            else torch.utils.data.SequentialSampler(data_source=self.elm_datasets[stage])
-        )
-        if self.epochs_per_batch_size_reduction and stage == 'train':
-            batch_size_reduction_pow2_factor = min(
-                self.max_pow2_batch_size_reduction, 
-                self.trainer.current_epoch//self.epochs_per_batch_size_reduction,
-            ) 
-            batch_size_per_rank = self.batch_size_per_rank // (2**batch_size_reduction_pow2_factor)
-            if batch_size_per_rank != self.batch_size_per_rank:
-                self.zprint(f"Reduced global batch size: {batch_size_per_rank}")
-        else:
-            batch_size_per_rank = self.batch_size_per_rank
-        return torch.utils.data.DataLoader(
-            dataset=self.elm_datasets[stage],
-            sampler=sampler,
-            batch_size=batch_size_per_rank,  # batch size per rank
-            num_workers=self.num_workers,
-            prefetch_factor=2 if self.num_workers else None,
-            pin_memory=True,
-            drop_last=True if stage in ['train','validation'] else False,
-        )
 
     def get_state_dict(self) -> dict:
         state_dict = {item: getattr(self, item) for item in self.state_items}
@@ -1569,7 +1517,7 @@ def main(
         callbacks = callbacks,
         enable_checkpointing = True,
         # enable_progress_bar = True if __name__=='__main__' else False,
-        enable_progress_bar = False,
+        enable_progress_bar = True,
         enable_model_summary = False,
         precision = precision,
         strategy = DDPStrategy(
