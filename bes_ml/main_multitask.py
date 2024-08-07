@@ -497,10 +497,6 @@ class Data(_Base_Class, LightningDataModule):
             ])
             self.confinement_datasets: dict[str,torch.utils.data.Dataset] = {}
             self.global_stage_to_events: dict = {}
-            # self.confinement_train_dataloader: torch.utils.data.DataLoader|Any = None
-            # self.train_confinement_events: list = []
-            # self.validation_confinement_events: list = []
-            # self.test_confinement_events: list = []
 
         for item in self.state_items:
             assert hasattr(self, item)
@@ -1160,7 +1156,6 @@ class Data(_Base_Class, LightningDataModule):
             seed=int(np.random.default_rng().integers(0, 2**32-1)),
             drop_last=True if stage=='train' else False,
         )
-        # sampler.set_epoch(0)
         if stage == 'train' and self.epochs_per_batch_size_reduction:
             batch_size_reduction_pow2_factor = min(
                 self.max_pow2_batch_size_reduction, 
@@ -1189,7 +1184,6 @@ class Data(_Base_Class, LightningDataModule):
             seed=int(np.random.default_rng().integers(0, 2**32-1)),
             drop_last=True if stage=='train' else False,
         )
-        # sampler.set_epoch(0)
         if stage == 'train' and self.epochs_per_batch_size_reduction:
             batch_size_reduction_pow2_factor = min(
                 self.max_pow2_batch_size_reduction, 
@@ -1340,13 +1334,6 @@ class Confinement_TrainValTest_Dataset(torch.utils.data.Dataset):
         assert self.signals.shape[1] == self.labels.shape[0]
         assert torch.max(self.sample_indices) < self.labels.shape[0]
 
-        # Create a dictionary to map confinement_mode_keys to start and end indices
-        # self.shot_event_key_to_indices = {}
-        # for i_key, key in enumerate(self.shot_event_keys):
-        #     start_idx = self.window_start_indices[i_key]
-        #     end_idx = self.window_start_indices[i_key + 1] if i_key + 1 < len(self.window_start_indices) else self.signals.shape[1]
-        #     self.shot_event_key_to_indices[key] = (start_idx, end_idx)
-
     def __len__(self) -> int:
         return self.sample_indices.numel()
     
@@ -1367,26 +1354,6 @@ class Confinement_TrainValTest_Dataset(torch.utils.data.Dataset):
         # Convert to tensor
         confinement_mode_id_tensor = torch.tensor([confinement_mode_id_int], dtype=torch.int64)
         return signal_window, label, confinement_mode_id_tensor
-    
-    # def get_full_signal_by_id(self, confinement_mode_id):    
-    #     # Make sure to check what type of key is stored in confinement_mode_id_to_indices
-    #     start_idx, end_idx = self.confinement_mode_id_to_indices.get(confinement_mode_id, (None, None))
-
-    #     if start_idx is None or end_idx is None:
-    #         print(f"Warning: No indices found for confinement_mode_id: {confinement_mode_id}")
-    #         return None
-    #     if self.n_rows >= 3:
-    #         row_idx = 2
-    #     else:
-    #         row_idx = self.n_rows-1
-
-    #     if self.n_cols >= 4:
-    #         col_idx = 3
-    #     else:
-    #         col_idx = self.n_cols-1
-
-    #     print(f"Found start index {start_idx}, end index {end_idx} for confinement_mode_id: {confinement_mode_id}")
-    #     return self.signals[:, start_idx:end_idx, row_idx, col_idx].squeeze(0)
 
 
 def main(
