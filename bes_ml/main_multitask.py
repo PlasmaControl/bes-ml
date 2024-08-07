@@ -1396,6 +1396,7 @@ def main(
         fir_bp_low = None,
         fir_bp_high = None,
         epochs_per_batch_size_reduction: int = None,
+        max_pow2_batch_size_reduction: int = 2,
         max_shots_per_class: int = None,
         max_confinement_event_length: int = None,
 ):
@@ -1546,6 +1547,7 @@ def main(
         fir_bp_low=fir_bp_low,
         fir_bp_high=fir_bp_high,
         epochs_per_batch_size_reduction=epochs_per_batch_size_reduction,
+        max_pow2_batch_size_reduction=max_pow2_batch_size_reduction,
         max_shots_per_class=max_shots_per_class,
         max_confinement_event_length=max_confinement_event_length,
     )
@@ -1579,6 +1581,6 @@ if __name__=='__main__':
         gradient_clip_algorithm='value',
         max_shots_per_class=8,
         max_confinement_event_length=int(20e3),
-        enable_progress_bar=True,
+        # enable_progress_bar=True,
         # use_wandb=True,
     )
