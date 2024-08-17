@@ -1,6 +1,7 @@
 from pathlib import Path
 import dataclasses
 from datetime import datetime
+from types import NoneType
 from typing import OrderedDict, Any, Sequence
 import os
 import time
@@ -69,6 +70,8 @@ class Model(LightningModule, _Base_Class):
     leaky_relu_slope: float = 2e-2
     monitor_metric: str = None
     use_optimizer: str = 'SGD'
+    elm_mean_loss_factor: float = None,
+    conf_mean_loss_factor: float = None,
     # feature_batchnorm: bool = True
     # task_batchnorm: bool = False
 
@@ -104,6 +107,7 @@ class Model(LightningModule, _Base_Class):
                 'recall_score': sklearn.metrics.recall_score,
                 'mean_stat': torch.mean,
                 'std_stat': torch.std,
+                'rms_stat': lambda t: torch.sqrt(torch.mean(torch.pow(t, 2))),
             }
             if self.monitor_metric is None:
                 self.monitor_metric = f'{task_name}/f1_score/val'
@@ -120,6 +124,7 @@ class Model(LightningModule, _Base_Class):
                 'recall_score': sklearn.metrics.recall_score,
                 'mean_stat': torch.mean,
                 'std_stat': torch.std,
+                'rms_stat': lambda t: torch.sqrt(torch.mean(torch.pow(t, 2))),
             }
             if self.monitor_metric is None:
                 self.monitor_metric = f'{task_name}/f1_score/val'
@@ -321,7 +326,8 @@ class Model(LightningModule, _Base_Class):
                             target=labels.type_as(task_outputs),
                         )
                         sum_loss = sum_loss + metric_value if sum_loss else metric_value
-                        sum_loss = sum_loss + task_outputs.pow(2).mean()
+                        if self.elm_mean_loss_factor:
+                            sum_loss = sum_loss + self.elm_mean_loss_factor * task_outputs.pow(2).mean().sqrt()
                     elif 'score' in metric_name:
                         metric_value = metric_function(
                             y_pred=(task_outputs.detach().cpu() >= 0.0).type(torch.int), 
@@ -331,7 +337,7 @@ class Model(LightningModule, _Base_Class):
                         # if self.current_epoch<10:
                         #     metric_value /= 10
                     elif 'stat' in metric_name:
-                        metric_value = metric_function(task_outputs).abs()
+                        metric_value = metric_function(task_outputs).item()
                     self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
             elif task == 'conf_classifier' and dataloader_idx in [None, 1]:
                 labels = batch[task][1] if isinstance(batch, dict) else batch[1]
@@ -342,7 +348,8 @@ class Model(LightningModule, _Base_Class):
                             target=labels.flatten(),
                         )
                         sum_loss = sum_loss + metric_value if sum_loss else metric_value
-                        sum_loss = sum_loss + task_outputs.pow(2).mean()
+                        if self.conf_mean_loss_factor:
+                            sum_loss = sum_loss + self.conf_mean_loss_factor * task_outputs.pow(2).mean().sqrt()
                     elif 'score' in metric_name:
                         metric_value = metric_function(
                             y_pred=(task_outputs > 0.0).type(torch.int).detach().cpu(), 
@@ -356,7 +363,7 @@ class Model(LightningModule, _Base_Class):
                         # if self.current_epoch<10:
                         #     metric_value /= 10
                     elif 'stat' in metric_name:
-                        metric_value = metric_function(task_outputs).abs()
+                        metric_value = metric_function(task_outputs).item()
                     self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
         return sum_loss
 
@@ -1427,6 +1434,8 @@ def main(
         lr_warmup_epochs: int = 5,
         monitor_metric = None,
         use_optimizer = 'SGD',
+        elm_mean_loss_factor = None,
+        conf_mean_loss_factor = None,
         # loggers
         log_freq = 100,
         use_wandb = False,
@@ -1488,6 +1497,8 @@ def main(
         monitor_metric=monitor_metric,
         use_optimizer=use_optimizer,
         is_global_zero=is_global_zero,
+        elm_mean_loss_factor=elm_mean_loss_factor,
+        conf_mean_loss_factor=conf_mean_loss_factor,
     )
     monitor_metric = lit_model.monitor_metric
     lit_model.save_hyperparameters({
@@ -1640,5 +1651,7 @@ if __name__=='__main__':
         max_shots_per_class=8,
         max_confinement_event_length=int(20e3),
         enable_progress_bar=True,
+        elm_mean_loss_factor=1,
+        conf_mean_loss_factor=1,
         # use_wandb=True,
     )
