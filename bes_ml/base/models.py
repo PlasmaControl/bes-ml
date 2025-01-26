@@ -14,7 +14,7 @@ import scipy.signal
 import torch
 import torch.nn as nn
 import torchinfo
-import torchaudio
+# import torchaudio
 import pywt
 from pytorch_wavelets.dwt.transform1d import DWT1DForward
 
@@ -560,7 +560,6 @@ class FFT_Features(FFT_Features_Dataclass, Base_Features):
         bn = nn.BatchNorm3d(num_features=self.fft_num_kernels).to(x.device)
         fft_sw_features = bn(fft_sw_features)
         output_features = self.activation(self.dropout(fft_sw_features))
-        # output_features = self.bn(output_features)
         output_features = self.fft_maxpool(output_features)
         if self.debug:
             assert torch.all(torch.isfinite(output_features))

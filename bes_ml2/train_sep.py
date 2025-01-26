@@ -17,17 +17,17 @@ import wandb
 import psutil
 
 try:
-    from . import confinement_datamodule_4
+    from . import separatrix_datamodule
     from . import elm_lightning_model
 except:
-    from bes_ml2 import confinement_datamodule_4
+    from bes_ml2 import separatrix_datamodule
     from bes_ml2 import elm_lightning_model
 
 
 @dataclasses.dataclass(eq=False)
 class BES_Trainer:
     lightning_model: elm_lightning_model.Lightning_Model
-    datamodule: confinement_datamodule_4.Confinement_Datamodule
+    datamodule: separatrix_datamodule.Separatrix_Datamodule
     experiment_dir: str = './experiment_default'
     trial_name: str = None  # if None, use default Tensorboard scheme
     log_freq: int = 100
@@ -100,6 +100,7 @@ class BES_Trainer:
         gradient_clip_value: int = None,
         float_precision: str|int = '16-mixed' if torch.cuda.is_available() else 32,
         debug_predict: bool = False,
+        visualize_post_test: bool = False,
     ):
         self.lightning_model.log_dir = self.datamodule.log_dir = self.trial_dir
         monitor_metric = self.lightning_model.monitor_metric
@@ -156,6 +157,9 @@ class BES_Trainer:
         
         if skip_test is False:
             trainer.test(datamodule=self.datamodule, ckpt_path='best')
+            if visualize_post_test:
+                # Visualization after testing
+                self.visualize_post_test(trainer, num_top_freq_indices=3, subwindow_idx=0)
 
         if skip_predict is False:
             # free up space
@@ -166,7 +170,7 @@ class BES_Trainer:
                 self.datamodule.test_dataloader(), 
                 self.datamodule.datasets['test'],
                 debug=debug_predict,
-                save_filename='separatrix_test_data.hdf5',
+                save_filename=None,
                 plot_inference=False,
             )
 
@@ -180,6 +184,21 @@ class BES_Trainer:
         )
         print(f"Best model path: {self.best_model_path}")
 
+    def visualize_post_test(self, trainer, num_top_freq_indices, subwindow_idx):
+        # Load a batch of data for visualization
+        dataloader = self.datamodule.test_dataloader()
+        batch = next(iter(dataloader))
+
+        # Extract signals from the batch
+        signals = batch[0]  # Assuming signals are the first element in the batch
+
+        # Load the model from the checkpoint
+        model = self.lightning_model.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
+
+        # Call the visualization method
+        model.visualize_fft_features(signals, num_top_freq_indices=num_top_freq_indices, subwindow_idx=subwindow_idx)
+
+
 if __name__=='__main__':
 
     checkpoint = None
@@ -187,27 +206,27 @@ if __name__=='__main__':
     if checkpoint:
         # load data and model from checkpoint
         lightning_model = elm_lightning_model.Lightning_Model.load_from_checkpoint(checkpoint_path=checkpoint)
-        datamodule = confinement_datamodule_4.Confinement_Datamodule.load_from_checkpoint(checkpoint_path=checkpoint)
+        datamodule = separatrix_datamodule.Separatrix_Datamodule.load_from_checkpoint(checkpoint_path=checkpoint)
     else:
         # initiate new data and model
-        fft_nlayers = 1
-        num_classes = 4
+        cnn_nlayers = 1
         lightning_model = elm_lightning_model.Lightning_Model(
             encoder_lr=1e-3,
             decoder_lr=1e-5,
-            signal_window_size=1024,
-            encoder_type='fft',
-            fft_nlayers=fft_nlayers,
-            fft_dropout=0.1,
-            fft_num_kernels=10,
-            fft_subwindows=2,
-            fft_nbins=2,
-            fft_kernel_freq_size=5,
-            fft_kernel_spatial_size=[(3, 3) for _ in range(fft_nlayers)],
-            fft_maxpool_freq_size=4,
-            fft_maxpool_spatial_size=[(1, 2) for _ in range(fft_nlayers)],
+            signal_window_size=1,
+            encoder_type='none',
+            cnn_nlayers=cnn_nlayers,
+            cnn_num_kernels=(10),
+            cnn_kernel_time_size=[2] * cnn_nlayers,
+            cnn_kernel_spatial_size=3,
+            cnn_maxpool_time_size=(2),
+            # cnn_padding="same",
+            # cnn_maxpool_spatial_size=[(1, 2) for _ in range(cnn_nlayers)],
+            cnn_maxpool_spatial_size=[(1, 1)],
+            separatrix_mlp=True,
+            velocimetry_mlp=False,
             reconstruction_decoder=False,
-            multiclass_classifier_mlp=True,
+            multiclass_classifier_mlp=False,
             time_to_elm_mlp=False,
             classifier_mlp=False,
             mlp_layers=(60, 60),
@@ -215,13 +234,11 @@ if __name__=='__main__':
             leaky_relu_slope=0.001,
             n_rows=8,
             n_cols=8,
-            num_classes=num_classes,
         )
-        datamodule = confinement_datamodule_4.Confinement_Datamodule(
-            data_file='/pscratch/sd/k/kevinsg/bes_ml_jobs/confinement_data/20240112.hdf5',
+        datamodule = separatrix_datamodule.Separatrix_Datamodule(
+            data_file='/pscratch/sd/k/kevinsg/bes_ml_jobs/confinement_data/20241014.hdf5',
             seed=1,
             # max_shots_per_class=35,
-            num_classes=num_classes,
             # max_shots=80,
             # lower_cutoff_frequency_hz=2.5e3,
             # upper_cutoff_frequency_hz=150e3,
@@ -240,9 +257,11 @@ if __name__=='__main__':
             # r_avg_bounds_class_3=(200,240),
             # z_avg_bounds_class_3=(-6,6),
             # delz_avg_bounds_class_3=(0,6),
-            one_hot_labels=True,
+            # clip_signals=2.0,
             # force_validation_shots=['175490', '187035', '191376', '164869', '171471', '172212', '184463', '160778'],
-            force_test_shots=['164884', '163518'],
+            # force_test_shots=['164798'],
+            # train_shots=['164793'],
+            # test_shots=['164798'],
             # test_only=True,
         )
 

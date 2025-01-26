@@ -58,7 +58,7 @@ class Trainer_Base_Dataclass:
     lr_scheduler_factor: float = 0.5  # reduction factor for lr scheduler
     lr_scheduler_threshold: float = 1e-3  # threshold for *relative* decrease in loss to *not* trigger LR scheduler
     low_score_patience: int = 30  # epochs to wait before aborting due to low score
-    low_score_threshold: float = 0.98  # abort if score drops below threshold for number of patience epochs
+    low_score_threshold: float = 0.95  # abort if score drops below threshold for number of patience epochs
     weight_decay: float = 1e-3  # optimizer L2 regularization factor
     minibatch_print_interval: int = 5000
     do_train: bool = False  # if True, start training at end of init
@@ -334,11 +334,13 @@ class Trainer_Base(Trainer_Base_Dataclass):
         best_valid_loss = np.inf
         best_epoch = 0
         do_optuna_prune = False
+        self._memory_diagnostics()
 
         # loop over epochs
         self.logger.info(f"Begin training loop over {self.n_epochs} epochs")
         t_start_training = time.time()
         for i_epoch in range(self.n_epochs):
+            self._memory_diagnostics()
             t_start_epoch = time.time()
             self.logger.info(f"Ep {i_epoch + 1:03d}: begin")
             self.results['lr'].append(self.optimizer.param_groups[0]['lr'])
@@ -573,6 +575,7 @@ class Trainer_Base(Trainer_Base_Dataclass):
                         labels = labels.type_as(predictions)
                     else:
                         labels = labels.type(torch.int64)
+                
                 batch_loss = self.loss_function(
                     predictions.squeeze(),
                     labels

@@ -25,7 +25,7 @@ class Trainer(
     normalize_labels: bool = False  # if True, normalize labels to max/min = +/- 1
 
     def __post_init__(self):
-        self.mlp_output_size = 3
+        self.mlp_output_size = 4
         # self.threshold = 0.5
         self.is_classification = True
         self.is_regression = not self.is_classification
@@ -79,13 +79,13 @@ if __name__=='__main__':
     Trainer(
         # num_workers=0,
         # pin_memory=False,
-        # max_events = 10,
-        data_location = '/global/homes/k/kevinsg/m3586/kgill/bes-ml/bes_data/sample_data/kgill_data/6x8_confinement_data_0c.hdf5',
+        # max_events =175,
+        data_location = '/global/homes/k/kevinsg/m3586/kgill/bes-ml/bes_data/sample_data/kgill_data/6x8_confinement_data_8.hdf5',
         signal_window_size=1024,
         batch_size=256,
         # seed=1,
-        fraction_test=0.17,
-        # fraction_validation=0.3,
+        fraction_test=0.175,
+        fraction_validation=0.175,
         n_epochs=400,
         do_train=True,
         # cnn_layer1_num_kernels=20,
@@ -102,18 +102,19 @@ if __name__=='__main__':
         fft_subwindows=2,
         fft_nbins=2,
         fft_maxpool_freq_size=4,
-        fft_maxpool_spatial_size=1,
         mlp_hidden_layers=(60,60),
         logger_hash = UNIQUE_IDENTIFIER,
         world_size = WORLD_SIZE,
         world_rank = WORLD_RANK,
         local_rank = LOCAL_RANK,
-        # memory_diagnostics=True,
+        memory_diagnostics=True,
         # log_all_ranks = True,
         # weight_decay=0.0,
-        # dropout_rate=0.2,
-        learning_rate=0.0001,
+        dropout_rate=0.1,
+        learning_rate=0.00001,
         # clamp_signals=2.0,
         clip_signals=2.0,
-        # optimizer_type='adam',
+        clip_sigma=False,
+        optimizer_type='adam',
+        # standardize_signals=False,
     )

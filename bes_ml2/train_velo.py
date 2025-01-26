@@ -17,17 +17,17 @@ import wandb
 import psutil
 
 try:
-    from . import confinement_datamodule_4
+    from . import velocimetry_datamodule
     from . import elm_lightning_model
 except:
-    from bes_ml2 import confinement_datamodule_4
+    from bes_ml2 import velocimetry_datamodule
     from bes_ml2 import elm_lightning_model
 
 
 @dataclasses.dataclass(eq=False)
 class BES_Trainer:
     lightning_model: elm_lightning_model.Lightning_Model
-    datamodule: confinement_datamodule_4.Confinement_Datamodule
+    datamodule: velocimetry_datamodule.Velocimetry_Datamodule
     experiment_dir: str = './experiment_default'
     trial_name: str = None  # if None, use default Tensorboard scheme
     log_freq: int = 100
@@ -159,16 +159,15 @@ class BES_Trainer:
 
         if skip_predict is False:
             # free up space
-            del self.datamodule._train_dataloader
+            if self.datamodule.split_train_data_per_gpu:
+                del self.datamodule._train_dataloader  
+            else: 
+                del self.datamodule.datasets['train']
+
             del self.datamodule.datasets['validation']
+            del self.datamodule.datasets['test']
             
-            self.lightning_model.manual_predict_separatrix(
-                self.datamodule.test_dataloader(), 
-                self.datamodule.datasets['test'],
-                debug=debug_predict,
-                save_filename='separatrix_test_data.hdf5',
-                plot_inference=False,
-            )
+            trainer.predict(datamodule=self.datamodule, ckpt_path='best')
 
         self.last_model_path = Path(trainer.checkpoint_callback.last_model_path).absolute()
         print(f"Last model path: {self.last_model_path}")
@@ -187,52 +186,51 @@ if __name__=='__main__':
     if checkpoint:
         # load data and model from checkpoint
         lightning_model = elm_lightning_model.Lightning_Model.load_from_checkpoint(checkpoint_path=checkpoint)
-        datamodule = confinement_datamodule_4.Confinement_Datamodule.load_from_checkpoint(checkpoint_path=checkpoint)
+        datamodule = velocimetry_datamodule.Velocimetry_Datamodule.load_from_checkpoint(checkpoint_path=checkpoint)
     else:
         # initiate new data and model
-        fft_nlayers = 1
-        num_classes = 4
+        cnn_nlayers = 3
         lightning_model = elm_lightning_model.Lightning_Model(
             encoder_lr=1e-3,
-            decoder_lr=1e-5,
-            signal_window_size=1024,
-            encoder_type='fft',
-            fft_nlayers=fft_nlayers,
-            fft_dropout=0.1,
-            fft_num_kernels=10,
-            fft_subwindows=2,
-            fft_nbins=2,
-            fft_kernel_freq_size=5,
-            fft_kernel_spatial_size=[(3, 3) for _ in range(fft_nlayers)],
-            fft_maxpool_freq_size=4,
-            fft_maxpool_spatial_size=[(1, 2) for _ in range(fft_nlayers)],
+            decoder_lr=1e-3,
+            signal_window_size=100,
+            encoder_type='none',
+            cnn_nlayers=2,
+            cnn_num_kernels=[16, 32],
+            cnn_kernel_time_size=[8, 4],
+            cnn_kernel_spatial_size=[3, 3],
+            cnn_padding = [1, 1],
+            cnn_maxpool_spatial_size = [2, 1],
+            cnn_maxpool_time_size = [2, 2],
+            # encoder_type='rcn',
+            # rcn_reservoir_size=1000,
+            # rcn_spectral_radius=0.9,
+            # rcn_sparsity=0.1,
+            # rcn_input_scaling=1.0,
+            # rcn_leaky_rate=0.5,            
+            velocimetry_mlp=True,
             reconstruction_decoder=False,
-            multiclass_classifier_mlp=True,
+            multiclass_classifier_mlp=False,
             time_to_elm_mlp=False,
             classifier_mlp=False,
-            mlp_layers=(60, 60),
+            mlp_layers=(512, 256, 128),
             mlp_dropout=0.1,
             leaky_relu_slope=0.001,
             n_rows=8,
             n_cols=8,
-            num_classes=num_classes,
         )
-        datamodule = confinement_datamodule_4.Confinement_Datamodule(
-            data_file='/pscratch/sd/k/kevinsg/bes_ml_jobs/confinement_data/20240112.hdf5',
+        datamodule = velocimetry_datamodule.Velocimetry_Datamodule(
+            data_file='/pscratch/sd/k/kevinsg/bes_ml_jobs/confinement_data/20241207_vZ.hdf5',
             seed=1,
             # max_shots_per_class=35,
-            num_classes=num_classes,
             # max_shots=80,
             # lower_cutoff_frequency_hz=2.5e3,
             # upper_cutoff_frequency_hz=150e3,
             signal_window_size=lightning_model.signal_window_size,
             n_rows=lightning_model.n_rows,
             n_cols=lightning_model.n_cols,
-            fraction_test=0.15,
-            fraction_validation=0.15,
             batch_size=128,
             num_workers=0,
-            plot_data_stats=False,
             world_size=1,
             # r_avg_bounds=(220,230),
             # z_avg_bounds=(-2,2),
@@ -240,10 +238,10 @@ if __name__=='__main__':
             # r_avg_bounds_class_3=(200,240),
             # z_avg_bounds_class_3=(-6,6),
             # delz_avg_bounds_class_3=(0,6),
-            one_hot_labels=True,
-            # force_validation_shots=['175490', '187035', '191376', '164869', '171471', '172212', '184463', '160778'],
-            force_test_shots=['164884', '163518'],
-            # test_only=True,
+            # clip_signals=2.0,
+            train_shots=['191670'],
+            validation_shots=['191670'],
+            test_shots=['191670'],
         )
 
     trainer = BES_Trainer(

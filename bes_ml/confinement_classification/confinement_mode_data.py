@@ -5,8 +5,10 @@ import dataclasses
 import pickle
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.utils.data
+from sklearn.model_selection import train_test_split
 import h5py
 import yaml
 import matplotlib.pyplot as plt
@@ -74,45 +76,194 @@ class Confinement_Mode_Data(
         self._ddp_barrier()
         self.logger.info(f"Data file: {self.data_location}")
 
+        # with h5py.File(self.data_location, "r") as data_file:
+        #     self.logger.info(f"confinement modes in data file: {len(data_file)}")
+        #     good_keys = []
+        #     l_keys = []
+        #     h_keys = []
+        #     qh_keys = []
+        #     wpqh_keys = []
+        #     for key in data_file:
+        #         good_keys.append(key)
+        #         if key[-1]=='0':
+        #             l_keys.append(key)
+        #         elif key[-1]=='1':
+        #             h_keys.append(key)
+        #         elif key[-1]=='2':
+        #             qh_keys.append(key)
+        #         elif key[-1]=='3':
+        #             wpqh_keys.append(key)
+        #     indices = np.array(
+        #         [int(key) for key in good_keys],
+        #         dtype=int,
+        #     )
+        #     time_frames = sum([data_file[key]['signals'].shape[1] for key in good_keys])
+
+        # self.logger.info(f"confinement mode events: {indices.size}")
+        # self.logger.info(f"Total time frames for confinement mode events: {time_frames:,}")
+
+        # # shuffle confinement mode events
+        # self.rng_generator.shuffle(indices)
+
+        # if self.max_events:
+        #     indices = indices[:self.max_events]
+        #     self.logger.info(f"Limiting data to {self.max_events} confinement mode events")
+
+        # if indices.size >= 5:
+        #     self.logger.info(f"Initial confinement mode indices: {indices[0:5]}")
+
+        # n_validation_confinement_modes = int(self.fraction_validation * indices.size)
+        # n_test_confinement_modes = int(self.fraction_test * indices.size)
+        # test_confinement_modes, validation_confinement_modes, training_confinement_modes = np.split(
+        #     indices,
+        #     [n_test_confinement_modes, n_test_confinement_modes+n_validation_confinement_modes]
+        # )
+        # train_indices = training_confinement_modes
+        # val_indices = validation_confinement_modes
+        # test_indices = test_confinement_modes
+
+        # with h5py.File(self.data_location, "r") as data_file:
+        #     self.logger.info(f"confinement modes in data file: {len(data_file)}")
+        #     good_keys = []
+        #     l_keys = []
+        #     h_keys = []
+        #     qh_keys = []
+        #     wpqh_keys = []
+        #     for key in data_file:
+        #         good_keys.append(key)
+        #         if key[-1]=='0':
+        #             l_keys.append(key)
+        #         elif key[-1]=='1':
+        #             h_keys.append(key)
+        #         elif key[-1]=='2':
+        #             qh_keys.append(key)
+        #         elif key[-1]=='3':
+        #             wpqh_keys.append(key)
+        #     indices = np.array([key for key in good_keys])
+
+        #     time_frames = sum([data_file[key]['signals'].shape[1] for key in good_keys])
+
+        #     self.logger.info(f"confinement mode events: {indices.size}")
+        #     self.logger.info(f"Total time frames for confinement mode events: {time_frames:,}")
+
+        #     # Define class labels for stratified sampling
+        #     labels = np.concatenate([np.full(len(l_keys), 0),
+        #                             np.full(len(h_keys), 1),
+        #                             np.full(len(qh_keys), 2),
+        #                             np.full(len(wpqh_keys), 3)])
+
+        #     # shuffle confinement mode events
+        #     self.rng_generator.shuffle(indices)
+        #     self.rng_generator.shuffle(labels)
+
+        #     # Limit to max_events at shotwise level
+        #     if self.max_events:
+        #         indices = indices[:self.max_events]
+        #         labels = labels[:self.max_events]
+        #         self.logger.info(f"Limiting data to {self.max_events} confinement mode events")
+
+        #     # Print initial indices
+        #     if indices.size >= 5:
+        #         self.logger.info(f"Initial confinement mode indices: {indices[0:5]}")
+        #     # Check if each class has at least 2 samples
+        #     if np.all(np.bincount(labels) > 1) and self.fraction_test>0:
+        #         # Stratified split of indices into train, test and validation sets
+        #         train_indices, test_val_indices, train_labels, test_val_labels = train_test_split(indices, labels, test_size=(self.fraction_test + self.fraction_validation), stratify=labels, random_state=self.seed)
+        #         test_indices, val_indices, test_labels, val_labels = train_test_split(test_val_indices, test_val_labels, test_size=self.fraction_test/(self.fraction_test + self.fraction_validation), stratify=test_val_labels, random_state=self.seed)
+        #         n_validation_confinement_modes = len(val_indices)
+        #         n_test_confinement_modes = len(test_indices)
+                
+        #         # Limit to max_events here to keep original class proportions of dataset
+        #         # if self.max_events:
+        #         #     train_limit = int(len(train_indices) * self.max_events / len(indices))
+        #         #     test_limit = int(len(test_indices) * self.max_events / len(indices))
+        #         #     val_limit = self.max_events - train_limit - test_limit
+
+        #         #     train_indices = np.random.choice(train_indices, size=train_limit, replace=False)
+        #         #     test_indices = np.random.choice(test_indices, size=test_limit, replace=False)
+        #         #     val_indices = np.random.choice(val_indices, size=val_limit, replace=False)
+
+        #         #     self.logger.info(f"Limiting data to {self.max_events} confinement mode events")
+        #     # Now test_indices, val_indices, and train_indices contain indices for your test, validation, and training sets, respectively
+        #     else:
+        #         self.logger.warn("Cannot perform stratified split because at least one class has less than 2 samples or self.fraction_test = 0")
+        #         n_validation_confinement_modes = int(self.fraction_validation * indices.size)
+        #         n_test_confinement_modes = int(self.fraction_test * indices.size)
+        #         test_indices, val_indices, train_indices = np.split(
+        #             indices,
+        #             [n_test_confinement_modes, n_test_confinement_modes+n_validation_confinement_modes]
+        #         )
+
         with h5py.File(self.data_location, "r") as data_file:
-            self.logger.info(f"confinement modes in data file: {len(data_file)}")
-            good_keys = []
-            for key in data_file:
-                good_keys.append(key)
-            indices = np.array(
-                [int(key) for key in good_keys],
-                dtype=int,
-            )
-            time_frames = sum([data_file[key]['signals'].shape[1] for key in good_keys])
+            self.logger.info(f"Confinement modes in data file: {len(data_file)}")
 
-        self.logger.info(f"confinement mode events: {indices.size}")
-        self.logger.info(f"Total time frames for confinement mode events: {time_frames:,}")
+            # Create a dictionary where the keys are shot numbers and the values are tuples of (shot_at_time keys, labels)
+            shots = {}
+            for key in data_file.keys():
+                shot_number = key.split('_')[0][:6]
+                label = int(key.split('_')[1])
+                if shot_number not in shots.keys():
+                    shots[shot_number] = ([], [])
+                shots[shot_number][0].append(key)
+                shots[shot_number][1].append(label)
 
-        # shuffle confinement mode events
-        self.rng_generator.shuffle(indices)
+            # Now shots is a dictionary with shot numbers as keys, and as values we have
+            # tuples with the first element as a list of shot_at_time keys and the second element
+            # is a list of labels
+            
+            # Define your list of bad shot numbers here
+            # bad_shot_numbers = ['163505', '163508', '163512', '163518', '164879', 
+            #                     '164880', '164884', '164901', '190549', '192764',
+            #                     '192767', '192767', '192768', '192718', '192710',
+            #                     '195823', '149993', '149994', '152814', '179703',
+            #                     '170086', '170085', '170063', '189379', '189377',
+            #                     '185458', '193097', '193093', '193090', '179960',
+            #                     '179960', '179959', '179833', '176994']
 
-        if self.max_events:
-            indices = indices[:self.max_events]
-            self.logger.info(f"Limiting data to {self.max_events} confinement mode events")
+            # # Remove bad shot numbers from shots
+            # shots = {k: v for k, v in shots.items() if k not in bad_shot_numbers}
+            # self.logger.info(f" Ignoring the following shots: {bad_shot_numbers}")
+            
+            # Extract the most common label for each shot (assuming labels are 0, 1, 2, 3)
+            for shot_number in shots.keys():
+                labels = shots[shot_number][1]
+                most_common = max(set(labels), key = labels.count)
+                shots[shot_number] = (shots[shot_number][0], most_common)
 
-        if indices.size >= 5:
-            self.logger.info(f"Initial confinement mode indices: {indices[0:5]}")
+            # shots now contains the most common label for each shot
 
-        n_validation_confinement_modes = int(self.fraction_validation * indices.size)
-        n_test_confinement_modes = int(self.fraction_test * indices.size)
+            # Create train, validation and test datasets
+            indices = np.array(list(shots.keys()))
+            self.rng_generator.shuffle(indices)
 
-        test_confinement_modes, validation_confinement_modes, training_confinement_modes = np.split(
-            indices,
-            [n_test_confinement_modes, n_test_confinement_modes+n_validation_confinement_modes]
-        )
+            # Limit the number of events to self.max_events if it is defined
+            if self.max_events:
+                indices = indices[:self.max_events]
+
+            labels = [shots[shot_number][1] for shot_number in indices]
+
+            shot_numbers_train, shot_numbers_test_val, _, _ = train_test_split(indices, labels, test_size=self.fraction_test + self.fraction_validation, stratify=labels, random_state=self.seed)
+            shot_numbers_test, shot_numbers_val, _, _ = train_test_split(shot_numbers_test_val, [shots[shot_number][1] for shot_number in shot_numbers_test_val], test_size=self.fraction_test/(self.fraction_test + self.fraction_validation), stratify=[shots[shot_number][1] for shot_number in shot_numbers_test_val], random_state=self.seed)
+            # overlap = set(shot_numbers_train) & set(shot_numbers_val) & set(shot_numbers_test)
+            # self.logger.info(f"Train data shot numbers: {shot_numbers_train}")
+            # self.logger.info(f"Valid. data shot numbers: {shot_numbers_val}")
+            self.logger.info(f"Test data shot numbers: {shot_numbers_test}")
+            # self.logger.info(f"Overlap between  shot numbers: {overlap}")
+
+            train_indices = np.concatenate([shots[shot_number][0] for shot_number in shot_numbers_train])
+            val_indices = np.concatenate([shots[shot_number][0] for shot_number in shot_numbers_val])
+            test_indices = np.concatenate([shots[shot_number][0] for shot_number in shot_numbers_test])
+
+            n_validation_confinement_modes = val_indices.shape[0]
+            n_test_confinement_modes = test_indices.shape[0]
 
         with (self.output_dir/self.data_partition_file).open('w') as data_partition_file:
             data_partition = {
-                'n_confinement_modes': indices.size,
+                'n_confinement_modes': len(indices),
                 'data_location': self.data_location.as_posix(),
-                'training_confinement_modes': training_confinement_modes.tolist(),
-                'validation_confinement_modes': validation_confinement_modes.tolist(),
-                'test_confinement_modes': test_confinement_modes.tolist(),
+                'training_confinement_modes': train_indices.tolist(),
+                'validation_confinement_modes': val_indices.tolist(),
+                'test_confinement_modes': test_indices.tolist(),
             }
             yaml.safe_dump(
                 data_partition,
@@ -122,20 +273,19 @@ class Confinement_Mode_Data(
             )
 
         self._ddp_barrier()
-        self.logger.info(f"Training data confinement mode events: {training_confinement_modes.size}")
+        self.logger.info(f"Training data confinement mode events: {len(train_indices)}")
 
         self.train_data = self._preprocess_data(
-            indices=training_confinement_modes,
+            indices=train_indices,
             shuffle_indices=True,
-            # oversample_active_elm=self.oversample_active_elm if self.is_classification else False,
             is_train_data=True,
         )
 
         if n_validation_confinement_modes:
             self._ddp_barrier()
-            self.logger.info(f"Validation data confinement mode events: {validation_confinement_modes.size}")
+            self.logger.info(f"Validation data confinement mode events: {val_indices.shape[0]}")
             self.validation_data = self._preprocess_data(
-                indices=validation_confinement_modes,
+                indices=val_indices,
                 # save_filename='validation_confinement_modes',
             )
         else:
@@ -143,9 +293,9 @@ class Confinement_Mode_Data(
             self.validation_data = None
 
         if n_test_confinement_modes and self.is_main_process:
-            self.logger.info(f"Test data confinement mode events: {test_confinement_modes.size}")
+            self.logger.info(f"Test data confinement mode events: {test_indices.shape[0]}")
             self.test_data = self._preprocess_data(
-                indices=test_confinement_modes,
+                indices=test_indices,
                 # save_filename='test_confinement_modes',
                 is_test_data=True,
             )
@@ -171,7 +321,6 @@ class Confinement_Mode_Data(
         self,
         indices: np.ndarray = None,
         shuffle_indices: bool = False,
-        oversample_active_elm: bool = False,
         save_filename: str = '',
         is_train_data: bool = False,
         is_test_data: bool = False,
@@ -186,15 +335,15 @@ class Confinement_Mode_Data(
             confinement_mode_data = []
             time_counts = []
             for i_confinement_mode, confinement_mode_index in enumerate(indices):
-                confinement_mode_key = f"{confinement_mode_index:05d}"
+                confinement_mode_key = f"{confinement_mode_index}"
                 time_counts.append(h5_file[confinement_mode_key]["signals"].shape[1])
             time_count = np.sum(time_counts)
             packaged_signals = np.empty((time_count, 6, 8), dtype=np.float32)
             start_index = 0
             for i_confinement_mode, confinement_mode_index in enumerate(indices):
-                if i_confinement_mode%10 == 0:
-                    self.logger.info(f"  confinement mode event {i_confinement_mode:04d}/{indices.size:04d}")
-                confinement_mode_key = f"{confinement_mode_index:05d}"
+                if i_confinement_mode%100 == 0:
+                    self.logger.info(f"  confinement mode event {i_confinement_mode:04d}/{len(indices):04d}")
+                confinement_mode_key = f"{confinement_mode_index}"
                 confinement_mode_event = h5_file[confinement_mode_key]                
                 signals = np.array(confinement_mode_event["signals"], dtype=np.float32)  # (48, <time>)
                 signals = np.transpose(signals, (1, 0)).reshape(-1, 6, 8)  # reshape to (<time>, 6, 8)
@@ -208,6 +357,7 @@ class Confinement_Mode_Data(
 
                 packaged_signals[start_index:start_index + signals.shape[0]] = signals
                 start_index += signals.shape[0]
+
                 if save_filename and self.is_main_process:
                     if i_confinement_mode % 12 == 0:
                         for i_axis in range(axes.size):
@@ -281,35 +431,25 @@ class Confinement_Mode_Data(
         stats = self._get_statistics(
             sample_indices=packaged_valid_t0_indices,
             signals=packaged_signals,
+            labels=packaged_labels,
         )
         self.logger.info(f" Raw signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
 
         # clip at +/- N volts
-        if self.clip_signals:
+        if self.clip_signals and is_train_data:
             self.logger.info(f"  -> Clipping signal windows beyond +/- {self.clip_signals} V")
             mask = []
             for i in packaged_valid_t0_indices:
                 signal_window = packaged_signals[i: i + self.signal_window_size, :, :]
                 mask.append((signal_window.min() >= -self.clip_signals) and (signal_window.max() <= self.clip_signals))
             packaged_valid_t0_indices = packaged_valid_t0_indices[mask]
+
             stats = self._get_statistics(
                 sample_indices=packaged_valid_t0_indices,
                 signals=packaged_signals,
+                labels=packaged_labels,
             )
             self.logger.info(f"  Clipped signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
-
-        if self.mlp_output_size == 3:
-            if not is_test_data:
-                for local_gpu in range(torch.cuda.device_count()):
-                    if self.local_rank == local_gpu:
-                        packaged_labels = packaged_labels - 1
-                    self._ddp_barrier()
-            else:
-                packaged_labels = packaged_labels - 1
-
-        if self.mlp_output_size == 1:
-            packaged_labels = packaged_labels - packaged_labels.min()
-            packaged_labels[np.where(packaged_labels>0)[0]] = packaged_labels[np.where(packaged_labels>0)[0]]/packaged_labels.max()
 
         if is_train_data:
             self.results['raw_train_signal_mean'] = stats['mean']
@@ -317,7 +457,7 @@ class Confinement_Mode_Data(
         del confinement_mode_data
 
         # standardize signals with mean~0 and stdev~1
-        if self.standardize_signals:
+        if self.standardize_signals and is_train_data:
             self.logger.info(f" Signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
             assert self.results['raw_train_signal_mean'] and self.results['raw_train_signal_stdev']
             mean = self.results['raw_train_signal_mean']
@@ -325,21 +465,28 @@ class Confinement_Mode_Data(
 
             self.logger.info(f"  -> Standardizing signals with mean {mean:.4f} and stdev {stdev:.4f} from training data")
             
-            if not is_test_data:
-                for local_gpu in range(torch.cuda.device_count()):
-                    if self.local_rank == local_gpu:
-                        packaged_signals = (packaged_signals - mean) / stdev
-                    self._ddp_barrier()
-            else:
-                packaged_signals = (packaged_signals - mean) / stdev
+            # if not is_test_data:
+            #     for local_gpu in range(torch.cuda.device_count()):
+            #         if self.local_rank == local_gpu:
+            #             for idx, signal in enumerate(packaged_signals):
+            #                 packaged_signals[idx] = (signal - mean) / stdev
+            #         self._ddp_barrier()
+            # else:
+            #     for idx, signal in enumerate(packaged_signals):
+            #         packaged_signals[idx] = (signal - mean) / stdev
+
+            for idx, signal in enumerate(packaged_signals):
+                packaged_signals[idx] = (signal - mean) / stdev
+
                 
             stats = self._get_statistics(
                 sample_indices=packaged_valid_t0_indices,
                 signals=packaged_signals,
+                labels=packaged_labels,
             )
             self.logger.info(f"  Standardized signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
             # clip at +/- sigma
-            if self.clip_sigma:
+            if self.clip_sigma and not is_test_data:
                 self.logger.info(f"  -> Clipping signal windows beyond +/- {self.clip_sigma} sigma")
                 mask = []
                 for i in packaged_valid_t0_indices:
@@ -349,8 +496,22 @@ class Confinement_Mode_Data(
                 stats = self._get_statistics(
                     sample_indices=packaged_valid_t0_indices,
                     signals=packaged_signals,
+                    labels=packaged_labels,
                 )
                 self.logger.info(f"  Clipped signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
+        print('The CPU usage is: ', psutil.cpu_percent(4))
+        # Getting % usage of virtual_memory ( 3rd field)
+        print('RAM memory % used:', psutil.virtual_memory()[2])
+        # Getting usage of virtual_memory in GB ( 4th field)
+        print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000)
+
+
+        if self.mlp_output_size == 1:
+            packaged_labels = packaged_labels - packaged_labels.min()
+            packaged_labels[np.where(packaged_labels>0)[0]] = packaged_labels[np.where(packaged_labels>0)[0]]/packaged_labels.max()
+
+        if self.mlp_output_size == 3:
+            packaged_labels = packaged_labels - 1
 
         if self.fft_num_kernels:
             self.model.fft_features.fft_calc_histogram = True
@@ -449,13 +610,17 @@ class Confinement_Mode_Data(
         )
         for array in return_tuple:
             assert isinstance(array, np.ndarray)
-            self.logger.info(
-                f"    shape {array.shape}, dtype {array.dtype}, min {np.nanmin(array):.3f}, max {np.nanmax(array):.3f}"
-            )
+            # self.logger.info(
+            #     f"    shape {array.shape}, dtype {array.dtype}, min {np.nanmin(array):.3f}, max {np.nanmax(array):.3f}"
+            # )
 
         return return_tuple
 
-    def _get_statistics(self, sample_indices: np.ndarray, signals: np.ndarray) -> dict:
+    def _get_statistics(self, sample_indices: np.ndarray, signals: np.ndarray, labels: np.ndarray) -> dict:
+        self.logger.info(f"  L-mode time points: {np.where(labels[sample_indices]==0)[0].shape}")
+        self.logger.info(f"  H-mode time points: {np.where(labels[sample_indices]==1)[0].shape}")
+        self.logger.info(f"  QH-mode time points: {np.where(labels[sample_indices]==2)[0].shape}")
+        self.logger.info(f"  WP QH-mode time points: {np.where(labels[sample_indices]==3)[0].shape}")
         signal_min = np.array(np.inf)
         signal_max = np.array(-np.inf)
         n_bins = 200

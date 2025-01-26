@@ -26,7 +26,8 @@ except ImportError:
 class Analyzer_Base(
     # _Multi_Features_Model_Dataclass,
 ):
-    output_dir: Union[str,Path] = 'run_dir'
+    # output_dir: Union[str,Path] = 'run_dir'
+    output_dir = '/pscratch/sd/k/kevinsg/bes_ml_jobs/job_12640337_0/run_dir'
     inputs_file: Union[str,Path] = 'inputs.yaml'
     device: str = 'auto'  # auto (default), cpu, cuda, or cuda:X
     verbose: bool = True
@@ -74,7 +75,7 @@ class Analyzer_Base(
         self.test_data = None
         if self.inputs['fraction_test'] > 0.0:
             self._load_test_data()
-            
+        
         self.all_predictions = None
         self.all_labels = None
         self.all_signals = None

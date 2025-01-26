@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import socket
 from pathlib import Path
@@ -66,14 +68,14 @@ if __name__=='__main__':
     Trainer(
         # num_workers=0,
         # pin_memory=False,
-        max_events = 5,
-        data_location = '/global/homes/k/kevinsg/m3586/kgill/bes-ml/bes_data/sample_data/kgill_data/6x8_confinement_data_2.hdf5',
-        signal_window_size=128,
-        batch_size=256,
-        seed=2,
-        fraction_test=0,
-        # fraction_validation=0,
-        n_epochs=80,
+        # max_events = 40,
+        data_location = '/global/homes/k/kevinsg/m3586/kgill/bes-ml/bes_data/sample_data/kgill_data/6x8_confinement_data_8.hdf5',
+        signal_window_size=256,
+        batch_size=512,
+        seed=0,
+        fraction_test=0.15,
+        fraction_validation=0.15,
+        n_epochs=3,
         do_train=True,
         # cnn_layer1_num_kernels=20,
         # cnn_layer1_kernel_spatial_size=3,
@@ -95,10 +97,10 @@ if __name__=='__main__':
         # log_all_ranks = True,
         dropout_rate=0.2,
         weight_decay=0.0,
-        learning_rate=0.000001,
+        learning_rate=0.00001,
         # clamp_signals=2.0,
         standardize_signals=False,
-        clip_signals=2.0,
+        # clip_signals=2.0,
         # sgd_momentum=0.5,
         # sgd_dampening=0.5,
         # lr_scheduler_factor=0.8,
