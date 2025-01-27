@@ -154,59 +154,9 @@ class Torch_RCN_Mixin(Torch_Base):
 
     def make_rcn_encoder(self, input_dim: int, output_dim: int) -> torch.nn.Module:
         """
-        Constructs a Reservoir Computing Network (RCN) for encoding.
-        
-        Parameters:
-        - input_dim: Dimensionality of the input features.
-        - output_dim: Dimensionality of the output features.
-
-        Returns:
-        - An RCN model.
+        Constructs a Reservoir Computing Network (RCN) that itself outputs
+        the final velocity.
         """
-        # class RCN(torch.nn.Module):
-        #     def __init__(self, reservoir_size, spectral_radius, sparsity, input_scaling, leaky_rate):
-        #         super().__init__()
-        #         self.reservoir_size = reservoir_size
-        #         self.spectral_radius = spectral_radius
-        #         self.sparsity = sparsity
-        #         self.input_scaling = input_scaling
-        #         self.leaky_rate = leaky_rate
-
-        #         # Input-to-Reservoir Weights
-        #         self.input_weights = torch.randn(reservoir_size, input_dim) * input_scaling
-
-        #         # Reservoir-to-Reservoir Weights
-        #         self.reservoir_weights = torch.rand(reservoir_size, reservoir_size) - 0.5
-        #         self.reservoir_weights[torch.rand_like(self.reservoir_weights) > sparsity] = 0
-        #         eigenvalues, _ = torch.linalg.eig(self.reservoir_weights)
-        #         max_eigenvalue = torch.abs(eigenvalues).max()
-        #         self.reservoir_weights *= spectral_radius / max_eigenvalue
-
-        #         # Reservoir state initialization
-        #         self.reservoir_state = torch.zeros(reservoir_size)
-
-        #     def forward(self, input_sequence):
-        #         """
-        #         Forward pass through the RCN.
-
-        #         Parameters:
-        #         - input_sequence: Tensor of shape (batch_size, time_steps, input_dim).
-
-        #         Returns:
-        #         - Outputs aggregated from the reservoir.
-        #         """
-        #         batch_size, time_steps, _ = input_sequence.size()
-        #         outputs = []
-        #         for t in range(time_steps):
-        #             input_t = input_sequence[:, t, :]  # Shape: (batch_size, input_dim)
-        #             input_t = input_t @ self.input_weights.T  # Map to reservoir
-        #             reservoir_t = torch.tanh(input_t + self.reservoir_state @ self.reservoir_weights.T)
-        #             self.reservoir_state = (1 - self.leaky_rate) * self.reservoir_state + self.leaky_rate * reservoir_t
-        #             outputs.append(self.reservoir_state)
-
-        #         outputs = torch.stack(outputs, dim=1)  # Shape: (batch_size, time_steps, reservoir_size)
-        #         return outputs.mean(dim=1)  # Aggregate over time (e.g., mean or final state)
-
 
         class RCN(torch.nn.Module):
             def __init__(self, input_dim, reservoir_size, spectral_radius, sparsity, input_scaling, leaky_rate):
@@ -218,42 +168,61 @@ class Torch_RCN_Mixin(Torch_Base):
                 self.input_scaling = input_scaling
                 self.leaky_rate = leaky_rate
 
-                # Input-to-Reservoir Weights
+                # Input-to-Reservoir
                 self.input_weights = torch.nn.Parameter(
-                    torch.randn(reservoir_size, input_dim) * input_scaling, requires_grad=False
+                    torch.randn(reservoir_size, input_dim) * input_scaling,
+                    requires_grad=False
                 )
 
-                # Reservoir-to-Reservoir Weights
+                # Reservoir-to-Reservoir
                 self.reservoir_weights = torch.nn.Parameter(
-                    torch.rand(reservoir_size, reservoir_size) - 0.5, requires_grad=False
+                    torch.rand(reservoir_size, reservoir_size) - 0.5,
+                    requires_grad=False
                 )
                 self.reservoir_weights[torch.rand_like(self.reservoir_weights) > sparsity] = 0
                 eigenvalues, _ = torch.linalg.eig(self.reservoir_weights)
                 max_eigenvalue = torch.abs(eigenvalues).max()
                 self.reservoir_weights.data *= spectral_radius / max_eigenvalue
 
-                # Reservoir state initialization (register as buffer for correct device placement)
-                self.register_buffer("reservoir_state", torch.zeros(reservoir_size))
+                # We store one reservoir state *per sample* in forward, so no single global buffer is needed.
+                # We'll create it on the fly for each batch.
+
+                # ---- NEW: add a readout layer so the RCN directly outputs velocity. ----
+                # Suppose we want a single scalar output per sample (velocimetry).
+                self.readout_weights = torch.nn.Parameter(
+                    0.01 * torch.randn(reservoir_size, 1),
+                    requires_grad=True
+                )
+                self.readout_bias = torch.nn.Parameter(
+                    torch.zeros(1),
+                    requires_grad=True
+                )
 
             def forward(self, input_sequence):
-                # Ensure all tensors are on the same device
-                self.reservoir_state = self.reservoir_state.to(input_sequence.device)
-                self.input_weights = self.input_weights.to(input_sequence.device)
-                self.reservoir_weights = self.reservoir_weights.to(input_sequence.device)
-
+                """
+                input_sequence: shape [B, T, input_dim]
+                returns: shape [B, 1] (pure RCN output)
+                """
+                device = input_sequence.device
                 batch_size, time_steps, _ = input_sequence.size()
+
+                # Start with zero reservoir states for each sample:
+                reservoir_states = torch.zeros(batch_size, self.reservoir_size, device=device)
+
                 outputs = []
-
-                # Process input sequence
                 for t in range(time_steps):
-                    input_t = input_sequence[:, t, :]  # Shape: (batch_size, input_dim)
-                    input_t = input_t @ self.input_weights.T  # Map to reservoir
-                    reservoir_t = torch.tanh(input_t + self.reservoir_state @ self.reservoir_weights.T)
-                    self.reservoir_state = (1 - self.leaky_rate) * self.reservoir_state + self.leaky_rate * reservoir_t
-                    outputs.append(self.reservoir_state)
+                    # Input_t has shape [B, input_dim]
+                    input_t = input_sequence[:, t, :] @ self.input_weights.T   # -> [B, reservoir_size]
+                    # Standard reservoir update
+                    reservoir_t = torch.tanh(input_t + reservoir_states @ self.reservoir_weights.T)
+                    reservoir_states = (1 - self.leaky_rate)*reservoir_states + self.leaky_rate*reservoir_t
+                    outputs.append(reservoir_states)
 
-                outputs = torch.stack(outputs, dim=1)  # Shape: (batch_size, time_steps, reservoir_size)
-                return outputs.mean(dim=1)  # Aggregate over time (e.g., mean or final state)
+                # Example: take mean over time, then do the linear readout:
+                outputs = torch.stack(outputs, dim=1)         # [B, T, reservoir_size]
+                final_state = outputs.mean(dim=1)             # [B, reservoir_size]
+                out = final_state @ self.readout_weights + self.readout_bias  # [B, 1]
+                return out
 
         return RCN(
             input_dim=input_dim,
@@ -840,7 +809,7 @@ class Lightning_Model(
     penultimate_outputs: list = dataclasses.field(default_factory=list)
     visualize_embeddings: bool = False
     save_test_data: bool = False
-    n_rows: int = 6
+    n_rows: int = 8
     n_cols: int = 8
 
     def __post_init__(self):
@@ -931,37 +900,23 @@ class Lightning_Model(
                         raise KeyError
                 else:
                     raise KeyError
-            
-        # cnn_parameters = sum(p.numel() for p in self.cnn_encoder.parameters() if p.requires_grad)
-        # print(f"  CNN encoder parameters {cnn_parameters:,}")
-        total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        print(f"Total parameters {total_parameters:,}")
 
-        encoder_parameters = 0  # Default value if no encoder is present
-        if getattr(self, 'encoder', None) is not None:
-            encoder_parameters = sum(p.numel() for p in self.encoder.parameters() if p.requires_grad)
-            print(f"  Encoder parameters: {encoder_parameters:,}")
-            
-        # if hasattr(self, 'raw_cnn_encoder'):
-        #     raw_cnn_parameters = sum(p.numel() for p in self.raw_cnn_encoder.parameters() if p.requires_grad)
-        #     print(f"  Raw CNN encoder parameters {raw_cnn_parameters:,}")
+        # If we specifically want a "pure RCN" for velocity
+        if self.encoder_type == 'rcn':
+            # We do *not* want a separate MLP, but we DO want velocity metrics:
+            self.frontends_active["velocimetry_rcn"] = True  # So update_step sees it
+            # Create the metrics once
+            for label in ["vZ"]:
+                setattr(self, f"velocimetry_rcn_{label}_mse_loss", torchmetrics.MeanSquaredError())
+                setattr(self, f"velocimetry_rcn_{label}_r2_score",  torchmetrics.R2Score(num_outputs=1))
 
-        # if hasattr(self, 'fft_cnn_encoder'):
-        #     fft_cnn_parameters = sum(p.numel() for p in self.fft_cnn_encoder.parameters() if p.requires_grad)
-        #     print(f"  FFT CNN encoder parameters {fft_cnn_parameters:,}")
-
-        # if hasattr(self, 'rcn_encoder'):
-        #     rcn_parameters = sum(p.numel() for p in self.rcn_encoder.parameters() if p.requires_grad)
-        #     print(f"  RCN encoder parameters {rcn_parameters:,}")
-
-        for key, frontend_key in self.frontends.items():
-            n_parameters = sum(p.numel() for p in frontend_key.parameters() if p.requires_grad)
-            print(f"  Frontend `{key}` parameters: {n_parameters:,}")
-
+        self.log_param_counts()  
+       
         # self.example_input_array = torch.zeros(
         #     (1, 1, self.signal_window_size, self.n_rows, self.n_cols), 
         #     dtype=torch.float32,
         # )
+
         self.example_input_array = torch.zeros(
             (1, 1, self.signal_window_size, self.n_rows), 
             dtype=torch.float32,
@@ -969,111 +924,52 @@ class Lightning_Model(
 
         self.initialize_layers()
 
-    def visualize_fft_features(self, x, num_top_freq_indices=3, subwindow_idx=0):
-        with torch.no_grad():
-            # Perform FFT-based feature extraction
-            batch_size, num_channels, time_dim, spatial_dim1, spatial_dim2 = x.shape
-            fft_bins = torch.empty((batch_size, self.fft_nbins, self.nfreqs - 1, spatial_dim1, spatial_dim2), dtype=x.dtype, device=x.device)
-            fft_subwindows = torch.empty((batch_size, self.fft_subwindows, self.nfreqs - 1, spatial_dim1, spatial_dim2), dtype=x.dtype, device=x.device)
-        
-            for i_subwindow, subwindow in enumerate(x.split(self.subwindow_size, dim=2)):
-                for i_bin in range(self.fft_nbins):
-                    bin_data = subwindow[:, :, i_bin * self.nfft:(i_bin + 1) * self.nfft, :, :]
-                    fft_output = torch.fft.rfft(bin_data, dim=2)[:, :, 1:, :, :]  # Remove DC component
-
-                    magnitude = torch.abs(fft_output)
-                    fft_bins[:, i_bin:i_bin+1, :self.nfreqs-1, :, :] = magnitude ** 2
-
-                fft_subwindows[:, i_subwindow:i_subwindow+1, :, :, :] = torch.mean(fft_bins, dim=1, keepdim=True)
-
-            fft_subwindows[fft_subwindows < 1e-5] = 1e-5        
-            fft_subwindows = torch.log10(fft_subwindows)
-
-            # Now working with fft_subwindows instead of fft_features
-            subwindow_features = fft_subwindows[:, subwindow_idx, :, :, :]
-            print("Subwindow features shape:", subwindow_features.shape)  # Debugging step 2
-
-            # Getting the top frequency indices based on magnitude
-            magnitude = subwindow_features.abs()
-            top_freq_indices = torch.topk(magnitude.reshape(magnitude.shape[0], -1), num_top_freq_indices, dim=1)[1]
-
-            # Ensuring the frequency indices are within the valid range
-            top_freq_indices = torch.clamp(top_freq_indices, 0, self.nfreqs - 2)
-
-            # Visualization for each index in top_freq_indices
-            for i in range(num_top_freq_indices):
-                freq_index = top_freq_indices[0, i]  # Assuming visualization of the first item in the batch
-                self.plot_contour(subwindow_features[0, freq_index], title=f"Subwindow {subwindow_idx}, Freq Index {freq_index}_{i}")
-
-    def plot_contour(self, data, title):
-        """
-        Plot a contour map for the given data.
-        
-        Args:
-            data: 2D Tensor representing the spatial distribution of magnitudes.
-            title: Title for the plot.
-        """
-        # Ensure the data is at least 2D and matches the spatial grid dimensions
-        if data.ndim == 1:
-            # Reshape or expand the 1D data to 2D
-            data = data.view(self.n_rows, self.n_cols)  # Adjust dimensions as needed
-
-        if data.shape[0] < 2 or data.shape[1] < 2:
-            # Handle cases where reshaped data is still not (2, 2) or larger
-            raise ValueError("Data for contour plot must be at least (2, 2) in shape.")
-
-        data_np = data.cpu().numpy()
-        plt.figure(figsize=(10, 8))
-        X, Y = np.meshgrid(range(data_np.shape[1]), range(data_np.shape[0]))  # Spatial grid
-        plt.contourf(X, Y, np.flip(data_np, axis=0), levels=20, cmap="cubehelix")
-        plt.title(title)
-        plt.xlabel('Radial')
-        plt.ylabel('Poloidal')
-        plt.colorbar(label='Log Magnitude')
-        filepath = os.path.join(self.log_dir, title)
-        print(f"Saving figures {filepath}")
-        plt.savefig(filepath)
-
     def configure_optimizers(self):
-        # Define the different learning rates
-        encoder_lr = self.encoder_lr  
-        mlp_lr = self.decoder_lr 
+        encoder_lr = self.encoder_lr
+        frontend_lr = self.decoder_lr
 
-        # Parameters with their respective learning rates
-        # param_groups = [
-        #     # {'params': self.cnn_encoder.parameters(), 'lr': cnn_encoder_lr},
-        #     {'params': self.frontends["multiclass_classifier_mlp"].parameters(), 'lr': mlp_classifier_lr},
-        # ]
-        # if hasattr(self, 'rcn_encoder'):
-        #     parameters = self.rcn_encoder.parameters()
-        # elif hasattr(self, 'raw_cnn_encoder'):
-        #     parameters = self.cnn_encoder.parameters()
+        # Build a list of param groups
+        param_groups = []
 
-        # param_groups = [
-        #     {'params': self.encoder.parameters(), 'lr': encoder_lr},
-        #     {'params': self.frontends["velocimetry_mlp"].parameters(), 'lr': mlp_lr},
-        #     # {'params': self.frontends["separatrix_mlp"].parameters(), 'lr': mlp_classifier_lr},
+        # 1) The encoder, if present, at a specific LR
+        if self.encoder is not None:
+            param_groups.append({
+                "params": [p for p in self.encoder.parameters() if p.requires_grad],
+                "lr": encoder_lr,
+            })
 
-        # ]
-        self.optimizer = torch.optim.Adam(
-            self.parameters(),
-            lr=mlp_lr,
+        # 2) The frontends, if any, at a different LR
+        for name, module in self.frontends.items():
+            # e.g. your “MLP” frontends or decoders
+            param_groups.append({
+                "params": [p for p in module.parameters() if p.requires_grad],
+                "lr": frontend_lr,
+            })
+
+        # Fallback: if no param_groups, just do everything in one
+        if not param_groups:
+            param_groups = [{"params": self.parameters(), "lr": frontend_lr}]
+
+        optimizer = torch.optim.Adam(
+            param_groups,
             weight_decay=self.weight_decay,
         )
-        self.lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer=self.optimizer,
+
+        lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer=optimizer,
             factor=0.5,
             patience=self.lr_scheduler_patience,
             threshold=self.lr_scheduler_threshold,
             min_lr=1e-7,
             mode='min' if 'loss' in self.monitor_metric else 'max',
         )
-        return {
-            'optimizer': self.optimizer,
-            'lr_scheduler': self.lr_scheduler,
-            'monitor': self.monitor_metric,
-        }
 
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": lr_scheduler,
+            "monitor": self.monitor_metric,
+        }
+    
     def forward(self, signals: torch.Tensor) -> dict[str, torch.Tensor]:
         results = {}
         
@@ -1094,8 +990,9 @@ class Lightning_Model(
             features = self.reshape_signals_2(signals)
         elif self.encoder_type == 'rcn':
             reshaped_signals = self.reshape_signals_rcn(signals)
-            # Process signals through the RCN encoder
-            features = self.encoder(reshaped_signals)
+            velocity_pred = self.encoder(reshaped_signals)   # shape [B,1]
+            results["velocimetry_rcn"] = velocity_pred
+            return results
         else:
             raise ValueError("Invalid encoder_type")
         
@@ -1283,9 +1180,6 @@ class Lightning_Model(
         self.penultimate_outputs.append(output.cpu().detach().numpy())
     
     def on_test_start(self) -> None:
-        if 'velocimetry_mlp' in self.frontends_active and self.save_test_data:
-            self.collected_data = []
-
         if self.visualize_embeddings:
             self.penultimate_outputs.clear()  # Clear any previous outputs
             self.labels = []  # Initialize the list for storing labels
@@ -1313,27 +1207,6 @@ class Lightning_Model(
                 per_class_labels = (class_labels == i).int()  # Binary labels for each class
                 f1_metric.update(per_class_preds, per_class_labels)
         
-        # old approach for saving inference data
-        if 'velocimetry_mlp' in results and self.save_test_data:
-            # Reshape to [batch_size, 4, 8, 8] assuming the order is [vR, vR_std, vZ, vZ_std]
-            # frontend_result = results['velocimetry_mlp'].detach().view(-1, 2, 8, 8)
-            frontend_result = results['velocimetry_mlp'].detach().view(-1, self.n_cols)
-            # components = ['vZ', 'vZ_std']
-            components = ['vZ_shear_profile']
-            # Create a dictionary to store predictions and actual labels
-            processed_data = {}
-            # for i, component in enumerate(components):
-            #     processed_data[f"{component}_pred"] = frontend_result[:, i, :, :].cpu().numpy()
-            #     processed_data[f"{component}_true"] = labels[component].cpu().numpy()
-
-            processed_data[f"vZ_shear_profile_pred"] = frontend_result[:, :].cpu().numpy()
-            processed_data[f"vZ_shear_profile_true"] = labels.cpu().numpy()
-
-            processed_data['signals'] = signals.cpu()
-            processed_data['time_points'] = time_points.cpu()
-            
-            self.collected_data.append((batch_idx, processed_data))
-
         self.update_step(batch, batch_idx)
         if self.visualize_embeddings:
             self.labels.extend(labels.cpu().numpy())
@@ -1392,27 +1265,6 @@ class Lightning_Model(
                         logger.experiment.add_figure(f"tsne/{filename}", fig_3d, close=False)
                     elif isinstance(logger, loggers.WandbLogger):
                         logger.log_image(key='tsne', images=[filepath+'.png'])
-
-        # old approach
-        if 'velocimetry_mlp' in self.frontends_active and self.save_test_data:
-            print("Number of data batches collected:", len(self.collected_data))
-            save_filename = 'velocimetry_inference_data.hdf5'
-            data_filepath = os.path.join(self.log_dir, save_filename)
-            # Open or create an HDF5 file
-            with h5py.File(data_filepath, 'a') as f:
-                for batch_idx, data_tuple in enumerate(self.collected_data):
-                    _, data = data_tuple  # Unpack the tuple to get the data dictionary
-                    group_name = f'batch_{batch_idx}'
-                    if group_name in f:
-                        print(f"Group {group_name} already exists. Overwriting...")
-                        del f[group_name]  # Remove the existing group to avoid conflicts
-                    grp = f.create_group(group_name)
-                    for key, value in data.items():
-                        # Ensure value is a suitable format for HDF5
-                        if isinstance(value, (np.ndarray, list)):  # Ensure lists are converted to arrays
-                            value = np.array(value)
-                        grp.create_dataset(key, data=value, compression="gzip")
-            print(f"Velocimetry test data successfully saved to HDF5 at {data_filepath}.")
 
         self.compute_log_reset(stage='test')
         print(f"Test elapsed time {(time.time()-self.t_test_start)/60:0.1f} min")
@@ -2290,4 +2142,30 @@ class Lightning_Model(
                 logger.log_image(key='summary', images=[filepath+'.png'])
 
         plt.close(fig)
-    
+
+    def log_param_counts(self):
+        # 1) Print total trainable params
+        total_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"Total trainable parameters: {total_params:,}")
+
+        # 2) Optionally, if `self.encoder` exists:
+        if getattr(self, "encoder", None) is not None:
+            enc_params = sum(p.numel() for p in self.encoder.parameters() if p.requires_grad)
+            print(f"  Encoder parameters: {enc_params:,}")
+
+        # 3) If you have special sub-encoders:
+        if hasattr(self, "raw_cnn_encoder"):
+            if self.raw_cnn_encoder is not None:
+                raw_cnn_params = sum(p.numel() for p in self.raw_cnn_encoder.parameters() if p.requires_grad)
+                print(f"  Raw CNN encoder parameters: {raw_cnn_params:,}")
+
+        if hasattr(self, "fft_cnn_encoder"):
+            if self.fft_cnn_encoder is not None:
+                fft_cnn_params = sum(p.numel() for p in self.fft_cnn_encoder.parameters() if p.requires_grad)
+                print(f"  FFT CNN encoder parameters: {fft_cnn_params:,}")
+
+        # 4) Print param counts for frontends
+        for name, module in self.frontends.items():
+            params = sum(p.numel() for p in module.parameters() if p.requires_grad)
+            print(f"  Frontend `{name}` parameters: {params:,}")
+   
