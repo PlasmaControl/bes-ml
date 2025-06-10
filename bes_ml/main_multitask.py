@@ -70,8 +70,9 @@ class Model(LightningModule, _Base_Class):
     leaky_relu_slope: float = 2e-2
     monitor_metric: str = None
     use_optimizer: str = 'SGD'
-    elm_mean_loss_factor: float = None,
-    conf_mean_loss_factor: float = None,
+    elm_mean_loss_factor: float = None
+    conf_mean_loss_factor: float = None
+    initial_weight_factor: float = 1.0
     # feature_batchnorm: bool = True
     # task_batchnorm: bool = False
 
@@ -105,9 +106,8 @@ class Model(LightningModule, _Base_Class):
                 'f1_score': sklearn.metrics.f1_score,
                 'precision_score': sklearn.metrics.precision_score,
                 'recall_score': sklearn.metrics.recall_score,
-                'mean_stat': torch.mean,
+                'mean_stat': lambda t: torch.abs(torch.mean(t)), #torch.mean,
                 'std_stat': torch.std,
-                'rms_stat': lambda t: torch.sqrt(torch.mean(torch.pow(t, 2))),
             }
             if self.monitor_metric is None:
                 self.monitor_metric = f'{task_name}/f1_score/val'
@@ -122,9 +122,8 @@ class Model(LightningModule, _Base_Class):
                 'f1_score': sklearn.metrics.f1_score,
                 'precision_score': sklearn.metrics.precision_score,
                 'recall_score': sklearn.metrics.recall_score,
-                'mean_stat': torch.mean,
+                'mean_stat': lambda t: torch.abs(torch.mean(t)), #torch.mean,
                 'std_stat': torch.std,
-                'rms_stat': lambda t: torch.sqrt(torch.mean(torch.pow(t, 2))),
             }
             if self.monitor_metric is None:
                 self.monitor_metric = f'{task_name}/f1_score/val'
@@ -146,7 +145,7 @@ class Model(LightningModule, _Base_Class):
                             param.data.fill_(1)
                         else:
                             n_in = np.prod(param.shape[1:])
-                            sqrt_k = np.sqrt(0.15 / n_in)
+                            sqrt_k =  np.sqrt(3*self.initial_weight_factor / n_in)
                             param.data.uniform_(-sqrt_k, sqrt_k)
                             # param.data.normal_(std=sqrt_k)
                             self.zprint(f"  {name}: initialized to normal +- {sqrt_k:.1e} n*var: {n_in*torch.var(param.data):.3f} (n {param.data.numel()})")
@@ -160,8 +159,10 @@ class Model(LightningModule, _Base_Class):
                 }
                 batch_output = self(batch_input)
                 for task, task_output in batch_output.items():
-                    if task_output.mean().abs() > 0.03 or task_output.std()/task_output.mean().abs() < 3.5:
+                    if good_init == False: continue
+                    if task_output.mean().abs() / task_output.std() > 0.25:
                         good_init = False
+                        continue
                     self.zprint(f"  Task {task} output shape: {task_output.shape}")
                     self.zprint(f"  Task {task} output mean {task_output.mean():.4f} stdev {task_output.std():.4f} min/max {task_output.min():.3f}/{task_output.max():.3f}")
 
@@ -179,11 +180,13 @@ class Model(LightningModule, _Base_Class):
         feature_layer_dict = OrderedDict()
 
         conv_layers = (
-            {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
-            {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1},
-            {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
+            {'out_channels': 6, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
             {'out_channels': 8, 'kernel': (1, 3, 3), 'stride': 1},
-            {'out_channels': 8, 'kernel': (1, 4, 4), 'stride': 1},
+            {'out_channels': 10, 'kernel': (4, 1, 1), 'stride': (4, 1, 1)},
+            {'out_channels': 16, 'kernel': (1, 3, 3), 'stride': 1},
+            {'out_channels': 16, 'kernel': (1, 3, 3), 'stride': 1},
+            {'out_channels': 16, 'kernel': (1, 2, 2), 'stride': 1},
+            {'out_channels': 16, 'kernel': (4, 1, 1), 'stride': (4, 1, 1)},
         )
 
         data_shape = self.input_data_shape
@@ -327,15 +330,16 @@ class Model(LightningModule, _Base_Class):
                         )
                         sum_loss = sum_loss + metric_value if sum_loss else metric_value
                         if self.elm_mean_loss_factor:
-                            sum_loss = sum_loss + self.elm_mean_loss_factor * task_outputs.pow(2).mean().sqrt()
+                            mean_loss = self.elm_mean_loss_factor * task_outputs.mean().pow(2).sqrt() / task_outputs.std()
+                            sum_loss = sum_loss + mean_loss
                     elif 'score' in metric_name:
                         metric_value = metric_function(
                             y_pred=(task_outputs.detach().cpu() >= 0.0).type(torch.int), 
                             y_true=labels.detach().cpu(),
                             zero_division=0,
                         )
-                        # if self.current_epoch<10:
-                        #     metric_value /= 10
+                        if self.current_epoch<10:
+                            metric_value /= 10
                     elif 'stat' in metric_name:
                         metric_value = metric_function(task_outputs).item()
                     self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
@@ -349,7 +353,8 @@ class Model(LightningModule, _Base_Class):
                         )
                         sum_loss = sum_loss + metric_value if sum_loss else metric_value
                         if self.conf_mean_loss_factor:
-                            sum_loss = sum_loss + self.conf_mean_loss_factor * task_outputs.pow(2).mean().sqrt()
+                            mean_loss = self.conf_mean_loss_factor * task_outputs.mean().pow(2).sqrt() / task_outputs.std()
+                            sum_loss = sum_loss + mean_loss
                     elif 'score' in metric_name:
                         metric_value = metric_function(
                             y_pred=(task_outputs > 0.0).type(torch.int).detach().cpu(), 
@@ -360,8 +365,8 @@ class Model(LightningModule, _Base_Class):
                             zero_division=0,
                             average='macro',
                         )
-                        # if self.current_epoch<10:
-                        #     metric_value /= 10
+                        if self.current_epoch<10:
+                            metric_value /= 10
                     elif 'stat' in metric_name:
                         metric_value = metric_function(task_outputs).item()
                     self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
@@ -1436,6 +1441,7 @@ def main(
         use_optimizer = 'SGD',
         elm_mean_loss_factor = None,
         conf_mean_loss_factor = None,
+        initial_weight_factor = 1.0,
         # loggers
         log_freq = 100,
         use_wandb = False,
@@ -1499,7 +1505,9 @@ def main(
         is_global_zero=is_global_zero,
         elm_mean_loss_factor=elm_mean_loss_factor,
         conf_mean_loss_factor=conf_mean_loss_factor,
+        initial_weight_factor=initial_weight_factor,
     )
+
     monitor_metric = lit_model.monitor_metric
     lit_model.save_hyperparameters({
         'gradient_clip_val': gradient_clip_val, 
@@ -1653,5 +1661,6 @@ if __name__=='__main__':
         enable_progress_bar=True,
         elm_mean_loss_factor=1,
         conf_mean_loss_factor=1,
+        initial_weight_factor=1,
         # use_wandb=True,
     )
