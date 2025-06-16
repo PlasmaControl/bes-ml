@@ -811,7 +811,6 @@ def main(
         lr_warmup_epochs: int = 5,
         monitor_metric = None,
         use_optimizer = 'SGD',
-        # layerwise_lr_decrement = 1.,
         # loggers
         log_freq = 100,
         use_wandb = False,
@@ -838,7 +837,7 @@ def main(
         epochs_per_batch_size_reduction: int = 50,
 ):
 
-    # SLURM/MPI environment
+    ### SLURM/MPI environment
     num_nodes = int(os.getenv('SLURM_NNODES', default=1))
     world_size = int(os.getenv("SLURM_NTASKS", default=1))
     rank = int(os.getenv("SLURM_PROCID", default=0))
@@ -864,8 +863,9 @@ def main(
         # lr_layerwise_decrement=layerwise_lr_decrement,
     )
     monitor_metric = lit_model.monitor_metric
-    ### callbacks
     metric_mode = 'min' if 'loss' in monitor_metric else 'max'
+
+    ### callbacks
     callbacks = [
         LearningRateMonitor(),
         ModelCheckpoint(
@@ -983,8 +983,8 @@ def main(
 
 if __name__=='__main__':
     main(
-        data_file='/global/homes/d/drsmith/scratch-ml/data/labeled_elm_events.hdf5',
-        # data_file='/Users/drsmith/Documents/repos/bes-ml/bes_ml/small_elm_data.hdf5',
+        # data_file='/global/homes/d/drsmith/scratch-ml/data/labeled_elm_events.hdf5',
+        data_file='small_elm_data.hdf5',
         max_elms=50,
         batch_size=128,
         lr=1e-3,
@@ -998,6 +998,6 @@ if __name__=='__main__':
         gradient_clip_algorithm='value',
         # fir_bp_low=5.,
         fir_bp_high=250.,
-        # use_wandb=True,
+        use_wandb=True,
         epochs_per_batch_size_reduction=10,
     )
