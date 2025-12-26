@@ -4,95 +4,214 @@
 #SBATCH --mail-user=kevin.gill@wisc.edu
 #SBATCH --mail-type=ALL
 
-#SBATCH --ntasks-per-node=3
+#SBATCH --ntasks-per-node=4
 #SBATCH --cpus-per-task=32
-#SBATCH --gpus-per-node=3
+#SBATCH --gpus-per-node=4
 
-#SBATCH --nodes=1
+#SBATCH --nodes=2
+#SBATCH --array=0-33
 #SBATCH --time=00:30:00
-#SBATCH --qos=debug
-###SBATCH --array=0
+#SBATCH --qos=regular
 
-echo Python executable: $(which python)
+# ---------------------- USER CONTROLS ----------------------
+# You can pass 2 positional args to this script:
+#   $1 -> N_SHOTS_PER_JOB (default 2)
+#   $2 -> MODEL_ID        (default 41825238)
+# Or set env vars N_SHOTS_PER_JOB / MODEL_ID when calling sbatch.
+
+N_SHOTS_PER_JOB="${1:-${N_SHOTS_PER_JOB:-2}}"
+MODEL_ID="${2:-${MODEL_ID:-45481719}}"
+
+# Optional: if you know the ckpt filename, set CKPT_NAME, e.g.
+# CKPT_NAME="epoch=2-step=42873.ckpt"
+# Otherwise the script will pick the most recently modified .ckpt.
+CKPT_NAME="${CKPT_NAME:-}"
+
+# ------------------ STANDARD DIAGNOSTICS -------------------
+echo Python executable: "$(which python)"
 echo
-echo Job name: $SLURM_JOB_NAME
-echo QOS: $SLURM_JOB_QOS
-echo Account: $SLURM_JOB_ACCOUNT
-echo Submit dir: $SLURM_SUBMIT_DIR
+echo Job name: "$SLURM_JOB_NAME"
+echo QOS: "$SLURM_JOB_QOS"
+echo Account: "$SLURM_JOB_ACCOUNT"
+echo Submit dir: "$SLURM_SUBMIT_DIR"
 echo
-echo Job array ID: $SLURM_ARRAY_JOB_ID
-echo Job ID: $SLURM_JOBID
-echo Job array task: $SLURM_ARRAY_TASK_ID
-echo Job array task count: $SLURM_ARRAY_TASK_COUNT
+echo Job array ID: "$SLURM_ARRAY_JOB_ID"
+echo Job ID: "$SLURM_JOBID"
+echo Job array task: "$SLURM_ARRAY_TASK_ID"
+echo Job array task count: "$SLURM_ARRAY_TASK_COUNT"
 echo
-echo Nodes: $SLURM_NNODES
-echo Head node: $SLURMD_NODENAME
-echo hostname $(hostname)
-echo Nodelist: $SLURM_NODELIST
-echo Tasks per node: $SLURM_NTASKS_PER_NODE
-echo GPUs per node: $SLURM_GPUS_PER_NODE
+echo Nodes: "$SLURM_NNODES"
+echo Head node: "$SLURMD_NODENAME"
+echo hostname "$(hostname)"
+echo Nodelist: "$SLURM_NODELIST"
+echo Tasks per node: "$SLURM_NTASKS_PER_NODE"
+echo GPUs per node: "$SLURM_GPUS_PER_NODE"
+echo
+echo "N_SHOTS_PER_JOB=${N_SHOTS_PER_JOB}"
+echo "MODEL_ID=${MODEL_ID}"
+if [[ -n "$CKPT_NAME" ]]; then echo "CKPT_NAME=${CKPT_NAME}"; fi
 
 if [[ -n $SLURM_ARRAY_JOB_ID ]]; then
-    export UNIQUE_IDENTIFIER=${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}
+    export UNIQUE_IDENTIFIER="${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
 else
-    export UNIQUE_IDENTIFIER=$SLURM_JOBID
+    export UNIQUE_IDENTIFIER="$SLURM_JOBID"
 fi
-echo UNIQUE_IDENTIFIER: $UNIQUE_IDENTIFIER
+echo "UNIQUE_IDENTIFIER: $UNIQUE_IDENTIFIER"
 
 JOB_DIR=/pscratch/sd/k/kevinsg/bes_ml_jobs/
-mkdir --parents $JOB_DIR || exit
-cd $JOB_DIR || exit
-echo Job directory: $PWD
+mkdir -p "$JOB_DIR" || exit
+cd "$JOB_DIR" || exit
+echo "Job directory: $PWD"
 
 export WANDB__SERVICE_WAIT=300
 
-PYTHON_SCRIPT=$(cat << END
+# ---------------------- SHOT LIST --------------------------
+# full list of all shots
+shot_array=(145384 145420 145425 157303 157372 157375 158076 200643 203416 203420 203483 203664 203671 204292 204295 204837 145388 145419 157322 157373 157376 203417 203423 203475 203485 203665 203672 204293 145387 145391 145410 145422 145427 157323 157374 157377 159443 189189 189191 189199 200634 200637 200638 200639 203152 203418 203419 203469 203470 203471 203484 203659 203660 203663 203667 203946 204286 204287 204288 204289 204290 204291 204294 204296 204297 204299 204301 204302 204303)
 
-import sys
-import os
+# Compute chunking for this array task
+idx=${SLURM_ARRAY_TASK_ID:-0}
+total_shots=${#shot_array[@]}
+chunk_size=$N_SHOTS_PER_JOB
+start=$(( idx * chunk_size ))
+# length to take (cap at remaining shots)
+remain=$(( total_shots - start ))
+take=$(( remain > chunk_size ? chunk_size : (remain > 0 ? remain : 0) ))
+
+# Helpful: tell the user the recommended array max
+#   (ceil(total_shots / N) - 1)
+recommended_max=$(( ( (total_shots + chunk_size - 1) / chunk_size ) - 1 ))
+echo "Total shots: ${total_shots}, chunk_size: ${chunk_size}"
+echo "This task idx=${idx} will take start=${start}, count=${take}"
+echo "Recommended --array=0-${recommended_max}"
+
+# If this task is beyond the end, exit cleanly (some schedulers over-provision)
+if (( take <= 0 )); then
+  echo "No shots assigned to this task index ${idx}. Exiting."
+  exit 0
+fi
+
+# Slice the shots for this task
+predict_shots_chunk=( "${shot_array[@]:start:take}" )
+
+# Build a Python-style list string: "['145384','145385']"
+PREDICT_SHOTS_STR=$( printf ",'%s'" "${predict_shots_chunk[@]}" )
+PREDICT_SHOTS_STR="[${PREDICT_SHOTS_STR:1}]"
+export PREDICT_SHOTS_STR
+
+# Output filename includes model_id + task index for clarity
+export PRED_FILE="predictions_${idx}.hdf5"
+
+# ------------------ PYTHON DRIVER (heredoc) ----------------
+PYTHON_SCRIPT=$(cat << 'END_PY'
+import sys, os, time, glob
 from pathlib import Path
-import time
-from datetime import datetime, timedelta
+from datetime import timedelta
 
-import numpy as np
-
+import torch
 from lightning.pytorch import Trainer
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from lightning.pytorch.strategies import DDPStrategy
-import torch
 import wandb
 
-from bes_ml2.train_velo import BES_Trainer
+from bes_ml2.train_velo import BES_Trainer  # if needed elsewhere
 from bes_ml2 import velocimetry_datamodule
 from bes_ml2 import elm_lightning_model
 
+# --- paste this helper near your imports ---
+import json, numpy as np, torch
+from pathlib import Path
+from collections.abc import Sequence
+
+def _first_pred_loader(dm):
+    loaders = dm.predict_dataloader()
+    return loaders[0] if isinstance(loaders, Sequence) else loaders
+
+def _find_model_tensor(batch):
+    # Recursively find the first reasonably-shaped float tensor
+    def walk(x):
+        if torch.is_tensor(x) and x.ndim >= 3:
+            return x
+        if isinstance(x, dict):
+            for v in x.values():
+                t = walk(v)
+                if t is not None: return t
+        if isinstance(x, (list, tuple)):
+            for v in x:
+                t = walk(v)
+                if t is not None: return t
+        return None
+    return walk(batch)
+
+def save_sample_inputs_from_dm(datamodule, out_base_path: Path, W_model: int | None = None, max_batch_to_save: int = 4):
+    loader = _first_pred_loader(datamodule)
+    batch = next(iter(loader))  # first batch from predict
+    x_batch = _find_model_tensor(batch)
+    if x_batch is None:
+        raise RuntimeError("Could not locate a tensor input in the first predict batch.")
+
+    # Detach & put on CPU
+    x_batch = x_batch.detach().cpu().float()
+    x_small = x_batch[:max_batch_to_save]
+    x_example = x_batch[:1].clone()
+
+    base = out_base_path  # e.g., /.../epoch=4-step=57120_sample_inputs
+    base.parent.mkdir(parents=True, exist_ok=True)
+
+    # 1) Torch: easy for PyTorch users
+    torch.save(
+        {"x_example": x_example, "x_batch": x_small},
+        base.with_suffix(".pt")
+    )
+
+    # 2) NumPy: portable for anyone
+    np.savez_compressed(
+        str(base.with_suffix(".npz")),
+        x_example=x_example.numpy(),
+        x_batch=x_small.numpy(),
+    )
+
+    # 3) Raw batch (exactly what the DataLoader yielded) for auditability
+    torch.save({"raw_first_batch": batch}, base.parent / (base.name + "_raw_batch.pt"))
+
+    # 4) Human-friendly metadata
+    meta = {
+        "example_shape": list(x_example.shape),
+        "batch_shape": list(x_small.shape),
+        "dtype": "float32",
+        "notes": "Shapes are exactly as produced by your predict dataloader. "
+                 "Typical is (B, 1, W, R, C).",
+    }
+    if W_model is not None:
+        meta["signal_window_size_W"] = int(W_model)
+    (base.with_suffix(".json")).write_text(json.dumps(meta, indent=2))
+
+    print(f"[samples] Saved: {base.with_suffix('.npz')}")
+    print(f"[samples] Saved: {base.with_suffix('.pt')}")
+    print(f"[samples] Saved: {(base.parent / (base.name + '_raw_batch.pt'))}")
+    print(f"[samples] Saved: {base.with_suffix('.json')}")
+
 logger_hash = int(os.getenv('UNIQUE_IDENTIFIER', 0))
-num_nodes = int(os.getenv('SLURM_NNODES', '1'))  # Default to 1 if not set
+num_nodes = int(os.getenv("SLURM_NNODES", "1"))
 world_size = int(os.getenv('SLURM_NTASKS', 0))
 world_rank = int(os.getenv('SLURM_PROCID', 0))
 local_rank = int(os.getenv('SLURM_LOCALID', 0))
 node_rank = int(os.getenv('SLURM_NODEID', 0))
 print(f'World rank {world_rank} of {world_size} (local rank {local_rank} on node {node_rank})')
 
-is_global_zero = world_rank == 0
-
+is_global_zero = (world_rank == 0)
 if not is_global_zero:
-    f = open(os.devnull, 'w')
-    sys.stdout = f
+    f = open(os.devnull, 'w'); sys.stdout = f
 
 try:
     t_start = time.time()
-
     trial_name = f'{logger_hash}'
-    experiment_dir = './exp_gill01'
-    wandb_log = True
-
-    experiment_dir = Path(experiment_dir)
+    experiment_dir = Path('./exp_gill01')
     experiment_dir.mkdir(parents=True, exist_ok=True)
     experiment_name = experiment_dir.name
     experiment_parent_dir = experiment_dir.parent
 
-    # set loggers
+    # Loggers
     tb_logger = TensorBoardLogger(
         save_dir=experiment_parent_dir,
         name=experiment_name,
@@ -103,100 +222,378 @@ try:
     print(f"Trial directory: {trial_dir}")
     loggers = [tb_logger]
 
-    checkpoint = Path('/pscratch/sd/k/kevinsg/bes_ml_jobs/exp_gill01/34849261_copy/checkpoints/last.ckpt') 
+    # -------- model_id & checkpoint handling --------
+    model_id = os.getenv('MODEL_ID', '41825238')
+    ckpt_name_env = os.getenv('CKPT_NAME', '')
+    ckpt_dir = Path(f'/pscratch/sd/k/kevinsg/bes_ml_jobs/exp_gill01/{model_id}/checkpoints')
+    if ckpt_name_env:
+        checkpoint = ckpt_dir / ckpt_name_env
+    else:
+        # Prefer a checkpoint that looks like "epoch=...step=..."
+        best_ckpts = sorted(
+            [p for p in ckpt_dir.glob("*.ckpt") if "epoch=" in p.name and "step=" in p.name],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if best_ckpts:
+            checkpoint = best_ckpts[0]
+        else:
+            # fallback to last.ckpt
+            last_ckpt = ckpt_dir / "last.ckpt"
+            if last_ckpt.exists():
+                checkpoint = last_ckpt
+            else:
+                raise FileNotFoundError(f"No suitable checkpoint found in {ckpt_dir}")
+    print(f"Using checkpoint: {checkpoint}")
 
-    # load data and model from checkpoint
-    lightning_model = elm_lightning_model.Lightning_Model.load_from_checkpoint(checkpoint_path=checkpoint)
-    # datamodule = velocimetry_datamodule.Velocimetry_Datamodule.load_from_checkpoint(checkpoint_path=checkpoint)
+    # Load model
+    lightning_model = elm_lightning_model.Lightning_Model.load_from_checkpoint(checkpoint_path=str(checkpoint))
+
+    # Reuse trained window size
+    W_model = int(getattr(lightning_model.hparams, "signal_window_size", getattr(lightning_model, "signal_window_size", 0)))
+
+    # Prediction output path
+    pred_file = os.getenv('PRED_FILE', f'predictions_{model_id}.hdf5')
+    lightning_model.prediction_directory = f'/pscratch/sd/k/kevinsg/bes_ml_jobs/exp_gill01/{model_id}/{pred_file}'
+    lightning_model.log_dir = str(experiment_dir)
+
+    # Data
+    world_size = int(os.getenv('SLURM_NTASKS', 0))
+    block_cols = [1, 3, 5, 7]
+    row_stride   = 1
+    row_offset   = 4
+    R_sel = len(np.arange(8)[row_offset::row_stride])
+    C_sel = len(block_cols) 
+    good_times_psi_88 = {
+        # 145384: [()], # this means use all times in the shot
+        # 145387: [()],
+        # 145388: [()],
+        145391: [(1900, 2800), (3100, 4300)],
+        # 145410: [()],
+        # 145419: [()],
+        # 145420: [()],
+        # 145422: [()],
+        # 145425: [()],
+        # 145427: [()],
+        # 157303: [()],
+        # 157322: [()],
+        # 157323: [()],
+        # 157372: [()],
+        # 157373: [()],
+        # 157374: [()],
+        # 157375: [()],
+        # 157376: [()],
+        157377: [(1600, 5900)],
+        # 158076: [()],
+        159443: [(2000, 2190), (2300, 5400)],
+        # 189189: [()],
+        # 189191: [()],
+        189199: [(1800, 3000), (4200, 4700)],
+        200021: [(1700, 2350)],
+        200632: [(800, 900), (4000, 4600)],
+        200634: [(400, 900), (1750, 4600)],
+        200635: [(490, 1000), (2000, 4500)],
+        200637: [(490, 800), (1750, 3750)],
+        200638: [(490, 750), (1500, 4600)],
+        200639: [(400, 1500), (2000, 4600)],
+        200643: [(400, 750), (1750, 4600)],
+        # 203152: [()],
+        # 203416: [()],
+        203417: [(2250, 2700), (2900, 3300), (3600, 4100)],
+        # 203418: [()],
+        203419: [(2250, 3450), (3750, 4300)],
+        # 203420: [()],
+        # 203423: [()],
+        203469: [(400, 1300), (1450, 4600)],
+        # 203470: [()],
+        203471: [(400, 4260)],
+        # 203475: [()],
+        # 203483: [()],
+        # 203484: [()],
+        203485: [(400, 800), (1200, 4500)],
+        # 203659: [()],
+        203660: [(1500, 4000)],
+        # 203662: [()],
+        # 203663: [()],
+        # 203664: [()],
+        # 203665: [()],
+        # 203667: [()],
+        # 203671: [()],
+        # 203672: [()],
+        203946: [(4300, 5400)],
+        204286: [(1100, 1260), (1500, 4600)],
+        # 204287: [()],
+        # 204288: [()],
+        # 204289: [()],
+        204290: [(1200, 4500)],
+        # 204291: [()],
+        # 204292: [()],
+        # 204293: [()],
+        # 204294: [()],
+        # 204295: [()],
+        # 204296: [()],
+        # 204297: [()],
+        # 204299: [()],
+        # 204301: [()],
+        # 204302: [()],
+        # 204303: [()],
+        # 204837: [()],
+    }
+    good_times_psi_91 = {
+        # 145384: [()], # this means use all times
+        # 145387: [()],
+        # 145388: [()],
+        # 145391: [()],
+        # 145410: [()],
+        # 145419: [()],
+        # 145420: [()],
+        # 145422: [()],
+        # 145425: [()],
+        # 145427: [()],
+        # 157303: [()],
+        # 157322: [()],
+        # 157323: [()],
+        # 157372: [()],
+        # 157373: [()],
+        # 157374: [()],
+        # 157375: [()],
+        # 157376: [()],
+        # 157377: [()],
+        # 158076: [()],
+        159443: [(2250, 5600)],
+        189189: [(2000, 4700)],
+        # 189191: [()],
+        189199: [(1800, 3000), (4200, 4700)],
+        # 200021: [()],
+        200632: [(750, 900), (1200, 4600)],
+        200634: [(400, 900), (1500, 4600)],
+        200635: [(490, 600), (1750, 4500)],
+        # 200637: [()],
+        # 200638: [()],
+        200639: [(1200, 4600)],
+        # 200643: [()],
+        # 203152: [()],
+        # 203416: [()],
+        203417: [(2250, 2700), (2900, 3300), (3600, 4100)],
+        # 203418: [()],
+        203419: [(2250, 3500), (3750, 4000)],
+        # 203420: [()],
+        # 203423: [()],
+        # 203469: [()],
+        # 203470: [()],
+        # 203471: [()],
+        # 203475: [()],
+        # 203483: [()],
+        # 203484: [()],
+        203485: [(400, 800), (1200, 4500)],
+        # 203659: [()],
+        203660: [(1500, 4000)],
+        # 203662: [()],
+        # 203663: [()],
+        # 203664: [()],
+        # 203665: [()],
+        # 203667: [()],
+        # 203671: [()],
+        # 203672: [()],
+        203946: [(4300, 5400)],
+        204286: [(1100, 1260), (1500, 4600)],
+        # 204287: [()],
+        # 204288: [()],
+        # 204289: [()],
+        # 204290: [()],
+        # 204291: [()],
+        # 204292: [()],
+        # 204293: [()],
+        # 204294: [()],
+        # 204295: [()],
+        # 204296: [()],
+        # 204297: [()],
+        # 204299: [()],
+        # 204301: [()],
+        # 204302: [()],
+        # 204303: [()],
+        # 204837: [()],
+    }
+    train_only_times = {
+        "145384": [(2500, 5000)],   # None means "no upper limit"
+        # or apply to every training shot:
+        # "all": [(2400, None)],
+        "145420": [(2500, None)],
+        "145425": [(2500, None)], 
+        "157303": [(2800, None)],
+        "157372": [(2400, None)],
+        "157375": [(3900, None)], 
+        "158076": [(3000, 5100)],
+        "200643": [()], # remove from training
+        "203416": [()],
+        "203420": [(3000, None)], 
+        "203483": [(2000, None)],
+        "203664": [(2000, None)],
+        "203671": [(2000, 4000)],
+        "204292": [(2000, None)],
+        "204295": [(2000, None)], 
+        "204837": [(2000, None)],
+    }
+    good_times_psi_93 = {
+        # 145384: [()], # this means use all times
+        # 145387: [()],
+        # 145388: [()],
+        145391: [(1900, 4200)],
+        # 145410: [()],
+        # 145419: [()],
+        # 145420: [()],
+        # 145422: [()],
+        # 145425: [()],
+        # 145427: [()],
+        # 157303: [()],
+        # 157322: [()],
+        # 157323: [()],
+        # 157372: [()],
+        # 157373: [()],
+        # 157374: [()],
+        157375: [(1900, 3600), (4000, 5500)],
+        # 157376: [()],
+        157377: [(1800, 5000), (5400, 6000)],
+        # 158076: [()],
+        159443: [(1900, 5600)],
+        189189: [(2000, 4700)],
+        # 189191: [()],
+        189199: [(1800, 3000), (4200, 4700)],
+        # 200021: [()],
+        # 200632: [()],
+        # 200634: [()],
+        200637: [(1100, 3800)],
+        200638: [(800, 3500)],
+        200639: [(800, 4600)],
+        200643: [(800, 4600)],
+        # 203152: [()],
+        # 203416: [()],
+        203417: [(2250, 2700), (2900, 3300), (3600, 4100)],
+        # 203418: [()],
+        203419: [(2250, 3500), (3750, 4000)],
+        # 203420: [()],
+        203423: [(2300, 3850)],
+        203469: [(600, 4600)],
+        203470: [(500, 3900)],
+        203471: [(500, 3800)],
+        # 203475: [()],
+        203483: [(800, 4300)],
+        203484: [(800, 4200)],
+        203485: [(800, 2100), (3200, 4500)],
+        # 203659: [()],
+        203660: [(1100, 2900)],
+        # 203662: [()],
+        203663: [(1100, 3900)],
+        203664: [(1000, 4000)],
+        # 203665: [()],
+        # 203667: [()],
+        # 203671: [()],
+        # 203672: [()],
+        203946: [(4000, 5400)],
+        204286: [(1800, 4600)],
+        204287: [(1500, 4000)],
+        # 204288: [()],
+        204289: [(1100, 4300)],
+        204290: [(1100, 4100)],
+        204291: [(1100, 3700)],
+        # 204292: [()],
+        # 204293: [()],
+        204294: [(1100, 4100)],
+        # 204295: [()],
+        # 204296: [()],
+        # 204297: [()],
+        204299: [(1500, 4500)],
+        # 204301: [()],
+        204302: [(1800, 4100)],
+        204303: [(1600, 4400)],
+        # 204837: [()],
+    }
+
     datamodule = velocimetry_datamodule.Velocimetry_Datamodule(
-        data_file='/pscratch/sd/k/kevinsg/bes_ml_jobs/confinement_data/20241207_vZ_smooth.hdf5',
-        signal_window_size=100,
-        n_rows=8,
-        n_cols=7,
-        batch_size=256,
-        num_workers=4,
-        seed=0,
-        world_size=world_size,
-        lower_cutoff_frequency_hz=50e3,
-        upper_cutoff_frequency_hz=120e3,  # Upper cutoff frequency in Hz
-        signal_mean=0.007,
-        signal_stdev=0.060,
-        start_time_ms=2400,
-        standardize_labels=False,
-        clip_labels=False,
-        labels_lower_bound=-151.0,
-        labels_upper_bound=151.0,
-        label_mean=-3.22,
-        label_std=14.40,
-        # normalize_labels=True,   
-        label_min=-50,           
-        label_max=50,       
-        split_method='shot',
-        fraction_validation=0.1,
-        fraction_test=0.05,
-        train_shots=['191754', '191676', '191673'],
-        validation_shots=['191676'],
-        test_shots=['191676'],
-        predict_shots=['191714', '191670'],
-        split_train_data_per_gpu=True,
-        vZ_uncertainty_threshold=10.0,
-        # target_labels=["smoothed_vZ_window25", "smoothed_vZ_uncertainty_window25"],
-        target_labels=["vZ", "vZ_uncertainty"],
-        do_flip_augmentation=True,
+            data_file='/pscratch/sd/k/kevinsg/bes_ml_jobs/confinement_data/20251027_raw_signals_psi_interp.hdf5',
+            signal_window_size=48,
+            batch_size=256,
+            num_workers=4,
+            seed=0,
+            world_size=world_size,
+            # downsample_factor=100,
+            # lower_cutoff_frequency_hz=10e3,
+            # upper_cutoff_frequency_hz=200e3,  # Upper cutoff frequency in Hz
+            standardize_signals=False,
+            split_method='shot',
+            train_shots = ['145384', '145420', '145425', '157303', '157372', '157375', '158076', '200643', '203416', '203420', '203483', '203664', '203671', '204292', '204295', '204837'],
+            validation_shots = ['145388', '145419', '157322', '157373', '157376', '203417', '203423', '203475', '203485', '203665', '203672', '204293'],
+            test_shots = ['145387', '145391', '145410', '145422', '145427', '157323', '157374', '157377', '159443', '189189', '189191', '189199', '200634', '200637', '200638', '200639', '203152', '203418', '203419', '203469', '203470', '203471', '203484', '203659', '203660', '203663', '203667', '203946', '204286', '204287', '204288', '204289', '204290', '204291', '204294',  '204296', '204297', '204299', '204301', '204302', '204303'],
+            predict_shots=eval(os.getenv('PREDICT_SHOTS_STR', '[]')),
+            split_train_data_per_gpu=True,
+            vZ_uncertainty_threshold=45.0,
+            target_labels=["vZ", "vZ_uncertainty"],
+            do_flip_augmentation=True,
+            shot_time_windows = good_times_psi_93,
+            # train_time_windows=train_only_times,     # applies ONLY to train
+            # --- block + label knobs ---
+            block_cols=block_cols,
+            row_stride=row_stride,
+            row_offset=row_offset,
+            target_sampling_hz=1_000_000.0,
+            label_target_psi=0.93,
+            label_tolerance_ms=0.6,
+            window_hop=1,
+            # --- CRITICAL: keep these consistent with the model ---
+            n_rows=R_sel,   # 8 with your settings
+            n_cols=C_sel,   # 4 with ('last',4)
+            predict_window_stride=48,
     )
     datamodule.setup(stage='predict')
 
+    # Derive an output base next to the checkpoint you're already using
+    samples_base = checkpoint.parent / (checkpoint.stem + "_sample_inputs")
+
+    # Save a tiny batch and a single-example tensor
+    save_sample_inputs_from_dm(datamodule, samples_base, W_model=W_model, max_batch_to_save=4)
+
+    # WandB (optional)
+    wandb_log = False
     if wandb_log:
         wandb.login()
-        wandb_logger = WandbLogger(
-            save_dir=experiment_dir,
-            project=experiment_name,
-            name=trial_name,
-        )
-        wandb_logger.watch(
-            lightning_model, 
-            log='all', 
-            log_freq=100,
-        )
+        wandb_logger = WandbLogger(save_dir=experiment_dir, project=experiment_name, name=trial_name)
+        wandb_logger.watch(lightning_model, log='all', log_freq=100)
         loggers.append(wandb_logger)
 
-    float_precision = '16-mixed' if torch.cuda.is_available() else 32
-    frontends_active = [value for value in lightning_model.frontends_active.values()]
-    some_unused = False in frontends_active
+    precision = 32
+    frontends_active = list(lightning_model.frontends_active.values())
+    some_unused = (False in frontends_active)
 
-    # Initialize the Trainer
     trainer = Trainer(
         logger=loggers,
         num_nodes=num_nodes,
-        precision=float_precision,
+        precision=precision,
         strategy=DDPStrategy(find_unused_parameters=some_unused, timeout=timedelta(seconds=9600)),
     )
-
-    # trainer.test(model=lightning_model, datamodule=datamodule)
-    trainer.predict(model=lightning_model, datamodule=datamodule, ckpt_path='last')
+    trainer.predict(model=lightning_model, datamodule=datamodule)
 
     print(f'Python elapsed time {(time.time()-t_start)/60:.1f} min')
 except Exception as e:
     print(f"An error occurred: {e}")
     if not is_global_zero:
-        f.close()
-        sys.stdout = sys.__stdout__
+        f.close(); sys.stdout = sys.__stdout__
     raise
 finally:
     if not is_global_zero:
-        f.close()
-        sys.stdout = sys.__stdout__
-END
+        f.close(); sys.stdout = sys.__stdout__
+END_PY
 )
 
-echo Script:
+echo "Script:"
 echo "${PYTHON_SCRIPT}"
 
-
 START_TIME=$(date +%s)
+# Export MODEL_ID/CKPT_NAME to Python
+export MODEL_ID
+export CKPT_NAME
 srun python -c "${PYTHON_SCRIPT}"
 EXIT_CODE=$?
 END_TIME=$(date +%s)
-echo Slurm elapsed time $(( (END_TIME - START_TIME)/60 )) min $(( (END_TIME - START_TIME)%60 )) s
+echo "Slurm elapsed time $(( (END_TIME - START_TIME)/60 )) min $(( (END_TIME - START_TIME)%60 )) s"
 
 exit $EXIT_CODE

@@ -4,6 +4,7 @@ from pathlib import Path
 import dataclasses
 from datetime import datetime, timedelta
 import shutil
+import numpy as np
 
 import torch
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
@@ -62,6 +63,9 @@ class BES_Trainer:
         self.experiment_name = self.experiment_dir.name
         self.experiment_parent_dir = self.experiment_dir.parent
 
+        # **Set the model's log_dir to the experiment_dir**
+        self.lightning_model.log_dir = str(self.experiment_dir)
+
         # set loggers
         tb_logger = TensorBoardLogger(
             save_dir=self.experiment_parent_dir,
@@ -89,6 +93,7 @@ class BES_Trainer:
 
         print("Model Summary:")
         print(ModelSummary(self.lightning_model, max_depth=-1))
+        self.lightning_model.log_dir = self.datamodule.log_dir = self.trial_dir
 
     def run_all(
         self,
@@ -104,7 +109,10 @@ class BES_Trainer:
         self.lightning_model.log_dir = self.datamodule.log_dir = self.trial_dir
         monitor_metric = self.lightning_model.monitor_metric
         metric_mode = 'min' if 'loss' in monitor_metric else 'max'
-        torch.set_float32_matmul_precision('medium')
+        # torch.set_float32_matmul_precision('medium')
+        torch.set_float32_matmul_precision('high')  # stricter, no TF32
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
 
         # set callbacks
         callbacks = [
@@ -188,12 +196,22 @@ if __name__=='__main__':
         lightning_model = elm_lightning_model.Lightning_Model.load_from_checkpoint(checkpoint_path=checkpoint)
         datamodule = velocimetry_datamodule.Velocimetry_Datamodule.load_from_checkpoint(checkpoint_path=checkpoint)
     else:
+        block_cols = [1, 3, 5, 7]
+        row_stride   = 1
+        row_offset   = 4
+        R_sel = len(np.arange(8)[row_offset::row_stride])
+        C_sel = len(block_cols) 
         # initiate new data and model
-        cnn_nlayers = 3
         lightning_model = elm_lightning_model.Lightning_Model(
             encoder_lr=1e-3,
             decoder_lr=1e-3,
-            signal_window_size=100,
+            signal_window_size=48,
+            n_rows=R_sel,
+            n_cols=C_sel,
+            monitor_metric='sum_loss/val',
+            lr_scheduler_threshold=1e-3,
+            lr_scheduler_patience=10,
+            weight_decay=0.001,
             encoder_type='none',
             cnn_nlayers=2,
             cnn_num_kernels=[16, 32],
@@ -202,46 +220,46 @@ if __name__=='__main__':
             cnn_padding = [1, 1],
             cnn_maxpool_spatial_size = [2, 1],
             cnn_maxpool_time_size = [2, 2],
-            # encoder_type='rcn',
-            # rcn_reservoir_size=1000,
-            # rcn_spectral_radius=0.9,
-            # rcn_sparsity=0.1,
-            # rcn_input_scaling=1.0,
-            # rcn_leaky_rate=0.5,            
-            velocimetry_mlp=True,
-            reconstruction_decoder=False,
-            multiclass_classifier_mlp=False,
-            time_to_elm_mlp=False,
-            classifier_mlp=False,
-            mlp_layers=(512, 256, 128),
-            mlp_dropout=0.1,
             leaky_relu_slope=0.001,
-            n_rows=8,
-            n_cols=8,
+            mlp_layers=(50, 50),
+            mlp_dropout=0.1,
+            velocimetry_mlp=True,
         )
+
         datamodule = velocimetry_datamodule.Velocimetry_Datamodule(
-            data_file='/pscratch/sd/k/kevinsg/bes_ml_jobs/confinement_data/20241207_vZ.hdf5',
-            seed=1,
-            # max_shots_per_class=35,
-            # max_shots=80,
-            # lower_cutoff_frequency_hz=2.5e3,
-            # upper_cutoff_frequency_hz=150e3,
+            data_file='/pscratch/sd/k/kevinsg/bes_ml_jobs/confinement_data/20250824_psi_interp.hdf5',
             signal_window_size=lightning_model.signal_window_size,
-            n_rows=lightning_model.n_rows,
-            n_cols=lightning_model.n_cols,
-            batch_size=128,
-            num_workers=0,
+            batch_size=256,
+            num_workers=1,
+            seed=0,
             world_size=1,
-            # r_avg_bounds=(220,230),
-            # z_avg_bounds=(-2,2),
-            # delz_avg_bounds=(1,2.5),
-            # r_avg_bounds_class_3=(200,240),
-            # z_avg_bounds_class_3=(-6,6),
-            # delz_avg_bounds_class_3=(0,6),
-            # clip_signals=2.0,
-            train_shots=['191670'],
-            validation_shots=['191670'],
-            test_shots=['191670'],
+            lower_cutoff_frequency_hz=60e3,
+            upper_cutoff_frequency_hz=150e3,  # Upper cutoff frequency in Hz
+            start_time_ms=2400,
+            standardize_labels=False,
+            clip_labels=False,
+            normalize_labels=False,   
+            split_method='shot',
+            fraction_validation=0.1,
+            fraction_test=0.05,
+            train_shots=['145384', '145391', '145410', '145420', '145422', '145427', '157303', '157322', '157372', '157374', '158076', '189189', '203659', '203663'],
+            validation_shots=['145388', '145419', '157376', '200635',  '203671'],
+            test_shots=['145387', '145425', '157323', '157373', '157375', '157377', '159443', '189191', '189199', '200021', '203660', '203672', '203665', '203667'],
+            predict_shots=['145384', '145388', '145391', '145419', '145425', '145385', '145422', '145410', '157373', '145387',  '145420', '145427', '159443', '200635'],
+            split_train_data_per_gpu=True,
+            vZ_uncertainty_threshold=5.0,
+            target_labels=["vZ", "vZ_uncertainty"],
+            do_flip_augmentation=True,
+            block_cols=block_cols,
+            row_stride=row_stride,
+            row_offset=row_offset,
+            target_sampling_hz=1_000_000.0,
+            label_target_psi=0.9,
+            label_tolerance_ms=0.6,
+            window_hop=1,
+            # --- CRITICAL: keep these consistent with the model ---
+            n_rows=R_sel,   # 8 with your settings
+            n_cols=C_sel,   # 4 with ('last',4)
         )
 
     trainer = BES_Trainer(

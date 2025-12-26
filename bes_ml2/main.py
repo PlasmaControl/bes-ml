@@ -62,6 +62,9 @@ class BES_Trainer:
         self.experiment_name = self.experiment_dir.name
         self.experiment_parent_dir = self.experiment_dir.parent
 
+        # **Set the model's log_dir to the experiment_dir**
+        self.lightning_model.log_dir = str(self.experiment_dir)
+
         # set loggers
         tb_logger = TensorBoardLogger(
             save_dir=self.experiment_parent_dir,
@@ -89,6 +92,7 @@ class BES_Trainer:
 
         print("Model Summary:")
         print(ModelSummary(self.lightning_model, max_depth=-1))
+        self.lightning_model.log_dir = self.datamodule.log_dir = self.trial_dir
 
     def run_all(
         self,
@@ -104,7 +108,10 @@ class BES_Trainer:
         self.lightning_model.log_dir = self.datamodule.log_dir = self.trial_dir
         monitor_metric = self.lightning_model.monitor_metric
         metric_mode = 'min' if 'loss' in monitor_metric else 'max'
-        torch.set_float32_matmul_precision('medium')
+        # torch.set_float32_matmul_precision('medium')
+        torch.set_float32_matmul_precision('high')  # stricter, no TF32
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
 
         # set callbacks
         callbacks = [
@@ -161,14 +168,17 @@ class BES_Trainer:
             # free up space
             del self.datamodule._train_dataloader
             del self.datamodule.datasets['validation']
-            
-            self.lightning_model.manual_predict_separatrix(
-                self.datamodule.test_dataloader(), 
-                self.datamodule.datasets['test'],
-                debug=debug_predict,
-                save_filename='separatrix_test_data.hdf5',
-                plot_inference=False,
-            )
+            del self.datamodule.datasets['test']
+
+            trainer.predict(datamodule=self.datamodule, ckpt_path='best')
+
+            # self.lightning_model.manual_predict(
+            #     self.datamodule.test_dataloader(), 
+            #     self.datamodule.datasets['test'],
+            #     debug=debug_predict,
+            #     save_filename='confinement_test_data.hdf5',
+            #     plot_inference=False,
+            # )
 
         self.last_model_path = Path(trainer.checkpoint_callback.last_model_path).absolute()
         print(f"Last model path: {self.last_model_path}")
@@ -196,12 +206,12 @@ if __name__=='__main__':
             encoder_lr=1e-3,
             decoder_lr=1e-5,
             signal_window_size=1024,
-            encoder_type='fft',
+            encoder_type='fft_mlp',
             fft_nlayers=fft_nlayers,
             fft_dropout=0.1,
             fft_num_kernels=10,
-            fft_subwindows=2,
             fft_nbins=2,
+            fft_subwindows=2,
             fft_kernel_freq_size=5,
             fft_kernel_spatial_size=[(3, 3) for _ in range(fft_nlayers)],
             fft_maxpool_freq_size=4,
@@ -210,40 +220,36 @@ if __name__=='__main__':
             multiclass_classifier_mlp=True,
             time_to_elm_mlp=False,
             classifier_mlp=False,
-            mlp_layers=(60, 60),
+            mlp_layers=(50, 50),
             mlp_dropout=0.1,
             leaky_relu_slope=0.001,
-            n_rows=8,
-            n_cols=8,
+            n_rows=4,
+            n_cols=4,
             num_classes=num_classes,
         )
+        label_filter={0,1,2,3}
         datamodule = confinement_datamodule_4.Confinement_Datamodule(
-            data_file='/pscratch/sd/k/kevinsg/bes_ml_jobs/confinement_data/20240112.hdf5',
-            seed=1,
-            # max_shots_per_class=35,
-            num_classes=num_classes,
-            # max_shots=80,
+            data_file='/pscratch/sd/k/kevinsg/bes_ml_jobs/confinement_data/20250824_confinement_final.hdf5',
+            seed=2,
             # lower_cutoff_frequency_hz=2.5e3,
-            # upper_cutoff_frequency_hz=150e3,
-            signal_window_size=lightning_model.signal_window_size,
+            # upper_cutoff_frequency_hz=200e3,
+            # target_sampling_hz=250e3,
+            standardize_signals=False,
+            signal_window_size=1024,
             n_rows=lightning_model.n_rows,
             n_cols=lightning_model.n_cols,
-            fraction_test=0.15,
-            fraction_validation=0.15,
-            batch_size=128,
-            num_workers=0,
+            label_filter=label_filter,
+            num_classes=len(label_filter),
+            fraction_test=0.22,
+            fraction_validation=0.1,
+            batch_size=256,
+            num_workers=4,
             plot_data_stats=False,
             world_size=1,
-            # r_avg_bounds=(220,230),
-            # z_avg_bounds=(-2,2),
-            # delz_avg_bounds=(1,2.5),
-            # r_avg_bounds_class_3=(200,240),
-            # z_avg_bounds_class_3=(-6,6),
-            # delz_avg_bounds_class_3=(0,6),
             one_hot_labels=True,
-            # force_validation_shots=['175490', '187035', '191376', '164869', '171471', '172212', '184463', '160778'],
-            force_test_shots=['164884', '163518'],
-            # test_only=True,
+            # force_validation_shots=['145384', '203659'],
+            # force_test_shots=['145388', '145422'],
+            predict_shots=['145384', '145385', '145391', '145410', '145420', '145422', '145427', '157303', '157322', '157372', '157374', '158076', '189191', '189189', '189199', '203659', '203663', '145388', '145419', '157376', '200635', '203671', '145387', '145425', '157323', '157373', '157375', '157377', '159443', '200021', '203660', '203672', '203665', '203667'],
         )
 
     trainer = BES_Trainer(

@@ -4,6 +4,8 @@ from pathlib import Path
 import gc
 import os
 import time
+from typing import Iterable
+import re
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -19,6 +21,7 @@ import h5py
 import torch
 import torch.nn
 import torch.utils.data
+from torch.utils.data import ConcatDataset
 import time
 
 from lightning.pytorch import LightningDataModule
@@ -26,6 +29,7 @@ from lightning.pytorch import LightningDataModule
 from bes_data.sample_data import sample_elm_data_file
 
 import psutil
+from collections import defaultdict
 
 
 class Confinement_TrainValTest_Dataset(torch.utils.data.Dataset):
@@ -118,61 +122,247 @@ class Confinement_TrainValTest_Dataset(torch.utils.data.Dataset):
         return signal_window, label, confinement_mode_id_tensor
     
 
+# class Confinement_Predict_Dataset(torch.utils.data.Dataset):
+
+#     def __init__(
+#             self,
+#             signals: np.ndarray,
+#             labels: np.ndarray,
+#             signal_window_size: int,
+#             shot: int,
+#             start_time: int,
+#             confinement_mode_index: int,
+#     ) -> None:
+#         self.shot = shot
+#         self.start_time = start_time
+#         self.confinement_mode_index = confinement_mode_index
+#         self.signals = torch.from_numpy(signals[np.newaxis, ...])
+#         assert (
+#             self.signals.ndim == 4 and
+#             self.signals.size(0) == 1 and
+#             self.signals.size(2) == 2 and
+#             self.signals.size(3) == 8
+#         ), "Signals have incorrect shape"
+#         self.labels = torch.from_numpy(labels)
+#         assert self.labels.ndim == 1, "Labels have incorrect shape"
+#         assert self.labels.numel() == self.signals.size(1), "Labels and signals have different time dimensions"
+#         self.signal_window_size = signal_window_size
+#         last_signal_window_start_index = self.labels.numel() - self.signal_window_size
+#         assert last_signal_window_start_index+self.signal_window_size == self.labels.numel()
+#         valid_t0 = np.zeros(self.labels.numel(), dtype=int)  
+#         valid_t0[:last_signal_window_start_index+1] = 1
+#         assert valid_t0[last_signal_window_start_index] == 1  # last signal window start 
+#         assert valid_t0[last_signal_window_start_index+1] == 0  # first invalid signal window start 
+#         sample_indices = np.arange(valid_t0.size, dtype=int)
+#         sample_indices = sample_indices[valid_t0 == 1]
+#         self.sample_indices = torch.from_numpy(sample_indices)
+
+#     def pre_elm_stats(self) -> dict[str, torch.Tensor]:
+#         pre_elm_signals = self.signals[0,:self.active_elm_start_index,...]
+#         maxabs, _ = torch.max(torch.abs(pre_elm_signals), dim=0)
+#         std, mean = torch.std_mean(pre_elm_signals, dim=0)
+#         return {
+#             'maxabs': maxabs.numpy(force=True),
+#             'mean': mean.numpy(force=True),
+#             'std': std.numpy(force=True),
+#         }
+
+#     def __len__(self) -> int:
+#         return self.sample_indices.numel()
+
+#     def __getitem__(self, i: int) -> tuple:
+#         i_t0 = self.sample_indices[i]
+#         signal_window = self.signals[:, i_t0 : i_t0 + self.signal_window_size, :, :]
+#         label_index = i_t0 + self.signal_window_size - 1
+#         label = self.labels[ label_index : label_index + 1 ]
+#         # label_class = torch.tensor([0]) if label >= 0 else torch.tensor([1])
+#         return signal_window, label, self.shot, self.start_time
+
+# class Confinement_Predict_Dataset(torch.utils.data.Dataset):
+#     """
+#     Expects `signals` as either (T, n_rows, n_cols) or (1, T, n_rows, n_cols).
+#     Internally stores as (1, T, n_rows, n_cols) float32.
+#     Labels are 1D of length T (float; NaN allowed). We return int64 labels
+#     at the window end (NaN -> -1) for CE-style evaluation.
+#     """
+#     def __init__(self,
+#                  signals: np.ndarray | torch.Tensor,
+#                  n_rows: int,
+#                  n_cols: int,
+#                  labels: np.ndarray | torch.Tensor,
+#                  signal_window_size: int,
+#                  shot: int,
+#                  start_time: int,
+#                  confinement_mode_index: int):
+
+#         self.shot = int(shot)
+#         self.start_time = int(start_time)
+#         self.confinement_mode_index = int(confinement_mode_index)
+#         self.n_rows = int(n_rows)
+#         self.n_cols = int(n_cols)
+
+#         # ---- normalize signals to (1, T, n_rows, n_cols) ----
+#         if isinstance(signals, torch.Tensor):
+#             sig = signals.detach().cpu().numpy()
+#         else:
+#             sig = np.asarray(signals)
+
+#         if sig.ndim == 3:
+#             # (T, R, C)
+#             T, R, C = sig.shape
+#             assert R == self.n_rows and C == self.n_cols, \
+#                 f"Signals wrong shape: expected (T,{self.n_rows},{self.n_cols}) got {sig.shape}"
+#             sig = sig[None, ...]  # -> (1, T, R, C)
+#         elif sig.ndim == 4:
+#             # (1, T, R, C)
+#             assert sig.shape[0] == 1, f"First dim must be channel=1, got {sig.shape[0]}"
+#             assert sig.shape[2] == self.n_rows and sig.shape[3] == self.n_cols, \
+#                 f"Signals wrong shape: expected (*,*,{self.n_rows},{self.n_cols}) got {sig.shape}"
+#         else:
+#             raise AssertionError(f"Signals wrong ndim: expected 3 or 4, got {sig.ndim}")
+
+#         self.signals = torch.from_numpy(np.ascontiguousarray(sig)).float()  # (1, T, R, C)
+
+#         # ---- labels ----
+#         if isinstance(labels, torch.Tensor):
+#             lab = labels.detach().cpu().numpy()
+#         else:
+#             lab = np.asarray(labels)
+
+#         assert lab.ndim == 1, "Labels must be 1D (length T)"
+#         T_total = self.signals.shape[1]
+#         assert lab.shape[0] == T_total, \
+#             f"Labels/signals time mismatch: labels={lab.shape[0]} vs signals.T={T_total}"
+#         self.labels = torch.from_numpy(lab.astype(np.float32))  # keep float; we cast to int at __getitem__
+
+#         # ---- windowing ----
+#         self.signal_window_size = int(signal_window_size)
+#         assert self.signal_window_size > 0, "signal_window_size must be > 0"
+#         last_start = T_total - self.signal_window_size
+#         assert last_start >= 0, \
+#             f"Window longer than sequence: W={self.signal_window_size} > T={T_total}"
+
+#         # valid window starts: [0, ..., last_start]
+#         self.sample_indices = torch.arange(0, last_start + 1, dtype=torch.int64)
+
+#     def __len__(self) -> int:
+#         return int(self.sample_indices.numel())
+
+#     def __getitem__(self, i: int) -> tuple:
+#         i_t0 = int(self.sample_indices[i])
+#         W = self.signal_window_size
+
+#         # slice: (1, W, R, C) — DO NOT unsqueeze again
+#         win = self.signals[:, i_t0:i_t0 + W, :, :].contiguous()
+
+#         # label at window end
+#         label_idx = i_t0 + W - 1
+#         label_val = float(self.labels[label_idx].item())
+#         if np.isnan(label_val):
+#             label_val = -1
+#         label = torch.tensor(int(label_val), dtype=torch.long)
+
+#         return win, label, self.shot, self.start_time
+
+
 class Confinement_Predict_Dataset(torch.utils.data.Dataset):
+    """
+    Expects `signals` as either (T, n_rows, n_cols) or (1, T, n_rows, n_cols).
+    Internally stores as (1, T, n_rows, n_cols) float32.
+    Labels are 1D of length T (float; NaN allowed). We return int64 labels
+    at the window end (NaN -> -1) for CE-style evaluation.
+    """
+    def __init__(self,
+                 signals,
+                 n_rows: int,
+                 n_cols: int,
+                 labels,
+                 signal_window_size: int,
+                 shot: int,
+                 start_time: int,
+                 confinement_mode_index: int,
+                 sample_indices: torch.Tensor | None = None,   # <--- NEW
+                 dt_ms: float | None = None):                  # <--- NEW
 
-    def __init__(
-            self,
-            signals: np.ndarray,
-            labels: np.ndarray,
-            signal_window_size: int,
-            shot: int,
-            start_time: int,
-            confinement_mode_index: int,
-    ) -> None:
-        self.shot = shot
-        self.start_time = start_time
-        self.confinement_mode_index = confinement_mode_index
-        self.signals = torch.from_numpy(signals[np.newaxis, ...])
-        assert (
-            self.signals.ndim == 4 and
-            self.signals.size(0) == 1 and
-            self.signals.size(2) == 2 and
-            self.signals.size(3) == 8
-        ), "Signals have incorrect shape"
-        self.labels = torch.from_numpy(labels)
-        assert self.labels.ndim == 1, "Labels have incorrect shape"
-        assert self.labels.numel() == self.signals.size(1), "Labels and signals have different time dimensions"
-        self.signal_window_size = signal_window_size
-        last_signal_window_start_index = self.labels.numel() - self.signal_window_size
-        assert last_signal_window_start_index+self.signal_window_size == self.labels.numel()
-        valid_t0 = np.zeros(self.labels.numel(), dtype=int)  
-        valid_t0[:last_signal_window_start_index+1] = 1
-        assert valid_t0[last_signal_window_start_index] == 1  # last signal window start 
-        assert valid_t0[last_signal_window_start_index+1] == 0  # first invalid signal window start 
-        sample_indices = np.arange(valid_t0.size, dtype=int)
-        sample_indices = sample_indices[valid_t0 == 1]
-        self.sample_indices = torch.from_numpy(sample_indices)
+        self.shot = int(shot)
+        # IMPORTANT semantics change: start_time now means "time at the FIRST window end (ms)"
+        self.start_time = int(start_time)
+        self.confinement_mode_index = int(confinement_mode_index)
+        self.n_rows = int(n_rows)
+        self.n_cols = int(n_cols)
+        self.dt_ms = float(dt_ms) if dt_ms is not None else 1.0  # safe default
 
-    def pre_elm_stats(self) -> dict[str, torch.Tensor]:
-        pre_elm_signals = self.signals[0,:self.active_elm_start_index,...]
-        maxabs, _ = torch.max(torch.abs(pre_elm_signals), dim=0)
-        std, mean = torch.std_mean(pre_elm_signals, dim=0)
-        return {
-            'maxabs': maxabs.numpy(force=True),
-            'mean': mean.numpy(force=True),
-            'std': std.numpy(force=True),
-        }
+        # ---- normalize signals to (1, T, n_rows, n_cols) ----
+        if isinstance(signals, torch.Tensor):
+            sig = signals.detach().cpu().numpy()
+        else:
+            sig = np.asarray(signals)
+
+        if sig.ndim == 3:
+            T, R, C = sig.shape
+            assert R == self.n_rows and C == self.n_cols, \
+                f"Signals wrong shape: expected (T,{self.n_rows},{self.n_cols}) got {sig.shape}"
+            sig = sig[None, ...]  # -> (1, T, R, C)
+        elif sig.ndim == 4:
+            assert sig.shape[0] == 1, f"First dim must be channel=1, got {sig.shape[0]}"
+            assert sig.shape[2] == self.n_rows and sig.shape[3] == self.n_cols, \
+                f"Signals wrong shape: expected (*,*,{self.n_rows},{self.n_cols}) got {sig.shape}"
+        else:
+            raise AssertionError(f"Signals wrong ndim: expected 3 or 4, got {sig.ndim}")
+
+        self.signals = torch.from_numpy(np.ascontiguousarray(sig)).float()  # (1, T, R, C)
+
+        # ---- labels ----
+        if isinstance(labels, torch.Tensor):
+            lab = labels.detach().cpu().numpy()
+        else:
+            lab = np.asarray(labels)
+
+        assert lab.ndim == 1, "Labels must be 1D (length T)"
+        T_total = self.signals.shape[1]
+        assert lab.shape[0] == T_total, \
+            f"Labels/signals time mismatch: labels={lab.shape[0]} vs signals.T={T_total}"
+        self.labels = torch.from_numpy(lab.astype(np.float32))
+
+        # ---- windowing ----
+        self.signal_window_size = int(signal_window_size)
+        assert self.signal_window_size > 0, "signal_window_size must be > 0"
+        last_start = T_total - self.signal_window_size
+        assert last_start >= 0, \
+            f"Window longer than sequence: W={self.signal_window_size} > T={T_total}"
+
+        if sample_indices is None:
+            # old behavior: fully overlapping stride-1
+            self.sample_indices = torch.arange(0, last_start + 1, dtype=torch.int64)
+        else:
+            self.sample_indices = sample_indices.to(torch.int64)
+            # sanity: all starts valid
+            assert torch.all((self.sample_indices >= 0) & (self.sample_indices <= last_start)), \
+                "sample_indices contains out-of-range starts"
 
     def __len__(self) -> int:
-        return self.sample_indices.numel()
+        return int(self.sample_indices.numel())
 
     def __getitem__(self, i: int) -> tuple:
-        i_t0 = self.sample_indices[i]
-        signal_window = self.signals[:, i_t0 : i_t0 + self.signal_window_size, :, :]
-        label_index = i_t0 + self.signal_window_size - 1
-        label = self.labels[ label_index : label_index + 1 ]
-        # label_class = torch.tensor([0]) if label >= 0 else torch.tensor([1])
-        return signal_window, label, self.shot, self.start_time
+        i_t0 = int(self.sample_indices[i])
+        W = self.signal_window_size
+
+        # slice: (1, W, R, C)
+        win = self.signals[:, i_t0:i_t0 + W, :, :].contiguous()
+
+        # label at window end
+        label_idx = i_t0 + W - 1
+        label_val = float(self.labels[label_idx].item())
+        if np.isnan(label_val):
+            label_val = -1
+        label = torch.tensor(int(label_val), dtype=torch.long)
+
+        # return the TRUE time at the window end (ms)
+        # NOTE: self.start_time == time at the FIRST window end (i_t0 == 0)
+        # For a generic i_t0, advance by i_t0 * dt_ms
+        time_end_ms = int(round(self.start_time + i_t0 * self.dt_ms))
+
+        return win, label, self.shot, time_end_ms
 
 
 @dataclasses.dataclass(eq=False)
@@ -182,6 +372,7 @@ class Confinement_Datamodule(LightningDataModule):
     n_cols: int = 8
     batch_size: int = 128  # power of 2, like 32-256
     signal_window_size: int = 128  # power of 2, like 64-512
+    predict_window_stride: int = 512
     num_workers: int = 0  # number of subprocess workers for pytorch dataloader
     fraction_validation: float = 0.2  # fraction of dataset for validation
     fraction_test: float = 0.2  # fraction of dataset for testing
@@ -199,16 +390,16 @@ class Confinement_Datamodule(LightningDataModule):
     bad_shots: list = None
     force_validation_shots: list = None
     force_test_shots: list = None
+    predict_shots: list = None
     # Bandpass filter parameters
     sampling_frequency_hz: float = 1 / 10**(-6)  # Sampling frequency in Hz
+    target_sampling_hz: float = None
     filter_taps: int = 501  # Number of taps in the filter
     lower_cutoff_frequency_hz: float = None  # Lower cutoff frequency in Hz
     upper_cutoff_frequency_hz: float = None  # Upper cutoff frequency in Hz
-    clip_signals: float = None # remove signal windows with abs(raw_signals) > clip_signals
+    standardize_signals: bool = True
     mask_sigma_outliers: float = None  # remove signal windows with abs(standardized_signals) > n_sigma
-    bad_confinement_indices: list = None  # iterable of indices to skip when reading data
-    bad_confinement_indices_csv: str | bool = False  # CSV file to read bad indices
-    log_time: bool = False  # if True, use label = log(time_to_elm_onset)
+    label_filter:  Iterable[int] | str | None = None
     one_hot_labels: bool = False # if True, use one-hot vector for label
     prepare_data_per_node: bool = True  # hack to avoid error between dataclass and LightningDataModule
     plot_data_stats: bool = True
@@ -242,12 +433,13 @@ class Confinement_Datamodule(LightningDataModule):
         self.test_confinement_events = None
         self.train_confinement_events = None
         self.validation_confinement_events = None
+        self.predict_confinement_events = None
         self._get_confinement_events_and_split()
         self.dataset_confinement_events = {
                 'train': self.train_confinement_events,
                 'validation': self.validation_confinement_events,
                 'test': self.test_confinement_events,
-                'predict': self.test_confinement_events,
+                'predict': self.predict_confinement_events,
             }
 
         print(f'Initiating {self.__class__.__name__}')
@@ -276,15 +468,10 @@ class Confinement_Datamodule(LightningDataModule):
 
     def setup(self, stage=None):
         print(f"Running Confinement_Datamodule.setup(stage={stage})")
-        # Determine the rank of this GPU
-        try:
-            local_rank = self.trainer.local_rank
-            node_rank = self.trainer.node_rank
-        except:
-            local_rank = int(os.getenv('SLURM_LOCALID', 0))
-            node_rank = int(os.getenv('SLURM_NODEID', 0))
 
-        global_rank = node_rank * 4 + local_rank
+        global_rank, world_size = self._get_rank_and_worldsize(self.trainer)
+        self._global_rank = global_rank
+        self._world_size  = world_size
 
         # Determine the dataset stage (train, validation, or test) based on the current stage
         if stage == 'fit':
@@ -300,15 +487,26 @@ class Confinement_Datamodule(LightningDataModule):
             events = self.dataset_confinement_events[dataset_stage]
             times = [self.get_time_for_index(shot_event) for shot_event in events]  # Adapted for (shot, event) tuples
             if dataset_stage in ['train']:
-                print(f"Creating chunks for {dataset_stage} with {len(events)} indices and total time {sum(times)}")
+                print(f"[setup] stage=train rank={global_rank}/{world_size} n_events={len(events)}")
                 # Create balanced chunks
-                chunks = self.create_balanced_chunks(events, times, self.world_size)
+                chunks = self.create_balanced_chunks(events, times, world_size)
                 # Determine the chunk for this GPU
-                chunk_events = chunks[global_rank]
-            elif dataset_stage in ['validation', 'test', 'predict']:
+                if len(chunks) == 0:
+                    chunk_events = []
+                else:
+                    # SAFE indexing even if world_size/chunks mismatched
+                    chunk_events = chunks[global_rank % len(chunks)]
+            else:
                 chunk_events = events
 
-            dataset = self._load_and_preprocess_data_2(chunk_events, dataset_stage)
+            if dataset_stage in ['train', 'validation', 'test']:
+                dataset = self._load_and_preprocess_data(chunk_events, dataset_stage)
+            elif dataset_stage in ['predict']:
+                print(f"Preparing predict dataset for shots: {self.predict_shots}")
+                # Load and preprocess the data for these events
+                dataset = self._load_and_preprocess_predict_data(chunk_events)
+                # Assign the predict dataset
+                self.datasets["predict"] = dataset
 
             # Store the DataLoader for this GPU
             if dataset_stage == 'train':
@@ -320,75 +518,164 @@ class Confinement_Datamodule(LightningDataModule):
                                         persistent_workers=(self.num_workers > 0),
                                         drop_last=True,
                                         )
-        
+                
+    def _get_rank_and_worldsize(self, trainer):
+        # try Lightning
+        gr = getattr(trainer, "global_rank", None)
+        ws = getattr(trainer, "world_size", None)
+
+        # fall back to torch.distributed
+        if (gr is None or ws is None) and torch.distributed.is_available() and torch.distributed.is_initialized():
+            gr = torch.distributed.get_rank()
+            ws = torch.distributed.get_world_size()
+
+        # fall back to env (SLURM/torchrun)
+        if gr is None:
+            gr = int(os.getenv("RANK", "0"))
+        if ws is None:
+            ws = int(os.getenv("WORLD_SIZE", "1"))
+
+        return int(gr), int(ws)
+    
     def get_time_for_index(self, shot_event_tuple):
         shot, event = shot_event_tuple  # Unpack the tuple
         with h5py.File(self.data_file, 'r') as h5_file:
             event_key = f"{shot}/{event}"  # Updated to use shot/event structure
             time_count = h5_file[event_key]["signals"].shape[1]
         return time_count
-
+    
     def create_balanced_chunks(self, indices, times, num_chunks):
-        # Create a mapping from indices to times
-        index_to_time = {index: time for index, time in zip(indices, times)}
+        num_chunks = max(int(num_chunks or 1), 1)
+        index_to_time = {idx: t for idx, t in zip(indices, times)}
 
-        # Create a list to hold the chunks, and a list to hold the total time for each chunk
         chunks = [[] for _ in range(num_chunks)]
         chunk_times = [0] * num_chunks
 
-        # Iterate over the indices, sorted by time from largest to smallest
-        for index, time in sorted(index_to_time.items(), key=lambda item: item[1], reverse=True):
-            # Find the chunk with the shortest total time so far
-            min_time_chunk_idx = min(range(num_chunks), key=lambda i: chunk_times[i])
+        for idx, t in sorted(index_to_time.items(), key=lambda kv: kv[1], reverse=True):
+            j = min(range(num_chunks), key=lambda k: chunk_times[k])
+            chunks[j].append(idx)
+            chunk_times[j] += t
 
-            # Add this index to that chunk
-            chunks[min_time_chunk_idx].append(index)
-
-            # Update the total time for that chunk
-            chunk_times[min_time_chunk_idx] += time
-
-        # Print information about the chunks
-        for i, (chunk, chunk_time) in enumerate(zip(chunks, chunk_times)):
-            print(f"Chunk {i} size: {len(chunk)}, total time: {sum(index_to_time[index] for index in chunk)}")
-
+        # helpful debug on every rank
+        print(f"[chunks] num_chunks={len(chunks)} sizes={[len(c) for c in chunks]} times={chunk_times}")
         return chunks
         
-    def _load_and_preprocess_data_2(self, shot_event_indices, dataset_stage):
+    def _load_and_preprocess_data(self, shot_event_indices, dataset_stage):
         t0 = time.time()
         print(f"Reading confinement events for dataset `{dataset_stage}`")
+
+        # --------------------------
+        # helpers
+        # --------------------------
+
+        from scipy.signal import decimate, resample_poly
+        from fractions import Fraction
+        from collections import Counter
+
+        def _parse_label_filter(label_filter):
+            if label_filter is None:
+                return lambda v: True
+            if isinstance(label_filter, (list, tuple, set, np.ndarray)):
+                allowed = set(int(x) for x in label_filter)
+                return lambda v: v in allowed
+            if isinstance(label_filter, str):
+                m = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", label_filter)
+                if not m:
+                    raise ValueError(f"Unrecognized label_filter string: {label_filter!r}. Use 'a-b' or pass a list/set.")
+                lo, hi = map(int, m.groups())
+                return lambda v: lo <= v <= hi
+            raise ValueError(f"Unrecognized label_filter type: {type(label_filter)}")
+
+        def _downsample_1d(arr, orig_fs, target_fs, axis=0):
+            if orig_fs == target_fs: return arr
+            ratio = orig_fs / target_fs
+            q = int(round(ratio))
+            if abs(ratio - q) < 1e-6 and q >= 2:
+                return decimate(arr, q, ftype='fir', axis=axis, zero_phase=True)
+            frac = Fraction(target_fs / orig_fs).limit_denominator(64)
+            return resample_poly(arr, up=frac.numerator, down=frac.denominator, axis=axis)
+
+        def _downsample_stack(sig_trc, t_ms, orig_fs, target_fs):
+            x = _downsample_1d(sig_trc, orig_fs, target_fs, axis=0)
+            new_len = x.shape[0]
+            t = np.linspace(t_ms[0], t_ms[-1], new_len, dtype=np.float32)
+            return x.astype(np.float32), t
+
+        def _expected_down_len(N, orig_fs, target_fs):
+            if target_fs is None or target_fs == orig_fs:
+                return N
+            ratio = orig_fs / target_fs
+            q = int(round(ratio))
+            if abs(ratio - q) < 1e-6 and q >= 2:
+                # scipy.signal.decimate tends to behave like ceil(N/q) with zero_phase
+                return int(np.ceil(N / q))
+            else:
+                from fractions import Fraction
+                frac = Fraction(target_fs / orig_fs).limit_denominator(64)
+                # resample_poly length behaves like ceil(N * up / down)
+                return int(np.ceil(N * frac.numerator / frac.denominator))
+
+        label_ok = _parse_label_filter(self.label_filter)
+
         confinement_data = []
-        n_bins = 201
-        cummulative_hist = np.zeros(n_bins, dtype=int)
-        selected_channels = self.n_rows * self.n_cols  # Total number of channels to select
+        kept_indices = []            # list of (shot, event, label0, orig_len, new_len)
+        time_counts_orig = []        # original lengths of kept events
+        time_counts_ds = []          # downsampled lengths of kept events
+        discards = Counter()         # {'short':..., 'missing_inboard':..., 'label':...}
+
+        orig_fs = float(self.sampling_frequency_hz)         # typically 1e6
+        tgt_fs  = float(self.target_sampling_hz) if getattr(self, 'target_sampling_hz', None) else None
 
         with h5py.File(self.data_file, 'r') as h5_file:
             if len(shot_event_indices) >= 5:
                 print(f"  Initial shot/event indices: {shot_event_indices[:5]}")
-            time_counts = []
-            long_enough_indices = []  # List to hold indices of events with long enough signals
             for i, (shot, event) in enumerate(shot_event_indices):
                 event_key = f"{shot}/{event}"
-                signal_length = h5_file[event_key]["signals"].shape[1]
+                grp = h5_file[event_key]
                 
-                # Check if the signal length is greater than or equal to self.signal_window_size
-                if signal_length >= self.signal_window_size:
-                    inboard_order = h5_file[shot].attrs.get("inboard_column_channel_order", None)
+                # Skip processing if inboard_order is missing or empty
+                inboard_order = h5_file[shot].attrs.get("inboard_column_channel_order", None)
+                if inboard_order is None or len(inboard_order) == 0:
+                    print(f"Skipping event {event_key} due to missing or empty inboard_column_channel_order.")
+                    discards['missing_inboard'] += 1
+                    continue
 
-                    # Skip processing if inboard_order is missing or empty
-                    if inboard_order is None or len(inboard_order) == 0:
-                        print(f"Skipping event {event_key} due to missing or empty inboard_column_channel_order.")
-                        continue
+                # Quick length check
+                signal_length = grp["signals"].shape[1]
+                if signal_length < self.signal_window_size:
+                    discards['short'] += 1
+                    continue
+
+                # Peek a single label (events are uniquely labeled)
+                # Safer check: we can still read only the first element; full array read is unnecessary here.
+                lbl0 = int(grp["labels"][0])
+                if not label_ok(lbl0):
+                    discards['label'] += 1
+                    continue
+
+                # Compute post-downsample length for preallocation
+                if tgt_fs is None or tgt_fs == orig_fs:
+                    new_len = signal_length
+                else:
+                    new_len = _expected_down_len(signal_length, orig_fs, tgt_fs)
                     
-                    time_counts.append(signal_length)
-                    long_enough_indices.append((shot, event))
+                kept_indices.append((shot, event, lbl0, signal_length, new_len))
+                time_counts_orig.append(signal_length)
+                time_counts_ds.append(new_len)
 
-            time_count = np.sum(time_counts)
-            discarded_count = len(shot_event_indices) - len(long_enough_indices)
-            print(f"Discarded {discarded_count} events due to insufficient signal length or missing inboard order.")
+        if not kept_indices:
+            print("No events left after filtering; check your label_filter or window length.")
+            # Keep behavior: return empties consistent with your pipeline
+            return [], np.empty((0, self.n_rows, self.n_cols), dtype=np.float32)
             
-            packaged_signals = np.empty((time_count, self.n_rows, self.n_cols), dtype=np.float32)
-            start_index = 0
-            for i, (shot, event) in enumerate(long_enough_indices):
+        # Preallocate using *downsampled* lengths to avoid shape mismatch
+        total_len = int(np.sum(time_counts_ds))
+        packaged_signals = np.empty((total_len, self.n_rows, self.n_cols), dtype=np.float32)
+
+        # Second pass: actually read/transform signals
+        start_index = 0   
+        with h5py.File(self.data_file, 'r') as h5_file:
+            for i, (shot, event, lbl0, orig_len, new_len) in enumerate(kept_indices):
                 if i % 100 == 0:
                     print(f"  Reading event {i:04d}/{len(shot_event_indices):04d} in shot {shot}")
                 event_key = f"{shot}/{event}"
@@ -399,28 +686,26 @@ class Confinement_Datamodule(LightningDataModule):
 
                 # Retrieve signals and reshape according to inboard_order
                 signals = np.array(event_data["signals"][:, :], dtype=np.float32)
-                # signals = self.reshape_signals_6x8(signals, inboard_order)
-                # start_col_index = (8-self.n_cols)
-                # signals = signals[:, :self.n_rows, start_col_index:]
+                signals = self.reshape_signals_6x8(signals, inboard_order)
+                times   = np.array(event_data["time"][:], dtype=np.float32)        # (T,)
+
+                start_col_index = (8-self.n_cols)
+                signals = signals[:, :self.n_rows, start_col_index:]
                 
-                signals = np.transpose(signals, (1, 0)).reshape(-1, self.n_rows, self.n_cols)
+                # signals = np.transpose(signals, (1, 0)).reshape(-1, self.n_rows, self.n_cols)
                 if self.lower_cutoff_frequency_hz is not None and self.upper_cutoff_frequency_hz is not None:
                     if i % 100 == 0:
                         print(f"  applying {self.lower_cutoff_frequency_hz} - {self.upper_cutoff_frequency_hz} bandpass filter ")
                     signals = self.apply_bandpass_filter(signals)
-                labels = np.array(event_data["labels"], dtype=int)
 
-                # maxabs_by_channel = np.amax(np.abs(signals[:,:,:]), axis=0)
-                # min_max_mask = (
-                #     np.isclose(signals[:,:4,:], 10.375800) |
-                #     np.isclose(signals[:,:4,:], -10.376433) 
-                #     # np.isclose(signals[:,4:,:], 5.186306) |
-                #     # np.isclose(signals[:,4:,:], -5.405264)
-                # )
-                # maxcount_by_channel = np.count_nonzero(min_max_mask, axis=0)
-                # mean_by_channel = np.mean(signals[:,:,:], axis=0)
-                # std_by_channel = np.std(signals[:,:,:], axis=0)
-                # kurt_by_channel = scipy.stats.kurtosis(signals[:,:,:], axis=0, fisher=False)
+                # downsample to target rate
+                if self.target_sampling_hz is not None:
+                    orig_fs = float(self.sampling_frequency_hz)   # typically 1e6
+                    tgt_fs  = float(self.target_sampling_hz)
+                    signals, times = _downsample_stack(signals, times, orig_fs, tgt_fs)
+
+                labels = np.full(signals.shape[0], lbl0, dtype=np.int64)
+
                 labels, valid_t0 = self._get_valid_indices(labels)
                 packaged_signals[start_index:start_index + signals.shape[0]] = signals
                 start_index += signals.shape[0]
@@ -430,84 +715,43 @@ class Confinement_Datamodule(LightningDataModule):
                     'confinement_mode_key': event_key,
                     'shot': shot,
                     'time': event,
-                    # 'maxabs_by_channel': maxabs_by_channel,
-                    # 'maxcount_by_channel': maxcount_by_channel,
-                    # 'mean_by_channel': mean_by_channel,
-                    # 'std_by_channel': std_by_channel,
-                    # 'kurt_by_channel': kurt_by_channel,
                 })
-                # hist, bin_edges = np.histogram(
-                #     signals[::50, :, :],
-                #     bins=n_bins,
-                #     range=[-10.4, 10.4],
-                # )
-                # cummulative_hist += hist
 
-        # bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
-        # mean_all_data = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
-        # stdev_all_data = np.sqrt(np.sum(cummulative_hist * (bin_center - mean_all_data) ** 2) / np.sum(cummulative_hist))
-        # exkurt_all_data = np.sum(cummulative_hist * ((bin_center - mean_all_data)/stdev_all_data) ** 4) / np.sum(cummulative_hist) - 3
+        elapsed = time.time() - t0
+        print(f"Kept {len(kept_indices)} events | "
+            f"Discarded(short={discards['short']}, missing_inboard={discards['missing_inboard']}, label={discards['label']}) | "
+            f"Total samples (downsampled)={total_len} | took {elapsed:.2f}s")
 
-        if self.plot_data_stats and self.is_global_zero:
-            _, axes = plt.subplots(ncols=3, nrows=2, figsize=(9, 4.5))
-            axes = axes.flatten()
-            bins = 25
-            plt.suptitle(f"BES statistics | `{dataset_stage}` dataset with {len(confinement_data)} confinement modes")
-            plt.sca(axes[0])
-            # plt.hist(
-            #     np.array([confinement_mode['pre_elm_size'] for elm in elm_data])/1e3, 
-            #     bins=bins,
-            # )
-            plt.xlabel('size (ms)')
-            plt.sca(axes[1])
-            plt.hist(
-                np.concatenate([confinement_mode['maxabs_by_channel'] for confinement_mode in confinement_data], axis=None), 
-                bins=bins,
-            )
-            plt.xlabel('Channel-wise max(abs())')
-            plt.sca(axes[2])
-            plt.hist(
-                np.concatenate([confinement_mode['maxcount_by_channel'] for confinement_mode in confinement_data], axis=None), 
-                bins=20,
-                range=(0,20),
-            )
-            plt.xlabel('Channel-wise saturated points')
-            plt.sca(axes[3])
-            plt.hist(
-                np.concatenate([confinement_mode['mean_by_channel'] for confinement_mode in confinement_data], axis=None), 
-                bins=bins,
-            )
-            plt.xlabel('Channel-wise mean')
-            plt.sca(axes[4])
-            plt.hist(
-                np.concatenate([confinement_mode['std_by_channel'] for confinement_mode in confinement_data], axis=None), 
-                bins=bins,
-            )
-            plt.xlabel('Channel-wise std. dev.')
-            plt.sca(axes[5])
-            plt.hist(
-                np.log10(np.concatenate([confinement_mode['kurt_by_channel'] for confinement_mode in confinement_data], axis=None)),
-                bins=bins,
-            )
-            plt.xlabel('Channel-wise log10(kurt)')
-            for axis in axes:
-                plt.sca(axis)
-                plt.ylabel('Counts')
-                plt.yscale('log')
-                plt.ylim(bottom=0.8)
-            plt.tight_layout()
-            filepath = os.path.join(self.log_dir, f'{dataset_stage}_dataset_stats.pdf')
-            print(f"  Saving figure {filepath}")
-            plt.savefig(filepath, format='pdf', transparent=True)
-            plt.show(block=False)
-
-        print(f"  Global min/max raw signal, ch 1-32: {np.amin(packaged_signals[:,:4,:]):.6f}, {np.amax(packaged_signals[:,:4,:]):.6f}")
-        print(f"  Global min/max raw signal, ch 33-64: {np.amin(packaged_signals[:,4:,:]):.6f}, {np.amax(packaged_signals[:,4:,:]):.6f}")
+        # print(f"  Global min/max raw signal, ch 1-32: {np.amin(packaged_signals[:,:4,:]):.6f}, {np.amax(packaged_signals[:,:4,:]):.6f}")
+        # print(f"  Global min/max raw signal, ch 33-64: {np.amin(packaged_signals[:,4:,:]):.6f}, {np.amax(packaged_signals[:,4:,:]):.6f}")
 
         packaged_labels = np.concatenate([confinement_mode['labels'] for confinement_mode in confinement_data], axis=0)
+        # if self.one_hot_labels:
+        #     encoder = OneHotEncoder(sparse_output=False, categories=[np.arange(self.num_classes)], handle_unknown='ignore')
+        #     packaged_labels = encoder.fit_transform(packaged_labels.reshape(-1, 1))
+
+        # 1) Determine allowed labels from label_filter
+        if self.label_filter is None:
+            allowed = np.arange(self.num_classes, dtype=int)
+        elif isinstance(self.label_filter, str):
+            m = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", self.label_filter)
+            lo, hi = map(int, m.groups())
+            allowed = np.arange(lo, hi + 1, dtype=int)
+        else:
+            allowed = np.array(sorted(int(x) for x in self.label_filter), dtype=int)
+
+        # 2) Remap original labels -> [0 .. K_eff-1] in allowed order
+        old2new = {old: i for i, old in enumerate(allowed.tolist())}
+        mask = np.isin(packaged_labels, allowed)
+        assert mask.all(), f"Unexpected labels outside {allowed}: {np.unique(packaged_labels[~mask])}"
+        remapped = np.vectorize(old2new.get)(packaged_labels).astype(int)
+
+        # 3) If you want one-hot, build it with the *effective* K
+        K_eff = len(allowed)
         if self.one_hot_labels:
-            encoder = OneHotEncoder(sparse_output=False, categories=[np.arange(self.num_classes)], handle_unknown='ignore')
-            packaged_labels = encoder.fit_transform(packaged_labels.reshape(-1, 1))
+            packaged_labels = np.eye(K_eff, dtype=np.float32)[remapped]
+        else:
+            packaged_labels = remapped  # integer targets for CE loss
 
         packaged_valid_t0 = np.concatenate([confinement_mode['valid_t0'] for confinement_mode in confinement_data], axis=0)
         # assert packaged_labels.size == packaged_valid_t0.size
@@ -545,21 +789,6 @@ class Confinement_Datamodule(LightningDataModule):
             sample_indices=packaged_valid_t0_indices,
             signals=packaged_signals,
         )
-
-        # mask abs(signals) > N volts
-        if self.clip_signals and dataset_stage == 'train':
-            print(f"  Clipping signal windows beyond +/- {self.clip_signals} V")
-            mask = []
-            for i in packaged_valid_t0_indices:
-                signal_window = packaged_signals[i: i + self.signal_window_size, :, :]
-                mask.append((signal_window.min() >= -self.clip_signals) and (signal_window.max() <= self.clip_signals))
-            packaged_valid_t0_indices = packaged_valid_t0_indices[mask]
-
-            stats = self._get_statistics(
-                sample_indices=packaged_valid_t0_indices,
-                signals=packaged_signals,
-            )
-            print(f"  Clipped signals count {stats['count']} min {stats['min']:.4f} max {stats['max']:.4f} mean {stats['mean']:.4f} stdev {stats['stdev']:.4f}")
 
         # mask outlier signals
         if self.mask_sigma_outliers:
@@ -601,7 +830,7 @@ class Confinement_Datamodule(LightningDataModule):
                 'signal_exkurt': self.signal_exkurt.item(),
             })
 
-        if dataset_stage in ['train']:
+        if dataset_stage in ['train'] and self.standardize_signals:
             print(f"  Standarizing signals with mean {self.signal_mean:.3f} and std {self.signal_stdev:.3f}")
             print(f"  Standardized signal stats")
             # packaged_signals = (packaged_signals - self.signal_mean) / self.signal_stdev
@@ -612,7 +841,7 @@ class Confinement_Datamodule(LightningDataModule):
                 signals=packaged_signals,
             )
         self.max_abs_valid_signal = np.max(np.abs([stats['min'],stats['max']]))
-            
+                    
         if dataset_stage in ['train']:
             dataset = Confinement_TrainValTest_Dataset(
                 signals=packaged_signals,
@@ -637,28 +866,28 @@ class Confinement_Datamodule(LightningDataModule):
                     confinement_mode_keys=packaged_confinement_mode_key,
                 )
             return
-        if dataset_stage in ['predict']:
-            del self._train_dataloader
-            del self.datasets['validation']
+        # if dataset_stage in ['predict']:
+        #     del self._train_dataloader
+        #     del self.datasets['validation']
             
-            predict_datasets = []
-            for i_confinement_mode, idx_start in enumerate(packaged_window_start):
-                if self.max_predict_confinement_modes and i_confinement_mode == self.max_predict_confinement_modes:
-                    break
-                if i_confinement_mode == packaged_window_start.size - 1:
-                    idx_stop = packaged_labels.size - 1
-                else:
-                    idx_stop = packaged_window_start[i_confinement_mode+1]-1
-                dataset = Confinement_Predict_Dataset(
-                    signals=packaged_signals[idx_start:idx_stop, ...],
-                    labels=packaged_labels[idx_start:idx_stop],
-                    signal_window_size=self.signal_window_size,
-                    shot=packaged_shot[i_confinement_mode],
-                    start_time=packaged_start_time[i_confinement_mode],
-                    confinement_mode_index=packaged_confinement_mode_key[i_confinement_mode],
-                )
-                predict_datasets.append(dataset)
-            self.datasets['predict'] = predict_datasets
+        #     predict_datasets = []
+        #     for i_confinement_mode, idx_start in enumerate(packaged_window_start):
+        #         if self.max_predict_confinement_modes and i_confinement_mode == self.max_predict_confinement_modes:
+        #             break
+        #         if i_confinement_mode == packaged_window_start.size - 1:
+        #             idx_stop = packaged_labels.size - 1
+        #         else:
+        #             idx_stop = packaged_window_start[i_confinement_mode+1]-1
+        #         dataset = Confinement_Predict_Dataset(
+        #             signals=packaged_signals[idx_start:idx_stop, ...],
+        #             labels=packaged_labels[idx_start:idx_stop],
+        #             signal_window_size=self.signal_window_size,
+        #             shot=packaged_shot[i_confinement_mode],
+        #             start_time=packaged_start_time[i_confinement_mode],
+        #             confinement_mode_index=packaged_confinement_mode_key[i_confinement_mode],
+        #         )
+        #         predict_datasets.append(dataset)
+        #     self.datasets['predict'] = predict_datasets
             # return predict_datasets
         # print(f"  Data stage `{dataset_stage}` elapsed time {(time.time()-t0)/60:.1f} min")
         gc.collect()
@@ -668,6 +897,237 @@ class Confinement_Datamodule(LightningDataModule):
         print('RAM memory % used:', psutil.virtual_memory()[2])
         # Getting usage of virtual_memory in GB ( 4th field)
         print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000)    
+
+    def _load_and_preprocess_predict_data(self, shot_start_time_indices):
+        """
+        Build predict datasets for the multiclass confinement classifier.
+
+        Returns
+        -------
+        List[Confinement_Predict_Dataset]
+        Each dataset corresponds to one contiguous confinement-mode segment and yields:
+        (signal_window[1,W,r,c], label[class_id], shot:int, start_time:int_ms)
+        """
+        import numpy as np, h5py, torch
+        from scipy.signal import decimate, resample_poly
+        from fractions import Fraction
+
+        # ---------- helpers ----------
+        def _parse_label_filter(label_filter):
+            """Same semantics as training."""
+            if label_filter is None:
+                return lambda v: True
+            if isinstance(label_filter, (list, tuple, set, np.ndarray)):
+                allowed = set(int(x) for x in label_filter)
+                return lambda v: v in allowed
+            if isinstance(label_filter, str):
+                m = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", label_filter)
+                if not m:
+                    raise ValueError(f"Unrecognized label_filter string: {label_filter!r}. Use 'a-b' or pass a list/set.")
+                lo, hi = map(int, m.groups())
+                return lambda v: lo <= v <= hi
+            raise ValueError(f"Unrecognized label_filter type: {type(label_filter)}")
+
+        def _apply_label_filter_vectorized(labels_1d, label_filter, unknown_value=-1):
+            """
+            Map labels not in label_filter to unknown_value (e.g., -1 or np.nan).
+            Works with int or float labels_1d; returns float if unknown_value is NaN.
+            """
+            a = np.asarray(labels_1d)
+            if label_filter is None:
+                # Preserve dtype unless unknown_value forces float
+                if isinstance(unknown_value, float) and np.isnan(unknown_value):
+                    return a.astype(np.float32)
+                return a
+
+            # Build a fast mask
+            ok = _parse_label_filter(label_filter)
+            # If a may contain NaN already, compare with care:
+            if np.issubdtype(a.dtype, np.integer):
+                mask = np.vectorize(lambda x: ok(int(x)))(a)
+                out = a.astype(a.dtype, copy=True)
+            else:
+                # float dtype (allows NaN)
+                # For NaNs, treat as not ok -> will become unknown_value
+                mask = np.vectorize(lambda x: ok(int(x)) if not np.isnan(x) else False)(a)
+                out = a.astype(np.float32, copy=True)
+
+            # If unknown_value is NaN we must have float dtype
+            if isinstance(unknown_value, float) and np.isnan(unknown_value):
+                out = out.astype(np.float32, copy=False)
+                out[~mask] = np.nan
+            else:
+                out[~mask] = unknown_value
+            return out
+        
+        def _downsample_1d(arr, orig_fs, target_fs, axis=0):
+            if orig_fs == target_fs: return arr
+            ratio = orig_fs / target_fs
+            q = int(round(ratio))
+            if abs(ratio - q) < 1e-6 and q >= 2:
+                return decimate(arr, q, ftype='fir', axis=axis, zero_phase=True)
+            frac = Fraction(target_fs / orig_fs).limit_denominator(64)
+            return resample_poly(arr, up=frac.numerator, down=frac.denominator, axis=axis)
+
+        def _downsample_stack(sig_trc, t_ms, orig_fs, target_fs):
+            """
+            Downsample signals AND build a physically consistent timebase:
+            t_ds[k] = t_ms[0] + k * (1000/target_fs).
+            """
+            x = _downsample_1d(sig_trc, orig_fs, target_fs, axis=0)
+            new_len = x.shape[0]
+            dt_ms = 1000.0 / float(target_fs)
+            t0 = float(t_ms[0])
+            t = (t0 + dt_ms * np.arange(new_len, dtype=np.float64)).astype(np.float32)
+            return x.astype(np.float32), t, float(dt_ms)
+
+        def _segment_runs(labels_1d: np.ndarray, unknown_sentinel=-1):
+            """
+            Return [(start_idx, stop_idx, class_id), ...] where stop_idx is exclusive.
+            Treat NaN (if any) as unknown_sentinel.
+            Works for int or float arrays.
+            """
+            a = np.asarray(labels_1d)
+            if a.size == 0:
+                return []
+
+            if a.dtype.kind in "iu":   # integer dtype
+                lab = a.astype(np.int64, copy=False)
+            else:
+                lab = a.copy()
+                nan_mask = np.isnan(lab)
+                if nan_mask.any():
+                    lab[nan_mask] = unknown_sentinel
+                lab = lab.astype(np.int64, copy=False)
+
+            change = np.where(lab[1:] != lab[:-1])[0] + 1
+            starts = np.r_[0, change]
+            stops  = np.r_[change, lab.size]
+            return [(int(s), int(e), int(lab[s])) for s, e in zip(starts, stops)]
+        
+        # ---------- config ----------
+        W       = int(self.signal_window_size)
+        hop     = int(getattr(self, "predict_window_stride", 1))          # <-- honored now
+        orig_fs = float(self.sampling_frequency_hz)   # ~1e6
+        tgt_fs  = float(self.target_sampling_hz)
+        unknown_value = getattr(self, "predict_unknown_label_value", -1)        
+        
+        predict_datasets = []
+        with h5py.File(self.data_file, 'r') as h5:
+            # validate events
+            valid_events = []
+            for shot, event in shot_start_time_indices:
+                skey = f"{shot}/{event}"
+                if skey in h5 and 'signals' in h5[skey] and 'time' in h5[skey]:
+                    valid_events.append((shot, event))
+                else:
+                    print(f"[confinement/predict] skip {skey}: missing signals/times")
+
+            for i, (shot, event) in enumerate(valid_events):
+                if i % 100 == 0:
+                    print(f"[confinement/predict] {i:04d}/{len(valid_events):04d} shot={shot} event={event}")
+
+                grp  = h5[f"{shot}/{event}"]
+                shot_grp = h5[str(shot)]  # <--- use consistent string key
+
+                # ---- load raw ----
+                sig_xt = np.array(grp['signals'], dtype=np.float32)     # (X,T)
+                t_ms  = np.array(grp['time'],   dtype=np.float64)     # (T,)
+                if sig_xt.shape[1] < W:   # not enough samples for one window
+                    continue
+
+                # ---- reshape to (T, R_full, C_full) and select (r,c) ----
+                # Retrieve the inboard_column_channel_order for this shot
+                inboard_order = shot_grp.attrs["inboard_column_channel_order"]
+                signals = self.reshape_signals_6x8(sig_xt, inboard_order)
+                start_col_index = (8-self.n_cols)
+                sig_trc = signals[:, :self.n_rows, start_col_index:]
+
+                # optional bandpass for classifier
+                if self.lower_cutoff_frequency_hz is not None and self.upper_cutoff_frequency_hz is not None:
+                    if i % 100 == 0:
+                        print(f"  applying {self.lower_cutoff_frequency_hz} - {self.upper_cutoff_frequency_hz} bandpass filter ")
+                    sig_trc = self.apply_bandpass_filter(sig_trc)
+
+                # ---- downsample ----
+                if self.target_sampling_hz is not None:
+                    sig_trc, t_ms, dt_ms = _downsample_stack(sig_trc, t_ms, orig_fs, tgt_fs)   # (T_ds,r,c), (T_ds,), float
+
+                # ---- standardize using train stats (important!) ----
+                if getattr(self, "standardize_signals", False):
+                    assert self.signal_mean is not None and self.signal_stdev is not None, \
+                        "Predict requires training mean/stdev to standardize inputs."
+                    sig_trc = (sig_trc - self.signal_mean) / max(self.signal_stdev, 1e-12)
+
+                # ---- labels (align to t_ds) ----
+                labels_1d = None
+                time_key = 'time' if 'time' in grp else ('times' if 'times' in grp else None)
+                if labels_1d is None:
+                    # event datasets: labels + time (or times)
+                    time_key = 'time' if 'time' in grp else ('times' if 'times' in grp else None)
+                    if 'labels' in grp and time_key is not None:
+                        lab_t = np.array(grp[time_key], dtype=np.float32)    # original event timebase
+                        lab_v = np.array(grp['labels'], dtype=np.int64)      # class ids 0..C-1
+                        # align to t_ds (downsampled)
+                        idx  = np.searchsorted(lab_t, t_ms, side='left')
+                        idx0 = np.clip(idx - 1, 0, lab_t.size - 1)
+                        idx1 = np.clip(idx,       0, lab_t.size - 1)
+                        d0   = np.abs(t_ms - lab_t[idx0])
+                        d1   = np.abs(t_ms - lab_t[idx1])
+                        use0 = d0 <= d1
+                        nn   = np.where(use0, idx0, idx1)
+                        labels_1d = lab_v[nn].astype(np.int64)
+                        self._ensure_label_maps()  # builds allowed_labels, label_to_local, etc.
+                        labels_local = self._remap_to_local(labels_1d, unknown_value=unknown_value)
+
+                    # labels_1d are original IDs (0..C-1). Remap to local [0..K_eff-1]; unknown -> -1
+                    unknown_value = getattr(self, "predict_unknown_label_value", -1)
+                    labels_local = self._remap_to_local(labels_1d, unknown_value=unknown_value)
+
+                    # segment on local labels
+                    spans = _segment_runs(labels_local, unknown_sentinel=unknown_value)
+
+                    if not spans:
+                        continue
+
+                # ---- per-span sliding windows, build dataset objects ----
+                for s_idx, e_idx, class_id in spans:
+                    # candidate window ends (inclusive) inside [s_idx, e_idx)
+                    # (we use ends to be consistent with your label-at-window-end convention)
+                    end_idxs = np.arange(max(s_idx, W-1), e_idx, hop, dtype=int)
+                    if end_idxs.size == 0:
+                        continue
+                    # convert to window STARTS relative to the span:
+                    t0_candidates = (end_idxs - (W - 1)).astype(int)     # starts in [s_idx - (W-1), ...], all >= s_idx by construction
+                    # restrict signals/labels to the span:
+                    sig_span = sig_trc[s_idx:e_idx]                       # (T_seg,r,c)
+                    lab_span = labels_local[s_idx:e_idx]  # keep local IDs (or -1) per time step
+                    # time for the FIRST window end in this span (absolute ms)
+                    first_end_abs_ms = float(t_ms[s_idx + (W - 1)])
+                    # sample indices relative to the SPAN (dataset-local):
+                    local_starts = t0_candidates - s_idx                 # 0 .. (T_seg - W)
+                    assert np.all(local_starts >= 0)
+
+                    ds = Confinement_Predict_Dataset(
+                                    signals=sig_span,                     # (T_seg, r, c)
+                                    n_rows=self.n_rows,
+                                    n_cols=self.n_cols,
+                                    labels=lab_span,                      # (T_seg,)
+                                    signal_window_size=W,
+                                    shot=int(shot),
+                                    start_time=int(round(first_end_abs_ms)),   # will be used as FIRST window-end time
+                                    confinement_mode_index=int(class_id),
+                                    sample_indices=torch.from_numpy(local_starts.astype(np.int64)),
+                                    dt_ms=float(dt_ms)                    # needed to advance time per window
+                                )
+                    predict_datasets.append(ds)
+
+        if len(predict_datasets) == 0:
+            print("[confinement/predict] no samples prepared for classification.")
+            return ConcatDataset([])  # or a dummy empty dataset
+        else:
+            print(f"[confinement/predict] built {len(predict_datasets)} segment datasets.")
+            return ConcatDataset(predict_datasets)
 
     def reshape_signals_6x8(self, signals, inboard_order):
         # Assumptions:
@@ -734,9 +1194,12 @@ class Confinement_Datamodule(LightningDataModule):
         self._split_datasets(filtered_shots)
         self.calculate_mode_times_and_shots(self.data_file, list(filtered_shots.keys()))
 
+        # 3) NEW: build predict events purely from user-specified predict_shots
+        self._set_predict_confinement_events_from_shots(shots)
+
     def _load_and_label_shots(self):
         if self.bad_shots is None:
-            self.bad_shots = []  # Initialize to empty list if None
+            self.bad_shots = []
 
         shots = {}
         with h5py.File(self.data_file, "r") as data_file:
@@ -744,13 +1207,24 @@ class Confinement_Datamodule(LightningDataModule):
                 if shot in self.bad_shots:
                     print(f"Skipping bad shot: {shot}")
                     continue
+
                 shot_labels = self._collect_labels(data_file, shot)
-                if not shot_labels:
+
+                # Avoid ambiguous truth checks on arrays:
+                if not shot_labels:   # empty list
                     continue
+
                 label_presence = self._label_presence(shot_labels)
-                shot_events = [(shot, event) for event in data_file[shot].keys() if 'labels' in data_file[shot][event]]
+
+                # Build (shot, event) only for groups that actually contain 'labels'
+                shot_events = []
+                for event_name, obj in data_file[shot].items():
+                    if isinstance(obj, h5py.Group) and 'labels' in obj.keys():
+                        shot_events.append((shot, event_name))
+
                 metadata = self._extract_metadata(data_file[shot].attrs)
                 shots[shot] = (shot_events, label_presence, metadata)
+
         return shots
 
     def _apply_metadata_filters(self, shots):
@@ -808,14 +1282,57 @@ class Confinement_Datamodule(LightningDataModule):
 
          # Return shots including forced shots for further processing
         return {**shots, **test_shot_data, **validation_shot_data}
+    
+    def _compute_allowed_from_filter(self, label_filter, num_classes):
+        if label_filter is None:
+            return np.arange(num_classes, dtype=int)
+        if isinstance(label_filter, str):
+            m = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", label_filter)
+            if not m:
+                raise ValueError(f"Bad label_filter: {label_filter!r}")
+            lo, hi = map(int, m.groups())
+            return np.arange(lo, hi + 1, dtype=int)
+        return np.array(sorted(int(x) for x in label_filter), dtype=int)
+
+    def _ensure_label_maps(self):
+        # Build once and reuse everywhere (train/val/test/predict)
+        if getattr(self, "allowed_labels", None) is None:
+            allowed = self._compute_allowed_from_filter(self.label_filter, self.num_classes)
+            self.allowed_labels = allowed.astype(int)
+            self.effective_num_classes = int(len(allowed))
+            self.label_to_local = {old: i for i, old in enumerate(self.allowed_labels.tolist())}
+            self.local_to_label = self.allowed_labels.copy()  # np.array of original IDs in local order
+            # Optional: persist
+            self.save_hyperparameters({
+                "allowed_labels": self.allowed_labels.tolist(),
+                "effective_num_classes": self.effective_num_classes,
+            })
+
+    def _remap_to_local(self, labels_1d, unknown_value=-1):
+        """Map original class IDs -> local [0..K_eff-1]; others -> unknown_value."""
+        a = np.asarray(labels_1d, dtype=np.int64)
+        out = np.full_like(a, fill_value=unknown_value)
+        for old, new in self.label_to_local.items():
+            out[a == old] = new
+        return out
 
     def _collect_labels(self, data_file, shot):
         shot_labels = []
-        for event in data_file[shot].keys():
-            event_data = data_file[shot][event]
-            if 'labels' in event_data:
-                labels_array = event_data['labels'][()]
-                shot_labels.extend(labels_array)
+        shot_grp = data_file[shot]
+
+        for event_name, obj in shot_grp.items():
+            # Only check membership on groups
+            if isinstance(obj, h5py.Group) and 'labels' in obj.keys():
+                ds = obj['labels']
+                # string vs numeric handling
+                if h5py.check_string_dtype(ds.dtype) is not None:
+                    arr = ds.asstr()[()]                 # read as str
+                else:
+                    arr = np.asarray(ds[()], dtype=None) # read as np array
+
+                # Flatten to 1D then extend the Python list
+                shot_labels.extend(np.ravel(arr).tolist())
+
         return shot_labels
 
     def _label_presence(self, labels):
@@ -895,6 +1412,7 @@ class Confinement_Datamodule(LightningDataModule):
             print(f"Train shot numbers: {train_indices}")
             print(f"Validation shot numbers: {val_indices}")
             print(f"Test shot numbers: {test_indices}")
+
         else:
             shot_numbers = np.array(list(filtered_shots.keys()))
             self.test_confinement_events = [event for shot in shot_numbers for event in filtered_shots[shot][0]]
@@ -918,44 +1436,89 @@ class Confinement_Datamodule(LightningDataModule):
         elif label in uncommon_labels_1:
             return (True, False, False, False)
         return label
-
+    
     def calculate_mode_times_and_shots(self, file_path, valid_shot_keys):
-        mode_times = {}  # Time spent in each mode
-        mode_shots = {}  # Unique shots for each mode
+        mode_times = defaultdict(float)  # time accumulated per mode
+        mode_shots = defaultdict(set)    # unique shot IDs per mode
 
-        with h5py.File(file_path, 'r') as file:
+        # helper to find a time key in a group
+        def _find_time_key(g):
+            for k in ("time", "times", "time_centers", "label_times"):
+                if k in g.keys():
+                    return k
+            return None
+
+        with h5py.File(file_path, "r") as f:
             for shot_key in valid_shot_keys:
-                if shot_key in file:
-                    shot_group = file[shot_key]
-                    for nested_key in shot_group.keys():
-                        nested_group = shot_group[nested_key]
-                        if 'labels' in nested_group and 'time' in nested_group:
-                            labels = nested_group['labels'][:]
-                            time = nested_group['time'][:]
-                            time_diffs = np.diff(time)  # Time intervals
+                if shot_key not in f:
+                    continue
+                shot_grp = f[shot_key]
 
-                            # Handle NaNs in labels: create a mask for valid (non-NaN) labels
-                            valid_indices = ~np.isnan(labels[:-1])  # Exclude the last label as it has no following time difference
+                for nested_name, obj in shot_grp.items():
+                    # only do membership checks on groups
+                    if not isinstance(obj, h5py.Group):
+                        continue
 
-                            # Iterate only over valid indices
-                            for i in np.where(valid_indices)[0]:  # Get the indices of valid labels
-                                label = int(labels[i])  # Convert to int, NaNs should have been filtered out
-                                if label not in mode_times:
-                                    mode_times[label] = 0  # Initialize if the label hasn't been encountered yet
-                                    mode_shots[label] = set()  # Initialize a set for unique shots
+                    if "labels" not in obj.keys():
+                        continue
 
-                                mode_times[label] += time_diffs[i]  # Add time difference to the corresponding mode
-                                mode_shots[label].add(shot_key)  # Add shot key to the set of unique shots for the mode
+                    tkey = _find_time_key(obj)
+                    if tkey is None:
+                        continue
 
-        # Convert time from microseconds to more suitable units if necessary
-        mode_times_seconds = {k: v / 1e3 for k, v in mode_times.items()}  # Convert to seconds
+                    labels = np.asarray(obj["labels"][()], dtype=float)  # allow NaN
+                    time   = np.asarray(obj[tkey][()], dtype=float)
 
-        # Count unique shots for each mode
-        mode_shot_counts = {k: len(v) for k, v in mode_shots.items()}
+                    # need at least two time points to form a diff
+                    n = min(labels.shape[0], time.shape[0])
+                    if n < 2:
+                        continue
+
+                    labels = labels[:n]
+                    time   = time[:n]
+
+                    dt = np.diff(time)               # length n-1
+                    valid = ~np.isnan(labels[:-1])   # only intervals whose starting label is valid
+                    if not np.any(valid):
+                        continue
+
+                    # iterate only over valid indices
+                    for i in np.where(valid)[0]:
+                        lab = int(labels[i])
+                        mode_times[lab] += float(dt[i])
+                        mode_shots[lab].add(shot_key)
+
+        # Convert from ms → s (keep as in your original)
+        mode_times_seconds = {k: v / 1e3 for k, v in mode_times.items()}
+        mode_shot_counts   = {k: len(v)   for k, v in mode_shots.items()}
 
         print("Total Time Spent in Each Mode (seconds):", mode_times_seconds)
         print("Number of Unique Shots for Each Mode:", mode_shot_counts)
-    
+
+    def _set_predict_confinement_events_from_shots(self, shots_all: dict):
+        """
+        Build predict events using ALL events from user-provided self.predict_shots,
+        regardless of train/val/test filtering.
+        """
+        predict_shots = getattr(self, "predict_shots", None) or []
+        if not predict_shots:
+            self.predict_confinement_events = []
+            print("Predict set size: 0 events (no predict_shots provided)")
+            return
+
+        # normalize shot ids to strings to match HDF5 keys
+        predict_shots_str = [str(s) for s in predict_shots]
+        available = set(shots_all.keys())
+        missing = [s for s in predict_shots_str if s not in available]
+        if missing:
+            print(f"Warning: The following predict shots are missing from the data file: {missing}")
+
+        chosen = [s for s in predict_shots_str if s in available]
+        predict_events = [evt for s in chosen for evt in shots_all[s][0]]  # shots_all[shot][0] = list[(shot, event)]
+
+        self.predict_confinement_events = predict_events
+        print(f"Predict set size: {len(self.predict_confinement_events)} events from shots {chosen}")
+
     def _get_valid_indices(
         self,
         labels: np.ndarray = None,
@@ -964,9 +1527,6 @@ class Confinement_Datamodule(LightningDataModule):
         valid_t0 = np.zeros(labels.size, dtype=int)
         first_valid_signal_window_start_index = self.signal_window_size - 1
         valid_t0[first_valid_signal_window_start_index:] = 1
-
-        if self.log_time:
-            labels = np.log10(labels)
 
         return labels, valid_t0
     
@@ -1041,16 +1601,16 @@ class Confinement_Datamodule(LightningDataModule):
     
     def predict_dataloader(self):
         predict_sampler = torch.utils.data.DistributedSampler(
-            self.datasets['test'],
+            self.datasets['predict'],
             shuffle=False,
             drop_last=True,
         )
         return torch.utils.data.DataLoader(
-            dataset=self.datasets['test'],
+            dataset=self.datasets['predict'],
             sampler=predict_sampler,
             batch_size=self.batch_size,
             shuffle=False,
-            num_workers=0,
-            # pin_memory=False,
-            persistent_workers=False,
+            num_workers=4 if self.num_workers > 0 else 0,  # Adjust based on the environment
+            pin_memory=True,  # Enable pin_memory for faster data transfers to GPU
+            persistent_workers=(self.num_workers > 0),  # Keep workers alive if num_workers > 0
         ) 

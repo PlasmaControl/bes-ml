@@ -8,6 +8,7 @@ lightning_logs/
 # data files
 *.pkl
 *.hdf5
+*.h5
 *.csv
 *.xlsx
 
@@ -62,7 +63,9 @@ bes_ml2/exp_gill01/
 bes_ml2/old_slurm_files/
 bes_ml2/plots/
 bes_ml2/*.out
+bes_ml2/*.err
 bes_ml2/*.txt
+bes_ml2/*.onnx
 bes_ml2/cctd.ipynb
 bes_ml2/cctd_2.ipynb
 bes_ml2/confinement_datamodule.py
@@ -74,3 +77,8 @@ bes_ml2/restructure_separatrix_data.py
 bes_ml2/restructure_velocimetry_data.ipynb
 bes_ml2/ddp_lightning.sh
 bes_ml2/ddp_main.py
+bes_ml2/exp_cv/
+bes_ml2/keras2c/
+bes_ml2/pytorch2keras.py
+bes_ml2/velocimetry_metadata_csv.py
+

@@ -239,49 +239,106 @@ class Torch_MLP_Mixin(Torch_Base):
     mlp_dropout: float = 0.1
     temperature: float = 1.0  # Default is 1, which means no scaling. Higher Temperature (T > 1) makes the probabilities more uniform. Lower Temperature (0 < T < 1) makes the output probabilities more extreme (either closer to 0 or 1), i.e. increases the model's confidence in its predictions.
     
-    def make_mlp(
-            self, 
-            mlp_in_features: int, 
-            mlp_out_features: int = 4, # number of classes
-            output_activation: str = "logits", # Options: "sigmoid", "softmax", "logits"
-    ) -> torch.nn.Module:
-        # MLP layers
-        print("Constructing MLP layers")
-        mlp_layers = torch.nn.Sequential(torch.nn.Flatten())
-        n_layers = len(self.mlp_layers)
-        for i, layer_size in enumerate(self.mlp_layers):
-            in_features = mlp_in_features if i==0 else self.mlp_layers[i-1]
-            print(f"  MLP layer {i} with in/out features: {in_features}/{layer_size} (LeakyReLU activ.)")
-            mlp_layers.extend([
-                # torch.nn.Dropout(p=self.mlp_dropout) if i!=n_layers-1 else torch.nn.Identity(),
-                torch.nn.Linear(
-                    in_features=in_features,
-                    out_features=layer_size,
-                ),
-                torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope) if i!=n_layers-1 else torch.nn.Identity(),
-                # torch.nn.ReLU() if i!=n_layers-1 else torch.nn.Identity(),
-            ])
+    # def make_mlp(
+    #         self, 
+    #         mlp_in_features: int, 
+    #         mlp_out_features: int = 4, # number of classes
+    #         output_activation: str = "logits", # Options: "sigmoid", "softmax", "logits"
+    # ) -> torch.nn.Module:
+    #     # MLP layers
+    #     print("Constructing MLP layers")
+    #     mlp_layers = torch.nn.Sequential(torch.nn.Flatten())
+    #     n_layers = len(self.mlp_layers)
+    #     for i, layer_size in enumerate(self.mlp_layers):
+    #         in_features = mlp_in_features if i==0 else self.mlp_layers[i-1]
+    #         print(f"  MLP layer {i} with in/out features: {in_features}/{layer_size} (Linear -> BatchNorm -> LeakyReLU) ")
 
-        # output layer
-        print(f"  MLP output layer with in/out features {self.mlp_layers[-1]}/{mlp_out_features} (no activ.)")
-        mlp_layers.append(
-            torch.nn.Linear(
-                in_features=self.mlp_layers[-1], 
-                out_features=mlp_out_features,
-            )
+    #         # Use dropout on all but the final hidden layer
+    #         if i != n_layers - 1:
+    #             mlp_layers.append(torch.nn.Dropout(p=self.mlp_dropout))
+    #         else:
+    #             mlp_layers.append(torch.nn.Identity())
+
+    #         # Linear layer
+    #         mlp_layers.append(torch.nn.Linear(in_features=in_features, out_features=layer_size))
+
+    #         # For all hidden layers, add BatchNorm and activation.
+    #         if i != n_layers - 1:
+    #             # mlp_layers.append(torch.nn.BatchNorm1d(num_features=layer_size))
+    #             mlp_layers.append(torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope))
+    #         else:
+    #             # For the last layer in the MLP stack, we can leave out the activation.
+    #             mlp_layers.append(torch.nn.Identity())
+
+    #         # mlp_layers.extend([
+    #         #     torch.nn.Dropout(p=self.mlp_dropout) if i!=n_layers-1 else torch.nn.Identity(),
+    #         #     torch.nn.Linear(
+    #         #         in_features=in_features,
+    #         #         out_features=layer_size,
+    #         #     ),
+    #         #     torch.nn.LeakyReLU(negative_slope=self.leaky_relu_slope) if i!=n_layers-1 else torch.nn.Identity(),
+    #         #     # torch.nn.ReLU() if i!=n_layers-1 else torch.nn.Identity(),
+    #         # ])
+
+    #     # output layer
+    #     print(f"  MLP output layer with in/out features {self.mlp_layers[-1]}/{mlp_out_features} (no activ.)")
+    #     mlp_layers.append(
+    #         torch.nn.Linear(
+    #             in_features=self.mlp_layers[-1], 
+    #             out_features=mlp_out_features,
+    #         )
+    #     )
+
+    #     # Determine output activation with temperature scaling
+    #     if output_activation == "sigmoid":
+    #         print(f"  Applying temperature-scaled sigmoid at MLP output")
+    #         mlp_layers.append(TemperatureScaledSigmoid(self.temperature))
+    #     elif output_activation == "softmax":
+    #         print(f"  Applying temperature-scaled softmax at MLP output")
+    #         mlp_layers.append(TemperatureScaledSoftmax(self.temperature))
+    #     else:
+    #         print(f"  Logit output (log odds, log(p/(1-p))) with range [-inf,inf]")
+
+    #     return mlp_layers
+    
+    def make_mlp(
+        self,
+        mlp_in_features: int,
+        mlp_out_features: int = 1,         # one real‐valued output
+        output_activation: str = "linear"  # "sigmoid", "softmax"
+    ) -> torch.nn.Module:
+        layers = [torch.nn.Flatten()]
+
+        # --- build hidden layers ---
+        for i, layer_size in enumerate(self.mlp_layers):
+            in_feats = mlp_in_features if i == 0 else self.mlp_layers[i - 1]
+            layers.append(torch.nn.Linear(in_feats, layer_size))
+            # layers.append(torch.nn.LeakyReLU(inplace=True))
+            layers.append(torch.nn.ReLU(inplace=True))
+            layers.append(torch.nn.Dropout(p=self.mlp_dropout))
+
+        # --- final linear head ---
+        layers.append(
+            torch.nn.Linear(self.mlp_layers[-1], mlp_out_features)
         )
+
+        # --- no activation for regression (i.e. identity) ---
+        # if output_activation != "linear":
+        #     raise ValueError(f"Unsupported output_activation={output_activation!r} for regression.")
+        # elif output_activation != "linear":
 
         # Determine output activation with temperature scaling
         if output_activation == "sigmoid":
             print(f"  Applying temperature-scaled sigmoid at MLP output")
-            mlp_layers.append(TemperatureScaledSigmoid(self.temperature))
+            layers.append(TemperatureScaledSigmoid(self.temperature))
         elif output_activation == "softmax":
             print(f"  Applying temperature-scaled softmax at MLP output")
-            mlp_layers.append(TemperatureScaledSoftmax(self.temperature))
+            layers.append(TemperatureScaledSoftmax(self.temperature))
         else:
             print(f"  Logit output (log odds, log(p/(1-p))) with range [-inf,inf]")
 
-        return mlp_layers
+
+        return torch.nn.Sequential(*layers)
 
 
 @dataclasses.dataclass(eq=False)
@@ -325,43 +382,57 @@ class Torch_CNN_Mixin(Torch_Base):
         # as the spectrum is symmetric around the Nyquist frequency.
         self.nfreqs = self.nfft // 2 + 1
 
-    def forward_with_fft(self, x):
-        # FFT-based feature extraction
-        batch_size, num_channels, time_dim, spatial_dim1, spatial_dim2 = x.shape
+    # In Torch_CNN_Mixin
+    def compute_fft_subwindows(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Returns the FFT-derived tensor before any CNN:
+        shape = (B, fft_subwindows, D, R, C)
+        where D = (nfreqs-1) if not use_phase else 2*(nfreqs-1).
+        """
+        # Accept (B,1,W,R,C) or (B,1,W,R)
+        if x.dim() == 4:
+            x = x.unsqueeze(-1)  # -> (B,1,W,R,1)
+        assert x.dim() == 5, f"Expected (B,1,W,R[,C]), got {tuple(x.shape)}"
 
-        # Conditionally allocate memory for fft_bins and fft_subwindows based on use_phase
-        if self.use_phase:
-            fft_bins = torch.empty((batch_size, self.fft_nbins, 2 * (self.nfreqs - 1), spatial_dim1, spatial_dim2), dtype=x.dtype, device=x.device)
-            fft_subwindows = torch.empty((batch_size, self.fft_subwindows, 2 * (self.nfreqs - 1), spatial_dim1, spatial_dim2), dtype=x.dtype, device=x.device)
-        else:
-            fft_bins = torch.empty((batch_size, self.fft_nbins, self.nfreqs - 1, spatial_dim1, spatial_dim2), dtype=x.dtype, device=x.device)
-            fft_subwindows = torch.empty((batch_size, self.fft_subwindows, self.nfreqs - 1, spatial_dim1, spatial_dim2), dtype=x.dtype, device=x.device)
-        
+        batch_size, num_channels, time_dim, spatial_dim1, spatial_dim2 = x.shape
+        D_mag = self.nfreqs - 1
+        D = (2 * D_mag) if self.use_phase else D_mag
+
+        device, dtype = x.device, x.dtype
+        fft_bins = torch.empty((batch_size, self.fft_nbins, D, spatial_dim1, spatial_dim2),
+                            dtype=dtype, device=device)
+        fft_subwindows = torch.empty((batch_size, self.fft_subwindows, D, spatial_dim1, spatial_dim2),
+                                    dtype=dtype, device=device)
+
         for i_subwindow, subwindow in enumerate(x.split(self.subwindow_size, dim=2)):
             for i_bin in range(self.fft_nbins):
                 bin_data = subwindow[:, :, i_bin * self.nfft:(i_bin + 1) * self.nfft, :, :]
-                fft_output = torch.fft.rfft(bin_data, dim=2)[:, :, 1:, :, :]  # Remove DC component
-
+                fft_output = torch.fft.rfft(bin_data, dim=2)[:, :, 1:, :, :]  # drop DC
                 magnitude = torch.abs(fft_output)
-                fft_bins[:, i_bin:i_bin+1, :self.nfreqs-1, :, :] = magnitude ** 2
+                fft_bins[:, i_bin:i_bin+1, :D_mag, :, :] = magnitude ** 2
 
                 if self.use_phase:
                     phase = torch.angle(fft_output)
+                    # normalize phase to [0,1]
                     normalized_phase = (phase + np.pi) / (2 * np.pi)
-                    fft_bins[:, i_bin:i_bin+1, self.nfreqs-1:, :, :] = normalized_phase
+                    fft_bins[:, i_bin:i_bin+1, D_mag:, :, :] = normalized_phase
 
-            fft_subwindows[:, i_subwindow:i_subwindow+1, :, :, :] = torch.mean(fft_bins, dim=1, keepdim=True)
+            # average over bins → (B,1,D,R,C) then squeeze that 1
+            fft_subwindows[:, i_subwindow:i_subwindow+1, :, :, :] = torch.mean(
+                fft_bins, dim=1, keepdim=True
+            )
 
-        # Apply logarithm to magnitude part, keep phase part as is
-        # fft_subwindows[:, :, :self.nfreqs-1, :, :][fft_subwindows[:, :, :self.nfreqs-1, :, :] < 1e-5] = 1e-5
-        # fft_subwindows[:, :, :self.nfreqs-1, :, :] = torch.log10(fft_subwindows[:, :, :self.nfreqs-1, :, :])
-        
-        fft_subwindows[fft_subwindows < 1e-5] = 1e-5        
+        # log scale (same as your current CNN path; if use_phase=True and you
+        # don’t want to log phase, split and log only magnitude part here)
+        fft_subwindows[fft_subwindows < 1e-5] = 1e-5
         fft_subwindows = torch.log10(fft_subwindows)
-        
-        # Pass FFT features through the FFT-specific CNN encoder
-        fft_features = self.cnn_encoder(fft_subwindows)
 
+        return fft_subwindows
+
+    def forward_with_fft(self, x):
+        fft_subwindows = self.compute_fft_subwindows(x)
+        # Pass FFT features through the FFT-specific CNN encoder
+        fft_features = self.encoder(fft_subwindows)
         return fft_features
     
     def forward_with_fpga_fft(self, x):
@@ -417,11 +488,23 @@ class Torch_CNN_Mixin(Torch_Base):
         return signals
 
     def reshape_signals_2(self, signals):
-        batch_size, num_channels, time_dim, spatial_dim1 = signals.shape
+        # below is for time1_ch1, time1_ch2, …, time1_ch8, time2_ch1, time2_ch2, …, time2_ch8, … time100_ch8
+        # batch_size, num_channels, time_dim, spatial_dim1 = signals.shape
         
-        signals = signals.reshape(batch_size, time_dim*spatial_dim1)
+        # signals = signals.reshape(batch_size, time_dim*spatial_dim1)
 
-        return signals
+        # below is for ch1_time1, ch1_time2, …, ch1_time100, ch2_time1, ch2_time2, …, ch2_time100, … ch8_time100
+        # signals: (batch, 1, time_dim, spatial_dim1)
+        batch, _, time_dim, spatial_dim1 = signals.shape
+
+        # 1) drop the singleton "1"
+        x = signals.squeeze(1)          # → (batch, time_dim, spatial_dim1)
+        # 2) swap so that channel is the 2nd dim
+        x = x.permute(0, 2, 1)          # → (batch, spatial_dim1, time_dim)
+        # 3) flatten spatial_dim1 then time_dim
+        x = x.reshape(batch, spatial_dim1 * time_dim)     # → (batch, 8*100=800)
+        return x
+    
     
     def reshape_signals_rcn(self, signals):
         batch_size, num_channels, time_dim, spatial_dim1 = signals.shape
@@ -795,7 +878,7 @@ class Lightning_Model(
     weight_decay: float = 1e-6
     monitor_metric: str = 'sum_loss/val'
     log_dir: str = dataclasses.field(default='.', init=False)
-    encoder_type: str = 'raw' # 'raw', 'fft', 'fpga_fft', 'both', 'none', 'rcn'
+    encoder_type: str = 'raw' # 'raw', 'fft', 'fpga_fft', 'both', 'none', 'rcn', 'fft_mlp'
     # the following must be listed in `_frontend_names`
     reconstruction_decoder: bool = False
     classifier_mlp: bool = False
@@ -808,7 +891,7 @@ class Lightning_Model(
     # capture outputs from penultimate layer to perform tSNE
     penultimate_outputs: list = dataclasses.field(default_factory=list)
     visualize_embeddings: bool = False
-    save_test_data: bool = False
+    prediction_directory: str = None
     n_rows: int = 8
     n_cols: int = 8
 
@@ -839,7 +922,9 @@ class Lightning_Model(
             features = raw_cnn_features + fft_cnn_features
         elif self.encoder_type == 'none':
             # self.cnn_encoder, cnn_features, cnn_output_shape = None, self.signal_window_size*self.n_rows*self.n_cols, None
-            self.encoder, features, output_shape = None, self.signal_window_size*self.n_rows, None
+            # self.encoder, features, output_shape = None, self.signal_window_size*self.n_rows, None
+            self.encoder, features, output_shape = None, self.signal_window_size * self.n_rows * self.n_cols, None
+
         elif self.encoder_type == 'rcn':  # Add the RCN option
             self.encoder = self.make_rcn_encoder(
                 input_dim=self.n_cols,  # Spatial dimension
@@ -847,6 +932,16 @@ class Lightning_Model(
             )
             # Output features of the RCN encoder
             features = self.rcn_reservoir_size
+        elif self.encoder_type == 'fft_mlp':
+            # No CNN; MLP sees flattened FFT tensor
+            self.encoder = None
+            # D = number of channels in FFT tensor:
+            #   (nfreqs-1) for magnitude-only, or 2*(nfreqs-1) if phase is included.
+            D_mag = self.nfreqs - 1
+            D = (2 * D_mag) if self.use_phase else D_mag
+            # fft_subwindows × D × R × C
+            features = self.fft_subwindows * D * self.n_rows * self.n_cols
+            output_shape = None
         else:
             raise ValueError("Invalid encoder_type")
 
@@ -875,14 +970,13 @@ class Lightning_Model(
                             setattr(self, f"{frontend_key}_bce_loss", BCEWithLogit())
                             setattr(self, f"{frontend_key}_f1_score", torchmetrics.F1Score(task='binary'))
                     elif 'velocimetry' in frontend_key:
-                        # Create a simple MLP for velocimetry with multiple outputs
-                        # vZ_shear_profile is np.gradient(vZ.mean(axis=1), dR, axis=1) where vZ has dim (time, poloidal, radial)
                         # new_module = self.make_mlp(mlp_in_features=cnn_features, mlp_out_features=1 * self.n_cols, output_activation="linear")
-                        new_module = self.make_mlp(mlp_in_features=features, mlp_out_features=1, output_activation="linear")
+                        new_module = self.make_mlp(mlp_in_features=features, mlp_out_features=4, output_activation="linear")
+                        # new_module = self.make_mlp(mlp_in_features=features, mlp_out_features=1, output_activation="linear")
                         self.frontends.update({frontend_key: new_module})
                         for label in ['vZ']:
                             setattr(self, f"{frontend_key}_{label}_mse_loss", torchmetrics.MeanSquaredError())
-                            setattr(self, f"{frontend_key}_{label}_r2_score", torchmetrics.R2Score(num_outputs=1))
+                            setattr(self, f"{frontend_key}_{label}_r2_score", torchmetrics.R2Score())
                     elif 'separatrix' in frontend_key:
                         # Create a simple MLP to identify 6 closest (R,Z) points on separatrix
                         new_module = self.make_mlp(mlp_in_features=features, mlp_out_features=2 * 6, output_activation="linear")
@@ -908,19 +1002,19 @@ class Lightning_Model(
             # Create the metrics once
             for label in ["vZ"]:
                 setattr(self, f"velocimetry_rcn_{label}_mse_loss", torchmetrics.MeanSquaredError())
-                setattr(self, f"velocimetry_rcn_{label}_r2_score",  torchmetrics.R2Score(num_outputs=1))
+                setattr(self, f"velocimetry_rcn_{label}_r2_score",  torchmetrics.R2Score())
 
         self.log_param_counts()  
        
-        # self.example_input_array = torch.zeros(
-        #     (1, 1, self.signal_window_size, self.n_rows, self.n_cols), 
-        #     dtype=torch.float32,
-        # )
-
         self.example_input_array = torch.zeros(
-            (1, 1, self.signal_window_size, self.n_rows), 
+            (1, 1, self.signal_window_size, self.n_rows, self.n_cols), 
             dtype=torch.float32,
         )
+
+        # self.example_input_array = torch.zeros(
+        #     (1, 1, self.signal_window_size, self.n_rows), 
+        #     dtype=torch.float32,
+        # )
 
         self.initialize_layers()
 
@@ -972,6 +1066,19 @@ class Lightning_Model(
     
     def forward(self, signals: torch.Tensor) -> dict[str, torch.Tensor]:
         results = {}
+
+        # Accept both (B,1,W,R,C) and (B,1,W,R)
+        if signals.dim() == 5:
+            B, Ch, W, R, C = signals.shape
+            flat = signals.reshape(B, Ch * W * R * C)   # -> (B, W*R*C) since Ch==1
+            cur_in_feats = W * R * C
+        elif signals.dim() == 4:
+            B, Ch, W, R = signals.shape
+            flat = signals.reshape(B, Ch * W * R)       # -> (B, W*R)
+            cur_in_feats = W * R
+            C = 1
+        else:
+            raise ValueError(f"Expected (B,1,W,R[,C]), got {tuple(signals.shape)}")
         
         if self.encoder_type == 'raw':
             features = self.encoder(signals)
@@ -987,12 +1094,30 @@ class Lightning_Model(
             features = torch.cat([raw_features, fft_features], dim=1)  # Concatenate along the feature dimension
         elif self.encoder_type == 'none':
             # features = self.reshape_signals(signals)
-            features = self.reshape_signals_2(signals)
+            # features = self.reshape_signals_2(signals)
+            # Sanity check: model was initialized with expected (W * n_rows * n_cols)
+            expected = self.signal_window_size * self.n_rows * self.n_cols
+            assert cur_in_feats == expected, \
+                f"Flattened MLP input {cur_in_feats} != expected {expected}. " \
+                f"(W={W}, R={R}, C={C}, model n_rows={self.n_rows}, n_cols={self.n_cols}, window={self.signal_window_size})"
+
+            features = flat  # (B, expected)
         elif self.encoder_type == 'rcn':
             reshaped_signals = self.reshape_signals_rcn(signals)
             velocity_pred = self.encoder(reshaped_signals)   # shape [B,1]
             results["velocimetry_rcn"] = velocity_pred
             return results
+
+        elif self.encoder_type == 'fft_mlp':
+            # Build the same FFT representation used for the CNN,
+            # then flatten across (subwindows, D, R, C)
+            fft_sub = self.compute_fft_subwindows(signals)  # (B, S, D, R, C)
+            B = fft_sub.shape[0]
+            features = fft_sub.reshape(B, -1)
+            expected_fft_feats = self.fft_subwindows * ((self.nfreqs - 1) * (2 if self.use_phase else 1)) * self.n_rows * self.n_cols
+            assert features.shape[1] == expected_fft_feats, \
+                f"FFT-MLP flat features {features.shape[1]} != expected {expected_fft_feats}"
+
         else:
             raise ValueError("Invalid encoder_type")
         
@@ -1046,22 +1171,21 @@ class Lightning_Model(
 
             for metric_suffix in metric_suffices:
                 if 'velocimetry' in frontend_key:
-                    # For velocimetry tasks, assume single output per sample: frontend_result shape: (batch, 1)
-                    # labels shape: (batch,)
-                    # Squeeze the output to match labels' shape: (batch,)
-                    frontend_result_squeezed = frontend_result.float().squeeze(-1)
-                    target = labels.float()
-                    # Handle velocimetry task
-                    # frontend_result = frontend_result.reshape(-1, 2, 8, 8)
+                    # frontend_result:  (batch, N)  N==1 or N==2
+                    # we only care about the first channel, so:
+                    preds = frontend_result[..., 0].float()    # → shape (batch,)
+                    target = labels.float()                    # → shape (batch,)
+                    # frontend_result_squeezed = frontend_result.float().squeeze(-1)
+                    # target = labels.float()
                     for idx, label_key in enumerate(['vZ']):
                         metric_name = f"{frontend_key}_{label_key}_{metric_suffix}"
                         metric = getattr(self, metric_name)
 
                         # Ensure shapes match, both (batch,)
-                        assert frontend_result_squeezed.shape == target.shape, \
-                            f"Shape mismatch: preds {frontend_result_squeezed.shape}, target {target.shape}"
+                        assert preds.shape == target.shape, \
+                            f"Shape mismatch: preds {preds.shape}, target {target.shape}"
 
-                        metric_value = metric(frontend_result_squeezed, target)
+                        metric_value = metric(preds, target)
                         
                         if 'loss' in metric_name:
                             sum_loss = metric_value if sum_loss is None else sum_loss + metric_value
@@ -1271,103 +1395,414 @@ class Lightning_Model(
 
     def on_predict_start(self):
         """
-        Called at the start of the predict loop.
-        Initializes containers to store predictions, labels, and time points.
+        Start of predict loop. Works for either:
+        - results['velocimetry_mlp'] (regression)
+        - results['multiclass_classifier_mlp'] (classification)
         """
         self.predictions = []
         self.true_labels = []
         self.time_points = []
         self.shot_ids = []
+        self.event_ids = []   
         self.radial_positions = []
+
+        # --- classification containers ---
+        self.cls_logits = []     # list of (B, C) np arrays
+        self.cls_labels = []     # list of (B,)  np arrays (or (B,1) squeezed)
+        self.cls_cids = []       # list of (B, *) identifiers (tuples/ints)
+
+        # which head did we actually use during this predict run?
+        self._active_head = None  # 'velocimetry' or 'multiclass'
 
     def predict_step(self, batch, batch_idx):
         """
-        Called for each batch during prediction.
-        Perform inference and store predictions, true labels, time points, and shot IDs.
+        Supports either batch structure:
+        - Velocimetry:   (signals, labels, time_points, shot_ids, event_ids)
+        - Multiclass:    (signals, labels, confinement_mode_ids)
         """
-        signals, labels, time_points, shot_ids, radial_positions = batch        
-        results = self(signals)
-        predictions = results["velocimetry_mlp"].detach().cpu().numpy()  # Assuming 'velocimetry_mlp' is used
-        predictions = np.squeeze(predictions)  # Ensure shape is (batch_size,) if needed
+        if not isinstance(batch, (list, tuple)):
+            raise ValueError("predict_step expected a tuple/list batch.")
+        
+        # ---------- Velocimetry path (5-tuple) ----------
+        if len(batch) == 5:
+            signals, labels, time_points, shot_ids, event_ids = batch
+            results = self(signals)
 
-        self.predictions.append(predictions)
-        self.true_labels.append(labels.cpu().numpy().squeeze())
-        self.time_points.append(time_points.cpu().numpy().squeeze())
-        self.shot_ids.append(shot_ids)  # Collect shot IDs for later grouping
-        self.radial_positions.append(radial_positions.cpu().numpy().squeeze())
+            if "velocimetry_mlp" in results:
+                out = results["velocimetry_mlp"]                      # (B, 1)
+                preds = out.detach().cpu().squeeze(-1).numpy()        # (B,)
+                self.predictions.append(preds)
+                self.true_labels.append(labels.detach().cpu().numpy().squeeze())
+                self.time_points.append(time_points.detach().cpu().numpy().squeeze())
+                self.shot_ids.append(shot_ids)     # keep list-like; flatten later
+                self.event_ids.append(event_ids)
+                self._active_head = self._active_head or "velocimetry"
+                return
+            
+        # ---------- Multiclass path for Confinement_Predict_Dataset ----------
+        if len(batch) == 4:
+            signals, labels, shot, start_time = batch
+            results = self(signals)
+            if "multiclass_classifier_mlp" not in results:
+                raise RuntimeError("Got a 4-tuple batch (multiclass) but model didn’t return 'multiclass_classifier_mlp'.")
 
+            logits = results["multiclass_classifier_mlp"].detach().cpu().numpy()  # (B, C)
+            y = labels.detach().cpu().numpy().squeeze()                            # (B,)
+
+            # shot and start_time may be tensors or python ints; collate -> (B,) tensors typically
+            def _to_1d_np(x):
+                if torch.is_tensor(x): return x.detach().cpu().numpy().reshape(-1)
+                return np.array(x).reshape(-1)
+            shot_np  = _to_1d_np(shot)
+            start_np = _to_1d_np(start_time)
+
+            # Build confinement IDs that uniquely tag this predict segment
+            cids = np.array([(int(shot_np[i]), int(start_np[i])) for i in range(logits.shape[0])], dtype=object)
+
+            self.cls_logits.append(logits)
+            self.cls_labels.append(y)
+            self.cls_cids.append(cids)
+            self._active_head = self._active_head or "multiclass"
+            return
+
+        raise ValueError(f"Unrecognized batch structure of length {len(batch)}.")
+        
     def on_predict_end(self):
         """
-        Called at the end of the predict loop. Aggregates and saves predictions vs truth,
-        as well as optional HDF5 saving for further analysis.
+        Aggregates predictions across ranks (if any) and writes once on rank 0.
+        - Velocimetry -> HDF5 per-shot (same as before)
+        - Multiclass  -> HDF5 per-shot, per-segment (segment keyed by start_time_ms)
         """
-        if self.trainer.is_global_zero:  # Only execute on the main process
-            print("Aggregating predictions...")
+        import torch.distributed as dist
+        is_dist = dist.is_available() and dist.is_initialized()
+        world   = getattr(self.trainer, "world_size", 1)
 
-            # Combine predictions, labels, and times
-            predictions = np.concatenate(self.predictions, axis=0)  # Shape: (total_windows, n_cols)
-            true_labels = np.concatenate(self.true_labels, axis=0)  # Shape: (total_windows, n_cols)
-            times = np.concatenate(self.time_points, axis=0)        # Shape: (total_windows,)
-            shots = np.concatenate(self.shot_ids, axis=0)           # Shape: (total_windows,)
-            r_positions = np.concatenate(self.radial_positions, axis=0)  # shape: (N,)
+        def _gather(obj):
+            if not is_dist or world == 1:
+                return [obj]
+            bucket = [None] * world
+            dist.all_gather_object(bucket, obj)
+            return bucket
 
-            print(f"Predictions shape: {predictions.shape}")
-            print(f"True labels shape: {true_labels.shape}")
-            print(f"Times shape: {times.shape}")
-            print(f"Shots shape: {shots.shape}")
-            print(f"Radial positions shape: {r_positions.shape}")  # New
+        def _flatten(seq):
+            return np.array(
+                [item for sub in seq for item in (sub if isinstance(sub, (list, tuple, np.ndarray)) else [sub])],
+                dtype=object
+            )
+            
 
-            # Ensure the log directory exists
-            if not os.path.exists(self.log_dir):
-                print(f"Creating log directory at {self.log_dir}")
-                os.makedirs(self.log_dir)
+        # =========================
+        # MULTICLASS CLASSIFICATION
+        # =========================
+        if getattr(self, "_active_head", None) == "multiclass":
+            # pack local
+            local = dict(
+                logits=np.concatenate(self.cls_logits, axis=0) if self.cls_logits else np.zeros((0, 0), dtype=np.float32),
+                labels=np.concatenate(self.cls_labels, axis=0) if self.cls_labels else np.array([], dtype=np.int64),
+                cids=np.concatenate(self.cls_cids, axis=0) if self.cls_cids else np.array([], dtype=object),  # (shot,start_ms)
+            )
+            gathered = _gather(local)
 
-            # Create an HDF5 file for storing predictions
-            hdf5_filepath = os.path.join(self.log_dir, "predictions.hdf5")
-            print(f"Saving predictions to HDF5 file at {hdf5_filepath}")
+            if self.trainer.is_global_zero:
+                # merge on rank0
+                logits_list, labels_list, cids_list = [], [], []
+                for g in gathered:
+                    if g["labels"].size:
+                        logits_list.append(g["logits"])
+                        labels_list.append(g["labels"])
+                        cids_list.append(g["cids"])
+                if not labels_list:
+                    print("[rank0] No multiclass predictions collected; nothing to write.")
+                    return
+
+                logits = np.concatenate(logits_list, axis=0)  # (N, C)
+                labels = np.concatenate(labels_list, axis=0)  # (N,)
+                cids   = np.concatenate(cids_list,   axis=0)  # (N,) of tuples (shot,start_ms)
+
+                # aggregate by cid (segment key)
+                from collections import defaultdict
+                seg_logits = defaultdict(list)
+                seg_labels = defaultdict(list)
+                # normalize cids to tuples
+                norm_cids = [tuple(cid) if not isinstance(cid, tuple) else cid for cid in cids]
+                for i, cid in enumerate(norm_cids):
+                    seg_logits[cid].append(logits[i])
+                    seg_labels[cid].append(labels[i])
+                for cid in seg_logits:
+                    seg_logits[cid] = np.vstack(seg_logits[cid])           # (n_seg, C)
+                    seg_labels[cid] = np.array(seg_labels[cid])            # (n_seg,)
+
+                # derive times per segment: t = start_ms + k * hop * (1000/target_fs)
+                hop    = int(getattr(self, "predict_window_stride", 1))
+                fs_hz  = float(getattr(self, "target_sampling_hz", 1000.0))
+                dt_ms  = float(hop) * (1000.0 / fs_hz)
+
+                # open HDF5 (multiclass file)
+                os.makedirs(self.log_dir, exist_ok=True)
+                hdf5_path = (
+                    self.prediction_directory
+                    if (isinstance(self.prediction_directory, str) and self.prediction_directory.endswith(".hdf5"))
+                    else os.path.join(self.log_dir, "multiclass_predictions.hdf5")
+                )
+                print(f"[rank0] Saving multiclass predictions to HDF5 at {hdf5_path}")
+
+                def _softmax(x):
+                    x = x - np.max(x, axis=1, keepdims=True)
+                    ex = np.exp(x, dtype=np.float64)
+                    return (ex / np.sum(ex, axis=1, keepdims=True)).astype(np.float32)
+
+                with h5py.File(hdf5_path, "w") as h5f:
+                    # meta
+                    meta = h5f.create_group("_meta")
+                    meta.attrs["signal_window_size"]     = int(getattr(self, "signal_window_size", -1))
+                    meta.attrs["predict_window_stride"]  = hop
+                    meta.attrs["target_sampling_hz"]     = fs_hz
+                    meta.attrs["dt_between_windows_ms"]  = dt_ms
+                    meta.attrs["num_classes"]            = int(next(iter(seg_logits.values())).shape[1]) if seg_logits else 0
+                    if hasattr(self, "class_labels"):
+                        # optional: save class label strings
+                        dt = h5py.string_dtype(encoding="utf-8")
+                        meta.create_dataset("class_labels", data=np.array(self.class_labels, dtype=dt))
+
+                    # group by shot, then by segment (start_time_ms)
+                    # collect all unique shots from cid[0]
+                    shots = sorted(set(int(cid[0]) for cid in seg_logits.keys()))
+                    for shot_id in shots:
+                        g_shot = h5f.create_group(str(shot_id))
+                        # find segments for this shot
+                        shot_cids = sorted([cid for cid in seg_logits.keys() if int(cid[0]) == shot_id],
+                                        key=lambda c: int(c[1]))
+                        for cid in shot_cids:
+                            start_ms = int(cid[1])
+                            g_seg = g_shot.create_group(f"segment_{start_ms}ms")
+
+                            L = seg_logits[cid]             # (n_seg, C)
+                            y = seg_labels[cid]             # (n_seg,)
+                            n = y.shape[0]
+                            probs = _softmax(L)
+                            predc = np.argmax(probs, axis=1).astype(np.int64)
+                            times = (start_ms + np.arange(n, dtype=np.float32) * dt_ms).astype(np.float32)
+
+                            g_seg.create_dataset("logits",       data=L,     compression="gzip", chunks=True)
+                            g_seg.create_dataset("probs",        data=probs, compression="gzip", chunks=True)
+                            g_seg.create_dataset("pred_classes", data=predc, compression="gzip", chunks=True)
+                            g_seg.create_dataset("true_labels",  data=y,     compression="gzip", chunks=True)
+                            g_seg.create_dataset("times_ms",     data=times, compression="gzip", chunks=True)
+
+                            # convenience attrs
+                            g_seg.attrs["start_time_ms"] = start_ms
+                            g_seg.attrs["dt_ms"]         = dt_ms
+
+                            print(f"[rank0] Saved shot {shot_id}, segment start {start_ms}ms ({n} windows)")
+
+            return  # end multiclass
+
+        # ===============
+        # VELOCIMETRY REG
+        # ===============
+        local = dict(
+            pred=np.concatenate(self.predictions,  axis=0) if self.predictions  else np.array([], dtype=np.float32),
+            lbl =np.concatenate(self.true_labels,  axis=0) if self.true_labels  else np.array([], dtype=np.float32),
+            t   =np.concatenate(self.time_points,  axis=0) if self.time_points  else np.array([], dtype=np.float32),
+            shots_list=self.shot_ids,
+            events_list=self.event_ids,
+        )
+        gathered = _gather(local)
+
+        if self.trainer.is_global_zero:
+            preds_all, lbls_all, times_all = [], [], []
+            shots_all, events_all = [], []
+            for g in gathered:
+                if g["pred"].size:
+                    preds_all.append(g["pred"]); lbls_all.append(g["lbl"]); times_all.append(g["t"])
+                shots_all.extend(g["shots_list"]); events_all.extend(g["events_list"])
+
+            if not preds_all:
+                print("[rank0] No velocimetry predictions collected; nothing to write.")
+                return
+
+            predictions = np.concatenate(preds_all, axis=0)
+            true_labels = np.concatenate(lbls_all,  axis=0)
+            times       = np.concatenate(times_all, axis=0)
+            shots       = _flatten(shots_all)
+            events      = _flatten(events_all)
+
+            os.makedirs(self.log_dir, exist_ok=True)
+            hdf5_filepath = (
+                self.prediction_directory
+                if (isinstance(self.prediction_directory, str) and self.prediction_directory.endswith(".hdf5"))
+                else os.path.join(self.log_dir, "predictions.hdf5")
+            )
+            print(f"[rank0] Saving velocimetry predictions to HDF5 at {hdf5_filepath}")
+
             with h5py.File(hdf5_filepath, "w") as h5_file:
+                meta = h5_file.create_group("_meta")
+                meta.attrs["encoder_type"] = getattr(self, "encoder_type", "unknown")
+                meta.attrs["signal_window_size"] = int(getattr(self, "signal_window_size", -1))
+
                 unique_shots = np.unique(shots)
                 for shot_id in unique_shots:
-                    shot_mask = shots == shot_id
-                    shot_group = h5_file.create_group(str(shot_id))
-                    shot_group.create_dataset(
-                        "predictions",
-                        data=predictions[shot_mask],
-                        compression="gzip",
-                        chunks=True
-                    )
-                    shot_group.create_dataset(
-                        "true_labels",
-                        data=true_labels[shot_mask],
-                        compression="gzip",
-                        chunks=True
-                    )
-                    shot_group.create_dataset(
-                        "times",
-                        data=times[shot_mask],
-                        compression="gzip",
-                        chunks=True
-                    )
-                    # Optionally store radial positions as well
-                    shot_group.create_dataset(
-                        "radial_positions",
-                        data=r_positions[shot_mask],
-                        compression="gzip",
-                        chunks=True
-                    )
-                    print(f"Saved data for shot {shot_id} to HDF5 file, predicting done.")
+                    shot_mask = (shots == shot_id)
+                    g = h5_file.create_group(str(shot_id))
+                    g.create_dataset("predictions", data=predictions[shot_mask], compression="gzip", chunks=True)
+                    g.create_dataset("true_labels", data=true_labels[shot_mask], compression="gzip", chunks=True)
+                    g.create_dataset("times_ms",    data=times[shot_mask],      compression="gzip", chunks=True)
+                    dt = h5py.string_dtype(encoding="utf-8")
+                    g.create_dataset("events", data=events[shot_mask].astype(str).astype(dt), compression="gzip", chunks=True)
+                    print(f"[rank0] Saved data for shot {shot_id} ({shot_mask.sum()} samples)")
 
-            # Create individual plots for each shot
-            # unique_shots = np.unique(shots)
-            # for shot_id in unique_shots:
-            #     shot_mask = shots == shot_id
-            #     print(f"Plotting for shot {shot_id}")
-            #     self.plot_predictions_vs_truth(
-            #         predictions=predictions[shot_mask],
-            #         true_labels=true_labels[shot_mask],
-            #         times=times[shot_mask],
-            #         shot_id=shot_id,
-            #     )
+        # old velo predict that works
+        # if self.trainer.is_global_zero:  # Only execute on the main process
+        #     print("Aggregating predictions...")
+
+        #     predictions = np.concatenate(self.predictions, axis=0)       # (N,)
+        #     true_labels = np.concatenate(self.true_labels, axis=0)       # (N,)
+        #     times       = np.concatenate(self.time_points, axis=0)       # (N,)
+
+        #     # shot_ids/event_ids may be lists-of-lists from the collate; flatten robustly
+        #     def _flatten(x):
+        #         return np.array([item for sub in x for item in (sub if isinstance(sub, (list, tuple, np.ndarray)) else [sub])], dtype=object)
+        #     shots  = _flatten(self.shot_ids)                              # (N,)
+        #     events = _flatten(self.event_ids)                             # (N,)
+
+        #     print(f"Predictions shape: {predictions.shape}")
+        #     print(f"True labels shape: {true_labels.shape}")
+        #     print(f"Times shape:       {times.shape}")
+        #     print(f"Shots shape:       {shots.shape}")
+        #     print(f"Events shape:      {events.shape}")
+
+        #     # Ensure the log directory exists
+        #     if not os.path.exists(self.log_dir):
+        #         print(f"Creating log directory at {self.log_dir}")
+        #         os.makedirs(self.log_dir)
+
+        #     # Choose output path
+        #     hdf5_filepath = self.prediction_directory or os.path.join(self.log_dir, "predictions.hdf5")
+        #     print(f"Saving predictions to HDF5 file at {hdf5_filepath}")
+
+        #     with h5py.File(hdf5_filepath, "w") as h5_file:
+        #         # Optional: write some metadata for reproducibility
+        #         meta = h5_file.create_group("_meta")
+        #         meta.attrs["encoder_type"] = getattr(self, "encoder_type", "unknown")
+        #         meta.attrs["signal_window_size"] = int(getattr(self, "signal_window_size", -1))
+
+        #         # Group by shot, write per-shot datasets
+        #         unique_shots = np.unique(shots)
+        #         for shot_id in unique_shots:
+        #             shot_mask = (shots == shot_id)
+        #             g = h5_file.create_group(str(shot_id))
+        #             g.create_dataset("predictions", data=predictions[shot_mask], compression="gzip", chunks=True)
+        #             g.create_dataset("true_labels", data=true_labels[shot_mask], compression="gzip", chunks=True)
+        #             g.create_dataset("times_ms",    data=times[shot_mask],      compression="gzip", chunks=True)
+        #             # Save the corresponding event id for each sample (useful for later regrouping)
+        #             # Store as variable-length strings
+        #             ev_arr = events[shot_mask].astype(str)
+        #             dt = h5py.string_dtype(encoding="utf-8")
+        #             g.create_dataset("events", data=ev_arr.astype(dt), compression="gzip", chunks=True)
+
+        #             print(f"Saved data for shot {shot_id} ({shot_mask.sum()} samples)")
+
+    # def predict_step(self, batch, batch_idx):
+    #     """
+    #     Called for each batch during prediction.
+    #     Perform inference and store predictions, true labels, time points, and shot IDs.
+    #     """
+    #     signals, labels, time_points, shot_ids, radial_positions = batch        
+    #     results = self(signals)
+    #     raw_preds = results["velocimetry_mlp"].detach().cpu().numpy()  # shape: (batch, 1) or (batch, 2)
+
+    #     # Pick off the first output channel (this will give you shape (batch,) in both cases)
+    #     if raw_preds.ndim == 2 and raw_preds.shape[1] > 1:
+    #         predictions = raw_preds[:, 0]
+    #     else:
+    #         predictions = raw_preds.squeeze(-1)
+
+    #     # predictions = results["velocimetry_mlp"].detach().cpu().numpy()  # Assuming 'velocimetry_mlp' is used
+    #     # predictions = np.squeeze(predictions)  # Ensure shape is (batch_size,) if needed
+
+    #     self.predictions.append(predictions)
+    #     self.true_labels.append(labels.cpu().numpy().squeeze())
+    #     self.time_points.append(time_points.cpu().numpy().squeeze())
+    #     self.shot_ids.append(shot_ids)  # Collect shot IDs for later grouping
+    #     self.radial_positions.append(radial_positions.cpu().numpy().squeeze())
+
+    # def on_predict_end(self):
+    #     """
+    #     Called at the end of the predict loop. Aggregates and saves predictions vs truth,
+    #     as well as optional HDF5 saving for further analysis.
+    #     """
+    #     if self.trainer.is_global_zero:  # Only execute on the main process
+    #         print("Aggregating predictions...")
+
+    #         # Combine predictions, labels, and times
+    #         predictions = np.concatenate(self.predictions, axis=0)  # Shape: (total_windows, n_cols)
+    #         true_labels = np.concatenate(self.true_labels, axis=0)  # Shape: (total_windows, n_cols)
+    #         times = np.concatenate(self.time_points, axis=0)        # Shape: (total_windows,)
+    #         shots = np.concatenate(self.shot_ids, axis=0)           # Shape: (total_windows,)
+    #         r_positions = np.concatenate(self.radial_positions, axis=0)  # shape: (N,)
+
+    #         print(f"Predictions shape: {predictions.shape}")
+    #         print(f"True labels shape: {true_labels.shape}")
+    #         print(f"Times shape: {times.shape}")
+    #         print(f"Shots shape: {shots.shape}")
+    #         print(f"Radial positions shape: {r_positions.shape}")  # New
+
+    #         # Ensure the log directory exists
+    #         if not os.path.exists(self.log_dir):
+    #             print(f"Creating log directory at {self.log_dir}")
+    #             os.makedirs(self.log_dir)
+
+    #         # Create an HDF5 file for storing predictions
+    #         if self.prediction_directory:
+    #             hdf5_filepath = self.prediction_directory
+    #         else:
+    #             hdf5_filepath = os.path.join(self.log_dir, "predictions.hdf5")
+
+    #         print(f"Saving predictions to HDF5 file at {hdf5_filepath}")
+    #         with h5py.File(hdf5_filepath, "w") as h5_file:
+    #             unique_shots = np.unique(shots)
+    #             for shot_id in unique_shots:
+    #                 shot_mask = shots == shot_id
+    #                 shot_group = h5_file.create_group(str(shot_id))
+    #                 shot_group.create_dataset(
+    #                     "predictions",
+    #                     data=predictions[shot_mask],
+    #                     compression="gzip",
+    #                     chunks=True
+    #                 )
+    #                 shot_group.create_dataset(
+    #                     "true_labels",
+    #                     data=true_labels[shot_mask],
+    #                     compression="gzip",
+    #                     chunks=True
+    #                 )
+    #                 shot_group.create_dataset(
+    #                     "times",
+    #                     data=times[shot_mask],
+    #                     compression="gzip",
+    #                     chunks=True
+    #                 )
+    #                 # Optionally store radial positions as well
+    #                 shot_group.create_dataset(
+    #                     "radial_positions",
+    #                     data=r_positions[shot_mask],
+    #                     compression="gzip",
+    #                     chunks=True
+    #                 )
+    #                 print(f"Saved data for shot {shot_id} to HDF5 file, predicting done.")
+
+    #         # Create individual plots for each shot
+    #         # unique_shots = np.unique(shots)
+    #         # for shot_id in unique_shots:
+    #         #     shot_mask = shots == shot_id
+    #         #     print(f"Plotting for shot {shot_id}")
+    #         #     self.plot_predictions_vs_truth(
+    #         #         predictions=predictions[shot_mask],
+    #         #         true_labels=true_labels[shot_mask],
+    #         #         times=times[shot_mask],
+    #         #         shot_id=shot_id,
+    #         #     )
+
 
     def plot_predictions_vs_truth(self, predictions, true_labels, times, shot_id):
         """
@@ -1426,7 +1861,6 @@ class Lightning_Model(
 
         plt.close(fig)
         
-
     def save_inference_data(self, data_list, filename):
         data_filepath = os.path.join(self.log_dir, filename)
         with h5py.File(data_filepath, 'w') as f:

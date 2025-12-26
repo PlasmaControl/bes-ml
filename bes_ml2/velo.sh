@@ -4,13 +4,13 @@
 #SBATCH --mail-user=kevin.gill@wisc.edu
 #SBATCH --mail-type=ALL
 
-#SBATCH --ntasks-per-node=3
+#SBATCH --ntasks-per-node=4
 #SBATCH --cpus-per-task=32
-#SBATCH --gpus-per-node=3
+#SBATCH --gpus-per-node=4
 
-#SBATCH --nodes=1
-#SBATCH --time=00:30:00
-#SBATCH --qos=debug
+#SBATCH --nodes=2
+#SBATCH --time=03:00:00
+#SBATCH --qos=regular
 ###SBATCH --array=0
 
 echo Python executable: $(which python)
@@ -74,85 +74,171 @@ if not is_global_zero:
 try:
     t_start = time.time()
 
-    n_rows = 7
-    n_cols = 8
+    # --- Your selection knobs (must match what you pass to the datamodule) ---
+    block_cols = [1, 3, 5, 7]
+    row_stride   = 1
+    row_offset   = 4
+
+    # Compute R_sel, C_sel without needing a datamodule instance
+    import numpy as np
+    R_sel = len(np.arange(8)[row_offset::row_stride])
+
+    def _cols_from_spec(spec, n=8):
+        if isinstance(spec, tuple) and spec[0] == 'last':
+            k = int(spec[1]); return np.arange(n-k, n)
+        if isinstance(spec, slice):       return np.arange(n)[spec]
+        if isinstance(spec, (list, np.ndarray)): return np.array(spec, dtype=int)
+        raise ValueError("bad block_cols")
+
+    # C_sel = _cols_from_spec(block_cols, 8).size  # -> 4
+    C_sel = len(block_cols)
+    good_times_psi_93 = {
+        # 145384: [()], # this means use all times
+        # 145387: [()],
+        # 145388: [()],
+        145391: [(1900, 4200)],
+        # 145410: [()],
+        # 145419: [()],
+        # 145420: [()],
+        # 145422: [()],
+        # 145425: [()],
+        # 145427: [()],
+        # 157303: [()],
+        # 157322: [()],
+        # 157323: [()],
+        # 157372: [()],
+        # 157373: [()],
+        # 157374: [()],
+        157375: [(1900, 3600), (4000, 5500)],
+        # 157376: [()],
+        157377: [(1800, 5000), (5400, 6000)],
+        # 158076: [()],
+        159443: [(1900, 5600)],
+        189189: [(2000, 4700)],
+        # 189191: [()],
+        189199: [(1800, 3000), (4200, 4700)],
+        # 200021: [()],
+        # 200632: [()],
+        # 200634: [()],
+        200637: [(1100, 3800)],
+        200638: [(800, 3500)],
+        200639: [(800, 4600)],
+        200643: [(800, 4600)],
+        # 203152: [()],
+        # 203416: [()],
+        203417: [(2250, 2700), (2900, 3300), (3600, 4100)],
+        # 203418: [()],
+        203419: [(2250, 3500), (3750, 4000)],
+        # 203420: [()],
+        203423: [(2300, 3850)],
+        203469: [(600, 4600)],
+        203470: [(500, 3900)],
+        203471: [(500, 3800)],
+        # 203475: [()],
+        203483: [(800, 4300)],
+        203484: [(800, 4200)],
+        203485: [(800, 2100), (3200, 4500)],
+        # 203659: [()],
+        203660: [(1100, 2900)],
+        # 203662: [()],
+        203663: [(1100, 3900)],
+        203664: [(1000, 4000)],
+        # 203665: [()],
+        # 203667: [()],
+        # 203671: [()],
+        # 203672: [()],
+        203946: [(4000, 5400)],
+        204286: [(1800, 4600)],
+        204287: [(1500, 4000)],
+        # 204288: [()],
+        204289: [(1100, 4300)],
+        204290: [(1100, 4100)],
+        204291: [(1100, 3700)],
+        # 204292: [()],
+        # 204293: [()],
+        204294: [(1100, 4100)],
+        # 204295: [()],
+        # 204296: [()],
+        # 204297: [()],
+        204299: [(1500, 4500)],
+        # 204301: [()],
+        204302: [(1800, 4100)],
+        204303: [(1600, 4400)],
+        # 204837: [()],
+    }
+
+    train_only_times = {
+        "145384": [(2500, 5000)],   # None means "no upper limit"
+        # or apply to every training shot:
+        # "all": [(2400, None)],
+        "145420": [(2500, None)],
+        "145425": [(2500, None)], 
+        "157303": [(2800, None)],
+        "157372": [(2400, None)],
+        "157375": [(3900, None)], 
+        "158076": [(3000, 5100)],
+        "203416": [()],
+        "203420": [(3000, None)], 
+        "203483": [(2000, None)],
+        "203664": [(2000, None)],
+        "203671": [(2000, 4000)],
+        "204292": [(2000, None)],
+        "204295": [(2000, None)], 
+        "204837": [(2000, None)],
+    }
 
     datamodule = velocimetry_datamodule.Velocimetry_Datamodule(
-            data_file='/pscratch/sd/k/kevinsg/bes_ml_jobs/confinement_data/20250111_vZ_maxlag150_bandpass_turb.hdf5',
-            signal_window_size=100,
-            n_rows=n_rows,
-            n_cols=n_cols,
+            data_file='/pscratch/sd/k/kevinsg/bes_ml_jobs/confinement_data/20251027_raw_signals_psi_interp.hdf5',
+            signal_window_size=48,
             batch_size=256,
             num_workers=4,
             seed=0,
             world_size=world_size,
-            lower_cutoff_frequency_hz=60e3,
-            upper_cutoff_frequency_hz=250e3,  # Upper cutoff frequency in Hz
-            start_time_ms=2400,
-            standardize_labels=False,
-            clip_labels=False,
-            labels_lower_bound=-151.0,
-            labels_upper_bound=151.0,
-            label_mean=-3.22,
-            label_std=14.40,
-            # normalize_labels=True,   
-            label_min=-50,           
-            label_max=50,       
+            # downsample_factor=100,
+            # lower_cutoff_frequency_hz=10e3,
+            # upper_cutoff_frequency_hz=200e3,  # Upper cutoff frequency in Hz
+            standardize_signals=False,
             split_method='shot',
-            fraction_validation=0.1,
-            fraction_test=0.05,
-            train_shots=['145384', '145385', '145388'],
-            validation_shots=['145391'],
-            test_shots=['145387'],
-            predict_shots=['145384', '145387'],
-            # train_shots=['199779', '191973', '191715', '193108', '191714', '199782', '191971', '200355', '200063', '199754', '191975', '191676', '193253', '191972', '199775', '191670', '193257', '199748', '200024', '193112', '193248', '200062', '200354', '199753', '199755', '193110', '200021', '193107', '191976', '193113', '193111', '191674', '200349'],
-            # validation_shots=[ '199749',  '191710', '199795', '191965'],
-            # test_shots=['199718', '191673', '191757', '199756'],
-            # predict_shots=['191670', '199718', '191714'],
-            # train_shots=['191670', '191673', '191674', '191676', '191714', '191754'],
-            # validation_shots=['191670'],
-            # test_shots=['191670'],
-            # predict_shots=['191670', '191714'],
+            train_shots = ['145384', '145420', '145425', '157303', '157372', '157375', '158076', '200643', '203416', '203420', '203483', '203664', '203671', '204292', '204295', '204837'],
+            validation_shots = ['145388', '145419', '157322', '157373', '157376', '203417', '203423', '203475', '203485', '203665', '203672', '204293'],
+            test_shots = ['145387', '145391', '145410', '145422', '145427', '157323', '157374', '157377', '159443', '189189', '189191', '189199', '200634', '200637', '200638', '200639', '203152', '203418', '203419', '203469', '203470', '203471', '203484', '203659', '203660', '203663', '203667', '203946', '204286', '204287', '204288', '204289', '204290', '204291', '204294',  '204296', '204297', '204299', '204301', '204302', '204303'],
+            predict_shots = ['145384', '145420', '145425', '157303', '157372', '157375', '158076', '200643', '203416', '203420', '203483', '203664', '203671', '204292', '204295', '204837', '145388', '145419', '157322', '157373', '157376', '203417', '203423', '203475', '203485', '203665', '203672', '204293', '145387', '145391', '145410', '145422', '145427', '157323', '157374', '157377', '159443', '189189', '189191', '189199', '200634', '200637', '200638', '200639', '203152', '203418', '203419', '203469', '203470', '203471', '203484', '203659', '203660', '203663', '203667', '203946', '204286', '204287', '204288', '204289', '204290', '204291', '204294',  '204296', '204297', '204299', '204301', '204302', '204303'],
             split_train_data_per_gpu=True,
-            vZ_uncertainty_threshold=5.0,
-            # target_labels=["smoothed_vZ_window25", "smoothed_vZ_uncertainty_window25"],
+            vZ_uncertainty_threshold=45.0,
             target_labels=["vZ", "vZ_uncertainty"],
             do_flip_augmentation=True,
-        )
+            shot_time_windows = good_times_psi_93,
+            # train_time_windows=train_only_times,     # applies ONLY to train
+            # --- block + label knobs ---
+            block_cols=block_cols,
+            row_stride=row_stride,
+            row_offset=row_offset,
+            target_sampling_hz=1_000_000.0,
+            label_target_psi=0.93, # 0.85, 0.88, 0.91, 0.93, 0.95
+            label_tolerance_ms=0.6,
+            window_hop=1,
+            # --- CRITICAL: keep these consistent with the model ---
+            n_rows=R_sel,   # 8 with your settings
+            n_cols=C_sel,   # 4 with ('last',4)
+    )
 
-    weight_decay = 0.001
+    weight_decay = 0.00001
     trial_name = f'{logger_hash}'
 
     lightning_model = elm_lightning_model.Lightning_Model(
         encoder_lr=1e-3,
         decoder_lr=1e-3,
         signal_window_size=datamodule.signal_window_size,
-        n_rows=n_rows,
-        n_cols=n_cols,
+        n_rows=R_sel,
+        n_cols=C_sel,
         monitor_metric='sum_loss/val',
         lr_scheduler_threshold=1e-3,
-        lr_scheduler_patience=10,
+        lr_scheduler_patience=5,
         weight_decay=weight_decay,
         encoder_type='none',
-        cnn_nlayers=2,
-        cnn_num_kernels=[16, 32],
-        cnn_kernel_time_size=[8, 4],
-        cnn_kernel_spatial_size=[3, 3],
-        cnn_padding = [1, 1],
-        cnn_maxpool_spatial_size = [2, 1],
-        cnn_maxpool_time_size = [2, 2],
-        leaky_relu_slope=0.001,
-        mlp_layers=(512, 256, 128),
-        # encoder_type='rcn',
-        # rcn_reservoir_size=1000,
-        # rcn_spectral_radius=0.9,
-        # rcn_sparsity=0.1,
-        # rcn_input_scaling=1.0,
-        # rcn_leaky_rate=0.5,            
-        # mlp_layers=(512, 256, 128, 64),
-        mlp_dropout=0.1,
+        mlp_layers=(50, 50),
+        mlp_dropout=0.001,
         velocimetry_mlp=True,
-        save_test_data=False,
     )
 
     trainer = BES_Trainer(
@@ -161,21 +247,19 @@ try:
         experiment_dir='./exp_gill01',
         trial_name=trial_name,
         wandb_log=True,
-        log_freq=1,
+        log_freq=100,
         # num_val_batches=1,
-        # num_train_batches=100, 
-        # val_check_interval=500,
-        # num_train_batches=1000, # for 4 nodes full dataset
-        val_check_interval=5000,
-        num_train_batches=19900,
+        # val_check_interval=5000,
+        num_train_batches=49500,
     )
 
     trainer.run_all(
-        max_epochs=5,
+        max_epochs=600,
         early_stopping_min_delta=2e-3,
-        early_stopping_patience=10,
+        early_stopping_patience=100,
         skip_test=False,
         skip_predict=False,
+        float_precision=32,
     )
     print(f'Python elapsed time {(time.time()-t_start)/60:.1f} min')
 except:
