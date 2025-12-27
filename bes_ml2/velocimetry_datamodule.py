@@ -224,6 +224,7 @@ class Velocimetry_Datamodule(LightningDataModule):
     do_flip_augmentation: bool = False
     predict_window_stride: int = 1  
     split_train_data_per_gpu: bool = True  
+    num_train_batches_per_gpu: int = 1
     prepare_data_per_node: bool = True  # hack to avoid error between dataclass and LightningDataModule
     is_global_zero: bool = dataclasses.field(default=True, init=False)
     log_dir: str = dataclasses.field(default='.', init=False)
@@ -337,6 +338,25 @@ class Velocimetry_Datamodule(LightningDataModule):
 
                 if dataset_stage in ['train', 'validation', 'test']:
                     dataset = self._load_and_preprocess_data_6(chunk_events, dataset_stage)
+
+                    # **Calculate number of batches for training**
+                    if dataset_stage == 'train':
+                        num_samples = len(dataset)
+                        num_batches_this_gpu = num_samples // self.batch_size
+                        print(f"[GPU {global_rank}] Train dataset: {num_samples} samples, "
+                            f"{num_batches_this_gpu} batches "
+                            f"(batch_size={self.batch_size}, drop_last=True)")
+                        
+                        # **Synchronize across all GPUs to find minimum**
+                        if torch.distributed.is_initialized():
+                            num_batches_tensor = torch.tensor(num_batches_this_gpu, dtype=torch.long, device='cuda')
+                            torch.distributed.all_reduce(num_batches_tensor, op=torch.distributed.ReduceOp.MIN)
+                            self.num_train_batches_per_gpu = int(num_batches_tensor.item())
+                            print(f"[GPU {global_rank}] Minimum batches across all GPUs: {self.num_train_batches_per_gpu}")
+                        else:
+                            # Single GPU case
+                            self.num_train_batches_per_gpu = num_batches_this_gpu
+
                 elif dataset_stage in ['predict']:
                     print(f"Preparing predict dataset for shots: {self.predict_shots}")
                     # Load and preprocess the data for these events
