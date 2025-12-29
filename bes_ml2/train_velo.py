@@ -104,7 +104,6 @@ class BES_Trainer:
         early_stopping_patience: int = 50,
         gradient_clip_value: int = None,
         float_precision: str|int = '16-mixed' if torch.cuda.is_available() else 32,
-        debug_predict: bool = False,
     ):
         self.lightning_model.log_dir = self.datamodule.log_dir = self.trial_dir
         monitor_metric = self.lightning_model.monitor_metric
@@ -163,6 +162,12 @@ class BES_Trainer:
         )
         
         if skip_test is False:
+            if self.datamodule.split_train_data_per_gpu:
+                del self.datamodule._train_dataloader  
+            else: 
+                del self.datamodule.datasets['train']
+
+            del self.datamodule.datasets['validation']
             trainer.test(datamodule=self.datamodule, ckpt_path='best')
 
         if skip_predict is False:

@@ -224,7 +224,7 @@ class Velocimetry_Datamodule(LightningDataModule):
     do_flip_augmentation: bool = False
     predict_window_stride: int = 1  
     split_train_data_per_gpu: bool = True  
-    num_train_batches_per_gpu: int = 1
+    num_train_batches_per_gpu: int = None
     prepare_data_per_node: bool = True  # hack to avoid error between dataclass and LightningDataModule
     is_global_zero: bool = dataclasses.field(default=True, init=False)
     log_dir: str = dataclasses.field(default='.', init=False)
@@ -339,23 +339,39 @@ class Velocimetry_Datamodule(LightningDataModule):
                 if dataset_stage in ['train', 'validation', 'test']:
                     dataset = self._load_and_preprocess_data_6(chunk_events, dataset_stage)
 
-                    # **Calculate number of batches for training**
-                    if dataset_stage == 'train':
-                        num_samples = len(dataset)
-                        num_batches_this_gpu = num_samples // self.batch_size
-                        print(f"[GPU {global_rank}] Train dataset: {num_samples} samples, "
-                            f"{num_batches_this_gpu} batches "
-                            f"(batch_size={self.batch_size}, drop_last=True)")
-                        
-                        # **Synchronize across all GPUs to find minimum**
-                        if torch.distributed.is_initialized():
-                            num_batches_tensor = torch.tensor(num_batches_this_gpu, dtype=torch.long, device='cuda')
-                            torch.distributed.all_reduce(num_batches_tensor, op=torch.distributed.ReduceOp.MIN)
-                            self.num_train_batches_per_gpu = int(num_batches_tensor.item())
-                            print(f"[GPU {global_rank}] Minimum batches across all GPUs: {self.num_train_batches_per_gpu}")
+                    if dataset_stage == "train":
+                        local_batches = len(dataset) // self.batch_size
+                        print(f"[rank {global_rank}] local train batches: {local_batches}")
+
+                        # Compute global min across ranks (NCCL -> must be CUDA tensor)
+                        if torch.distributed.is_available() and torch.distributed.is_initialized():
+                            t = torch.tensor(local_batches, device="cuda", dtype=torch.long)
+                            torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.MIN)
+                            min_batches = int(t.item())
                         else:
-                            # Single GPU case
-                            self.num_train_batches_per_gpu = num_batches_this_gpu
+                            min_batches = local_batches
+
+                        if min_batches < 1:
+                            raise RuntimeError(
+                                f"min_batches={min_batches}. At least one rank has <1 full batch. "
+                                f"Reduce world_size, lower batch_size, or change your chunking."
+                            )
+
+                        self.num_train_batches_per_gpu = min_batches
+                        min_samples = min_batches * self.batch_size
+
+                        # Truncate so EVERY rank has the same number of batches
+                        dataset = torch.utils.data.Subset(dataset, range(min_samples))
+                        print(f"[rank {global_rank}] trunc to {min_samples} samples = {min_batches} batches")
+
+                        self._train_dataloader = torch.utils.data.DataLoader(
+                            dataset,
+                            batch_size=self.batch_size,
+                            shuffle=True,
+                            num_workers=self.num_workers,
+                            persistent_workers=(self.num_workers > 0),
+                            drop_last=True,
+                        )
 
                 elif dataset_stage in ['predict']:
                     print(f"Preparing predict dataset for shots: {self.predict_shots}")
@@ -364,17 +380,6 @@ class Velocimetry_Datamodule(LightningDataModule):
                     # Assign the predict dataset
                     self.datasets["predict"] = dataset
 
-                # Store the DataLoader for this GPU
-                if dataset_stage == 'train':
-                    self._train_dataloader = torch.utils.data.DataLoader(
-                                            dataset, 
-                                            batch_size=self.batch_size,
-                                            shuffle=True,             
-                                            num_workers=self.num_workers,
-                                            persistent_workers=(self.num_workers > 0),
-                                            drop_last=True,
-                                            # collate_fn=self.custom_collate_fn,
-                                            )
         else:
             for dataset_stage in dataset_stages:
                 events = self.dataset_events[dataset_stage]
