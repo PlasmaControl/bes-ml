@@ -179,7 +179,6 @@ try:
                 '203664', '203671', '204292', '204837',
             ],
             validation_shots = [
-                # Sample from each group for representative validation
                 '145388', '145419',      # 145xxx
                 '157322', '157373',      # 157xxx  
                 '203417', '203423',      # early 203xxx
@@ -198,8 +197,8 @@ try:
             label_target_psi=0.93, # 0.85, 0.88, 0.91, 0.93, 0.95
             label_tolerance_ms=0.6,
             window_hop=1,
-            n_rows=R_sel,   # 8 with your settings
-            n_cols=C_sel,   # 4 with ('last',4)
+            n_rows=R_sel,   
+            n_cols=C_sel,   
     )
 
     weight_decay = 0.00001
