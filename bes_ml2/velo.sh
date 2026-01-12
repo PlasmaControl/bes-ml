@@ -8,7 +8,7 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --gpus-per-node=4
 
-#SBATCH --nodes=1
+#SBATCH --nodes=2
 #SBATCH --time=00:30:00
 #SBATCH --qos=debug
 ###SBATCH --array=0
