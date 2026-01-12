@@ -8,9 +8,9 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --gpus-per-node=4
 
-#SBATCH --nodes=2
-#SBATCH --time=03:00:00
-#SBATCH --qos=regular
+#SBATCH --nodes=1
+#SBATCH --time=00:30:00
+#SBATCH --qos=debug
 ###SBATCH --array=0
 
 echo Python executable: $(which python)
@@ -74,24 +74,12 @@ if not is_global_zero:
 try:
     t_start = time.time()
 
-    # --- Your selection knobs (must match what you pass to the datamodule) ---
     block_cols = [1, 3, 5, 7]
     row_stride   = 1
     row_offset   = 4
-
-    # Compute R_sel, C_sel without needing a datamodule instance
-    import numpy as np
     R_sel = len(np.arange(8)[row_offset::row_stride])
-
-    def _cols_from_spec(spec, n=8):
-        if isinstance(spec, tuple) and spec[0] == 'last':
-            k = int(spec[1]); return np.arange(n-k, n)
-        if isinstance(spec, slice):       return np.arange(n)[spec]
-        if isinstance(spec, (list, np.ndarray)): return np.array(spec, dtype=int)
-        raise ValueError("bad block_cols")
-
-    # C_sel = _cols_from_spec(block_cols, 8).size  # -> 4
     C_sel = len(block_cols)
+
     good_times_psi_93 = {
         # 145384: [()], # this means use all times
         # 145387: [()],
@@ -165,50 +153,43 @@ try:
         204302: [(1800, 4100)],
         204303: [(1600, 4400)],
         # 204837: [()],
-    }
+        205867: [(2200, 4400)],
 
-    train_only_times = {
-        "145384": [(2500, 5000)],   # None means "no upper limit"
-        # or apply to every training shot:
-        # "all": [(2400, None)],
-        "145420": [(2500, None)],
-        "145425": [(2500, None)], 
-        "157303": [(2800, None)],
-        "157372": [(2400, None)],
-        "157375": [(3900, None)], 
-        "158076": [(3000, 5100)],
-        "203416": [()],
-        "203420": [(3000, None)], 
-        "203483": [(2000, None)],
-        "203664": [(2000, None)],
-        "203671": [(2000, 4000)],
-        "204292": [(2000, None)],
-        "204295": [(2000, None)], 
-        "204837": [(2000, None)],
     }
 
     datamodule = velocimetry_datamodule.Velocimetry_Datamodule(
-            data_file='/pscratch/sd/k/kevinsg/bes_ml_jobs/confinement_data/20251027_raw_signals_psi_interp.hdf5',
+            data_file='/global/cfs/cdirs/m3586/kgill/velocimetry_data/20251027_raw_signals_psi_interp.hdf5',
             signal_window_size=48,
-            batch_size=256,
+            batch_size=1024,
             num_workers=4,
             seed=0,
             world_size=world_size,
-            # downsample_factor=100,
-            # lower_cutoff_frequency_hz=10e3,
-            # upper_cutoff_frequency_hz=200e3,  # Upper cutoff frequency in Hz
             standardize_signals=False,
             split_method='shot',
-            train_shots = ['145384', '145420', '145425', '157303', '157372', '157375', '158076', '200643', '203416', '203420', '203483', '203664', '203671', '204292', '204295', '204837'],
-            validation_shots = ['145388', '145419', '157322', '157373', '157376', '203417', '203423', '203475', '203485', '203665', '203672', '204293'],
+            train_shots = [
+                # 145xxx
+                '145384', '145420', '145425',
+                # 157xxx 
+                '157303', '157372', '157375', '158076',
+                # 200xxx
+                '200643',
+                # Early 203xxx 
+                '203416', '203420', '203483',
+                # Late 203xxx + 204xxx
+                '203664', '203671', '204292', '204837',
+            ],
+            validation_shots = [
+                # Sample from each group for representative validation
+                '145388', '145419',      # 145xxx
+                '157322', '157373',      # 157xxx  
+                '203417', '203423',      # early 203xxx
+                '203665', '203672',      # late 203xxx
+            ],            
             test_shots = ['145387', '145391', '145410', '145422', '145427', '157323', '157374', '157377', '159443', '189189', '189191', '189199', '200634', '200637', '200638', '200639', '203152', '203418', '203419', '203469', '203470', '203471', '203484', '203659', '203660', '203663', '203667', '203946', '204286', '204287', '204288', '204289', '204290', '204291', '204294',  '204296', '204297', '204299', '204301', '204302', '204303'],
             predict_shots = ['145384', '145420', '145425', '157303', '157372', '157375', '158076', '200643', '203416', '203420', '203483', '203664', '203671', '204292', '204295', '204837', '145388', '145419', '157322', '157373', '157376', '203417', '203423', '203475', '203485', '203665', '203672', '204293', '145387', '145391', '145410', '145422', '145427', '157323', '157374', '157377', '159443', '189189', '189191', '189199', '200634', '200637', '200638', '200639', '203152', '203418', '203419', '203469', '203470', '203471', '203484', '203659', '203660', '203663', '203667', '203946', '204286', '204287', '204288', '204289', '204290', '204291', '204294',  '204296', '204297', '204299', '204301', '204302', '204303'],
             split_train_data_per_gpu=True,
-            vZ_uncertainty_threshold=45.0,
-            target_labels=["vZ", "vZ_uncertainty"],
-            do_flip_augmentation=True,
-            shot_time_windows = good_times_psi_93,
-            # train_time_windows=train_only_times,     # applies ONLY to train
+            do_flip_augmentation=True, # crucial
+            shot_time_windows = good_times_psi_93, # good times
             # --- block + label knobs ---
             block_cols=block_cols,
             row_stride=row_stride,
@@ -217,7 +198,6 @@ try:
             label_target_psi=0.93, # 0.85, 0.88, 0.91, 0.93, 0.95
             label_tolerance_ms=0.6,
             window_hop=1,
-            # --- CRITICAL: keep these consistent with the model ---
             n_rows=R_sel,   # 8 with your settings
             n_cols=C_sel,   # 4 with ('last',4)
     )
@@ -248,13 +228,10 @@ try:
         trial_name=trial_name,
         wandb_log=True,
         log_freq=100,
-        # num_val_batches=1,
-        # val_check_interval=5000,
-        num_train_batches=49500,
     )
 
     trainer.run_all(
-        max_epochs=600,
+        max_epochs=40,
         early_stopping_min_delta=2e-3,
         early_stopping_patience=100,
         skip_test=False,

@@ -174,12 +174,9 @@ class BES_Trainer:
             # free up space
             if self.datamodule.split_train_data_per_gpu:
                 del self.datamodule._train_dataloader  
-            else: 
-                del self.datamodule.datasets['train']
-
-            del self.datamodule.datasets['validation']
-            del self.datamodule.datasets['test']
-            
+            elif skip_test is False: 
+                del self.datamodule.datasets['test']
+                
             trainer.predict(datamodule=self.datamodule, ckpt_path='best')
 
         self.last_model_path = Path(trainer.checkpoint_callback.last_model_path).absolute()
@@ -241,9 +238,6 @@ if __name__=='__main__':
             lower_cutoff_frequency_hz=60e3,
             upper_cutoff_frequency_hz=150e3,  # Upper cutoff frequency in Hz
             start_time_ms=2400,
-            standardize_labels=False,
-            clip_labels=False,
-            normalize_labels=False,   
             split_method='shot',
             fraction_validation=0.1,
             fraction_test=0.05,
@@ -252,8 +246,6 @@ if __name__=='__main__':
             test_shots=['145387', '145425', '157323', '157373', '157375', '157377', '159443', '189191', '189199', '200021', '203660', '203672', '203665', '203667'],
             predict_shots=['145384', '145388', '145391', '145419', '145425', '145385', '145422', '145410', '157373', '145387',  '145420', '145427', '159443', '200635'],
             split_train_data_per_gpu=True,
-            vZ_uncertainty_threshold=5.0,
-            target_labels=["vZ", "vZ_uncertainty"],
             do_flip_augmentation=True,
             block_cols=block_cols,
             row_stride=row_stride,

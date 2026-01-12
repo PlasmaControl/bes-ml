@@ -3,7 +3,6 @@ import dataclasses
 from pathlib import Path
 import gc
 import os
-import time
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -17,7 +16,6 @@ from scipy.stats import mode
 import h5py
 
 import torch
-import torch.nn
 import torch.utils.data
 import time
 
@@ -25,61 +23,8 @@ from lightning.pytorch import LightningDataModule
 
 from bes_data.sample_data import sample_elm_data_file
 
-import psutil
 
-class TrainValTest_Dataset_3(torch.utils.data.Dataset):
-    def __init__(
-            self,
-            signals: np.ndarray,       # shape (total_time * n_cols, n_rows)
-            n_rows: int,
-            n_cols: int,
-            labels: np.ndarray,        # shape (total_time * n_cols,)
-            sample_indices: np.ndarray,
-            signal_window_size: int,
-            time_points: np.ndarray,   # shape (total_time * n_cols,)
-            radial_positions: np.ndarray = None  # shape (n_cols,), optional
-    ) -> None:
-        # Add channel dimension to signals
-        self.signals = torch.from_numpy(np.ascontiguousarray(signals)[np.newaxis, ...]).float()
-        assert (
-            self.signals.ndim == 3 and
-            self.signals.size(0) == 1 and
-            self.signals.size(2) == n_rows
-        ), "Signals have incorrect shape"
-
-        self.labels = torch.from_numpy(labels).float()    # Shape (total_samples,)
-        self.n_rows = n_rows
-        self.n_cols = n_cols
-        self.sample_indices = torch.from_numpy(sample_indices).long()
-        self.signal_window_size = signal_window_size
-        self.time_points = torch.from_numpy(time_points).float()
-        self.radial_positions = torch.from_numpy(radial_positions).float() if radial_positions is not None else None
-
-        assert self.signals.shape[1] == self.labels.shape[0], "Mismatch between signals and labels count"
-
-    def __len__(self) -> int:
-        return self.sample_indices.numel()
-
-    def __getitem__(self, idx: int) -> tuple:
-        i_t0 = self.sample_indices[idx]
-        start_index = i_t0 - self.signal_window_size + 1
-        end_index = i_t0 + 1
-
-        # Adjust for flattened structure and validate indices
-        if start_index < 0 or end_index > self.signals.shape[1]:
-            raise IndexError(f"Invalid indices: start_index={start_index}, end_index={end_index}, signal length={self.signals.shape[1]}")
-
-        # Extract the signal window
-        signal_window = self.signals[:, start_index:end_index, :]  # Shape: (1, window_size, n_rows)
-
-        # Get label and radial position (if available)
-        label = self.labels[i_t0]
-        radial_position = self.radial_positions[i_t0 % self.n_cols] if self.radial_positions is not None else None
-        time_point = self.time_points[i_t0 // self.n_cols]
-
-        return signal_window, label, time_point
-
-class TrainValTest_Dataset_4(torch.utils.data.Dataset):
+class TrainValTest_Dataset(torch.utils.data.Dataset):
     """
     Windows over time of a selected BES sub-grid.
 
@@ -123,31 +68,8 @@ class TrainValTest_Dataset_4(torch.utils.data.Dataset):
         y   = self.labels[i_t0]
         t0  = self.times_ms[i_t0]
         return win, y, t0
-
-    
-class PredictDataset_4(torch.utils.data.Dataset):
-    def __init__(self, data):
-        """
-        Args:
-            data: List of (signal_window, label, time_point, shot_id, radial_position) tuples.
-        """
-        self.data = data
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        signal_window, label, time_point, shot_id, radial_position = self.data[idx]
-        # Return radial_position as a single float tensor
-        return (
-            torch.tensor(signal_window, dtype=torch.float32).unsqueeze(0),  
-            torch.tensor(label, dtype=torch.float32),
-            torch.tensor(time_point, dtype=torch.float32),
-            shot_id,  # shot_id as is (string/int)
-            torch.tensor(radial_position, dtype=torch.float32)
-        )
-            
-class PredictDataset_5(torch.utils.data.Dataset):
+                
+class PredictDataset(torch.utils.data.Dataset):
     """
     Yields:
       signals : (1, W, R_sel, C_sel)  float32
@@ -209,18 +131,6 @@ class Velocimetry_Datamodule(LightningDataModule):
     end_time_ms: float = None
     clip_signals: float = None # remove signal windows with abs(raw_signals) > clip_signals
     mask_sigma_outliers: float = None  # remove signal windows with abs(standardized_signals) > n_sigma
-    target_labels: list[str] = dataclasses.field(default_factory=lambda: ["vZ", "vZ_uncertainty"]) 
-    ignored_columns: list[int] = dataclasses.field(default_factory=list)
-    clip_labels: bool = False
-    labels_lower_bound: float = None
-    labels_upper_bound: float = None
-    standardize_labels: bool = False  # Option to standardize labels
-    normalize_labels: bool = False   # Option to normalize labels
-    label_mean: float = 0.0           # mean value for standardization
-    label_std: float = 1.0            # std dev value for standardization
-    label_min: float = -2e9           # min value for normalization
-    label_max: float = 2e9            # max value for normalization
-    vZ_uncertainty_threshold: float = 200.0
     do_flip_augmentation: bool = False
     predict_window_stride: int = 1  
     split_train_data_per_gpu: bool = True  
@@ -337,7 +247,7 @@ class Velocimetry_Datamodule(LightningDataModule):
                     chunk_events = events
 
                 if dataset_stage in ['train', 'validation', 'test']:
-                    dataset = self._load_and_preprocess_data_6(chunk_events, dataset_stage)
+                    dataset = self._load_and_preprocess_data(chunk_events, dataset_stage)
 
                     if dataset_stage == "train":
                         local_batches = len(dataset) // self.batch_size
@@ -376,7 +286,7 @@ class Velocimetry_Datamodule(LightningDataModule):
                 elif dataset_stage in ['predict']:
                     print(f"Preparing predict dataset for shots: {self.predict_shots}")
                     # Load and preprocess the data for these events
-                    dataset = self._load_and_preprocess_predict_data_6(chunk_events)
+                    dataset = self._load_and_preprocess_predict_data(chunk_events)
                     # Assign the predict dataset
                     self.datasets["predict"] = dataset
 
@@ -385,10 +295,10 @@ class Velocimetry_Datamodule(LightningDataModule):
                 events = self.dataset_events[dataset_stage]
 
                 if dataset_stage in ['train', 'validation', 'test']:
-                    dataset = self._load_and_preprocess_data_6(events, dataset_stage)
+                    dataset = self._load_and_preprocess_data(events, dataset_stage)
                 elif dataset_stage in ['predict']:
                     # Load and preprocess the data for these events
-                    dataset = self._load_and_preprocess_predict_data_6(chunk_events)
+                    dataset = self._load_and_preprocess_predict_data(events)
                     # Assign the predict dataset
                     self.datasets["predict"] = dataset
 
@@ -435,259 +345,7 @@ class Velocimetry_Datamodule(LightningDataModule):
         # return chunks, [index_to_time[index] for index in indices]
         return chunks
         
-    def _load_and_preprocess_data_5(self, shot_start_time_indices, dataset_stage):
-        """
-        Load and preprocess BES data for the machine learning pipeline.
-        Processes signals column-wise, applies masking for high uncertainty, and integrates radial positions.
-        Now the vZ, vZ_uncertainty, label_times, etc. are saved in an "interpolated" subgroup under each shot.
-        """
-        import time  # in case not already imported
-        t0 = time.time()
-        print(f"Reading data for dataset {dataset_stage}")
-
-        signals_list = []
-        labels_list = []
-        times_list = []
-        radial_positions_list = []
-        valid_t0_list = []
-
-        with h5py.File(self.data_file, 'r') as h5_file:
-            if len(shot_start_time_indices) >= 5:
-                print(f"  Initial shot/event indices: {shot_start_time_indices[:5]}")
-
-            time_counts = []
-            long_enough_indices = []
-
-            for i, (shot, event) in enumerate(shot_start_time_indices):
-                event_key = f"{shot}/{event}"
-                event_data = h5_file[event_key]
-
-                if 'signals' not in event_data or 'times' not in event_data:
-                    print(f"{event_key} is missing 'signals' or 'times'.")
-                    continue
-
-                signal_length = event_data["signals"].shape[1]
-                if signal_length <= self.signal_window_size:
-                    print(f"Skipping event {event_key} due to insufficient signal length.")
-                    continue         
-                    
-                inboard_order = h5_file[shot].attrs.get("inboard_column_channel_order", None)
-                if inboard_order is None or len(inboard_order) == 0:
-                    print(f"Skipping event {event_key} due to missing or empty inboard_column_channel_order.")
-                    continue
-
-                time_counts.append(signal_length)
-                long_enough_indices.append((shot, event))
-
-            time_count = int(np.sum(time_counts))
-            discarded_count = len(shot_start_time_indices) - len(long_enough_indices)
-            print(f"Discarded {discarded_count} events due to insufficient signal length or missing inboard order.")
-
-            for i, (shot, start_time) in enumerate(long_enough_indices):
-                if i % 100 == 0:
-                    print(f"  Reading event {i:04d}/{len(long_enough_indices):04d}, start_time: {start_time} in shot {shot}")
-
-                # Load event-level data
-                event_key = f"{shot}/{start_time}"
-                event_data = h5_file[event_key]
-                signals = np.array(event_data["signals"], dtype=np.float32)  # shape: (64, time)
-                times = np.array(event_data["times"], dtype=np.float32)      # shape: (time,)
-                signal_length = signals.shape[1]
-                if signal_length < self.signal_window_size:
-                    continue
-
-                # Apply time mask based on start_time_ms/end_time_ms
-                time_mask = np.ones_like(times, dtype=bool)
-                if self.start_time_ms is not None:
-                    time_mask &= (times >= self.start_time_ms)
-                if self.end_time_ms is not None:
-                    time_mask &= (times <= self.end_time_ms)
-                    if times.size < self.signal_window_size:
-                        continue
-
-                # Load shot-level data from the shot group.
-                shot_group = h5_file[shot]
-                # Instead of checking for "radial_0", we now simply check if an "interpolated" subgroup exists.
-                if "interpolated" not in shot_group:
-                    print(f"Skipping shot {shot}: no interpolated subgroup exists.")
-                    continue
-
-                # Reshape raw signals (assumed to be stored at the event level) to (time, n_rows, n_cols)
-                inboard_order = shot_group.attrs["inboard_column_channel_order"]
-                signals = self.reshape_signals(signals, inboard_order)  # New shape: (time, n_rows, n_cols)
-
-                if self.lower_cutoff_frequency_hz is not None and self.upper_cutoff_frequency_hz is not None:
-                    if i % 100 == 0:
-                        print(f"  applying {self.lower_cutoff_frequency_hz} - {self.upper_cutoff_frequency_hz} bandpass filter")
-                    signals = self.apply_bandpass_filter(signals)
-
-                # Retrieve radial positions
-                r_position = shot_group.attrs["r_position"]
-                if r_position is not None and len(r_position) == 64:
-                    radial_positions = r_position.reshape(8, 8)[0, :]  # extract unique positions from first row
-                else:
-                    print(f"Warning: Radial positions missing or malformed for shot {shot}.")
-                    radial_positions = np.zeros(self.n_cols)
-
-                # Process each radial column (each "channel") separately.
-                for col in range(self.n_cols):
-                    col_signals = signals[:, :, col]  # shape: (time, rows)
-                    # ***********************
-                    # NEW: Instead of getting the labels from the top-level, load the radial-specific data 
-                    # from the "interpolated/radial_{col}" subgroup.
-                    # ***********************
-                    if "interpolated" in shot_group and f"radial_{col}" in shot_group["interpolated"]:
-                        interp_grp = shot_group["interpolated/radial_" + str(col)]
-                        col_label_times = np.array(interp_grp["label_times"], dtype=np.float32)  # in ms
-                        col_target = np.array(interp_grp["vZ"], dtype=np.float32)                # corresponding vZ data
-                        col_uncertainty = np.array(interp_grp["vZ_uncertainty"], dtype=np.float32)  # corresponding uncertainty
-                    else:
-                        print(f"Skipping column {col} in shot {shot}: interpolated data missing for this channel.")
-                        continue
-                    # ***********************
-
-                    # For alignment, decide whether to align event-level times or use the interpolated grid.
-                    # Here we assume that the event-level times (possibly after conversion) are used.
-                    # (If event times are in µs and label_times in ms, you may need to divide times by 1000.)
-                    col_labels = self._filter_and_transform_labels_5(col_label_times, col_target, col_uncertainty, times)
-
-                    # --- New: Skip channel if all labels are NaN ---
-                    if np.isnan(col_labels).all():
-                        continue
-
-                    # --- New: Remove NaN labels along the time axis ---
-                    valid_time_mask = ~np.isnan(col_labels)  # Now valid_time_mask has shape (T,)
-                    # Apply the valid mask to both the signals and the event times:
-                    col_signals = col_signals[valid_time_mask, :]   # Now col_signals has shape (~T, rows)
-                    col_labels   = col_labels[valid_time_mask]        # Shape: (~T,)
-                    times_event_filtered = times[valid_time_mask]     # Shape: (~T,)
-
-                    # If shot_radial_time_windows exist for this shot & column, then further restrict the samples.
-                    if (hasattr(self, "shot_radial_time_windows") and 
-                        self.shot_radial_time_windows is not None and 
-                        shot in self.shot_radial_time_windows and 
-                        col in self.shot_radial_time_windows[shot]):
-                        
-                        windows = self.shot_radial_time_windows[shot][col]
-                        specific_time_mask = np.zeros_like(times_event_filtered, dtype=bool)
-                        for window in windows:
-                            window_mask = (times_event_filtered >= window[0]) & (times_event_filtered <= window[1])
-                            specific_time_mask |= window_mask
-                        
-                        if np.sum(specific_time_mask) < self.signal_window_size:
-                            continue
-
-                        # Further restrict col_labels and the time array.
-                        col_labels = col_labels[specific_time_mask]
-                        col_signals = col_signals[specific_time_mask, :]
-                        col_times = times_event_filtered[specific_time_mask]
-                        valid_t0 = np.zeros(col_times.shape[0], dtype=int)
-                        valid_t0[self.signal_window_size - 1::self.signal_window_size] = 1
-
-                    else:
-                        # If no specific window for this radial column, skip.
-                        continue
-
-                    signals_list.append(col_signals)
-                    labels_list.append(col_labels)
-                    valid_t0_list.append(valid_t0)
-                    radial_positions_list.append(np.full(col_labels.shape, radial_positions[col]))
-                    times_list.append(col_times)
-
-                    # Optional: add flipped augmentation if enabled
-                    if self.do_flip_augmentation:
-                        col_signals_flipped = col_signals[:, ::-1]  # Flip rows
-                        col_labels_flipped = -col_labels             # Reverse sign
-                        signals_list.append(col_signals_flipped)
-                        labels_list.append(col_labels_flipped)
-                        valid_t0_list.append(valid_t0)
-                        radial_positions_list.append(np.full(col_labels.shape, radial_positions[col]))
-                        times_list.append(col_times)
-
-        # Combine signals and labels from all events
-        assert all(s.shape[1] == signals_list[0].shape[1] for s in signals_list), \
-            "Inconsistent shapes in signals_list along axis 1"
-        
-        packaged_signals = np.concatenate(signals_list, axis=0)  # shape (total_time * n_cols, n_rows)
-        packaged_labels = np.concatenate(labels_list, axis=0)    # shape (total_time * n_cols,)
-        packaged_radial_positions = np.concatenate(radial_positions_list, axis=0)  # shape (total_time * n_cols,)
-        packaged_times = np.concatenate(times_list)
-        packaged_valid_t0 = np.concatenate(valid_t0_list)
-
-        print(f"Packaged signals shape: {packaged_signals.shape}")
-        print(f"Packaged labels shape: {packaged_labels.shape}")
-        print(f"Packaged valid t0 shape: {packaged_valid_t0.shape}")
-        print(f"Packaged radial positions shape: {packaged_radial_positions.shape}")
-
-        packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
-        packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
-        # Ensure indices can form a full signal window
-        valid_mask = (packaged_valid_t0_indices >= (self.signal_window_size - 1)) & \
-                    (packaged_valid_t0_indices < packaged_signals.shape[0])
-        packaged_valid_t0_indices = packaged_valid_t0_indices[valid_mask]
-
-        print("  Raw data stats")
-        stats = self._get_statistics_2D(
-            sample_indices=packaged_valid_t0_indices,
-            signals=packaged_signals,
-        )
-
-        # Standardize signals based on training data
-        if None in [self.signal_mean, self.signal_stdev]:
-            assert dataset_stage == 'train' or not self.train_events, f"Dataset_stage: {dataset_stage}"
-            print(f"  Calculating signal mean and std from {dataset_stage} data")
-            self.signal_mean = stats['mean']
-            self.signal_stdev = stats['stdev']
-            self.signal_exkurt = stats['exkurt']
-            self.save_hyperparameters({
-                'signal_mean': self.signal_mean.item(),
-                'signal_stdev': self.signal_stdev.item(),
-                'signal_exkurt': self.signal_exkurt.item(),
-            })
-
-        if dataset_stage in ['train', 'validation', 'test']:
-            print(f"  Standardizing signals with mean {self.signal_mean:.3f} and std {self.signal_stdev:.3f}")
-            packaged_signals = (packaged_signals - self.signal_mean) / self.signal_stdev  # Standardize all signals
-            stats = self._get_statistics_2D(
-                sample_indices=packaged_valid_t0_indices,
-                signals=packaged_signals,
-            )
-
-        self.max_abs_valid_signal = np.max(np.abs([stats['min'], stats['max']]))
-
-
-        if dataset_stage in ['train']:
-            dataset = TrainValTest_Dataset_3(
-                signals=packaged_signals,
-                n_rows=self.n_rows,
-                n_cols=self.n_cols,
-                labels=packaged_labels,
-                sample_indices=packaged_valid_t0_indices,
-                signal_window_size=self.signal_window_size,
-                time_points=packaged_times,
-                radial_positions=packaged_radial_positions
-            )
-            return dataset
-        if dataset_stage in ['validation', 'test']:
-            self.datasets[dataset_stage] = TrainValTest_Dataset_3(
-                signals=packaged_signals,
-                n_rows=self.n_rows,
-                n_cols=self.n_cols,
-                labels=packaged_labels,
-                sample_indices=packaged_valid_t0_indices,
-                signal_window_size=self.signal_window_size,
-                time_points=packaged_times,
-                radial_positions=packaged_radial_positions
-            )
-        
-        torch.cuda.empty_cache()
-        print('The CPU usage is: ', psutil.cpu_percent(4))
-        # Getting % usage of virtual_memory ( 3rd field)
-        print('RAM memory % used:', psutil.virtual_memory()[2])
-        # Getting usage of virtual_memory in GB ( 4th field)
-        print('RAM Used (GB):', psutil.virtual_memory()[3]/1000000000)    
-
-    def _load_and_preprocess_data_6(self, shot_start_time_indices, dataset_stage: str):
+    def _load_and_preprocess_data(self, shot_start_time_indices, dataset_stage: str):
         """
         New: builds block inputs (rows x cols) and scalar labels at fixed ψ.
         Windows are (1, signal_window_size, R_sel, C_sel); label is vθ(ψ) at window end time.
@@ -854,7 +512,7 @@ class Velocimetry_Datamodule(LightningDataModule):
                 sig_64t = np.array(grp['signals'], dtype=np.float32)        # (64, T)
                 times   = np.array(grp['times'],   dtype=np.float64)        # (T,)
                 order_attr = shot_grp.attrs.get('inboard_column_channel_order', None)
-                sig_trc = self.reshape_signals_2(sig_64t, order_attr)  # -> (T, R, C)
+                sig_trc = self.reshape_signals(sig_64t, order_attr)  # -> (T, R, C)
                 t_ms    = _guess_times_ms(times)
 
                 # PAD to 8×8 so row_idx/col_idx are always valid
@@ -899,12 +557,6 @@ class Velocimetry_Datamodule(LightningDataModule):
                 if sample_idx_ev.size == 0:
                     continue
 
-                # all_sig.append(sig_ds[valid])     # (Tv, R_sel, C_sel)
-                # all_lbl.append(lbl[valid])        # (Tv,)
-                # all_t.append(t_ds[valid])         # (Tv,)
-                
-                # used_events += 1
-
                 all_sig.append(sig_ds)     # (Tv, R_sel, C_sel)
                 all_lbl.append(lbl)        # (Tv,)
                 all_t.append(t_ds)         # (Tv,)
@@ -921,11 +573,6 @@ class Velocimetry_Datamodule(LightningDataModule):
         labels_scalar = np.concatenate(all_lbl, axis=0).astype(np.float32)   # (T_total,)
         times_ms      = np.concatenate(all_t,  axis=0).astype(np.float32)    # (T_total,)
         sample_idx    = np.concatenate(all_sample_idx, axis=0).astype(np.int64)
-
-        # # build sample indices: last index of each valid window
-        # sample_idx = _window_indices(np.ones(times_ms.shape[0], dtype=bool), W, hop=hop)
-        # if sample_idx.size == 0:
-        #     raise RuntimeError("No valid sample windows after filtering.")
         
         if sample_idx.size == 0:
             raise RuntimeError("No valid sample windows after filtering.")
@@ -946,16 +593,6 @@ class Velocimetry_Datamodule(LightningDataModule):
             signals_tc_rc = (signals_tc_rc - m) / np.maximum(s, eps)
             signals_tc_rc = signals_tc_rc.astype(np.float32, copy=False)  # belt-and-suspenders    
                 
-        # optional row-flip augmentation 
-        # if self.do_flip_augmentation:
-        #     flipped = signals_tc_rc[:, ::-1, :]      # flip rows
-        #     signals_tc_rc = np.concatenate([signals_tc_rc, flipped], axis=0)
-        #     # IMPORTANT: v_theta changes sign under poloidal reflection
-        #     labels_scalar = np.concatenate([labels_scalar, -labels_scalar], axis=0)
-        #     times_ms      = np.concatenate([times_ms,      times_ms],      axis=0)
-        #     # NOTE: sample_idx doubles implicitly if you rebuild; simplest is to rebuild:
-        #     sample_idx = _window_indices(np.ones(times_ms.shape[0], dtype=bool), W, hop=hop)
-
         if self.do_flip_augmentation:
             T0 = signals_tc_rc.shape[0]
             flipped = signals_tc_rc[:, ::-1, :]
@@ -965,9 +602,8 @@ class Velocimetry_Datamodule(LightningDataModule):
             sample_idx    = np.concatenate([sample_idx,    sample_idx + T0], axis=0)
 
 
-
         # pack dataset / store
-        ds = TrainValTest_Dataset_4(
+        ds = TrainValTest_Dataset(
             signals_trc=signals_tc_rc,
             labels_scalar=labels_scalar,
             sample_indices=sample_idx,
@@ -976,139 +612,14 @@ class Velocimetry_Datamodule(LightningDataModule):
             n_rows_sel=R_sel,
             n_cols_sel=C_sel,
         )
-        if dataset_stage == 'train':
+
+        if dataset_stage == 'train' and self.split_train_data_per_gpu:
             return ds
         else:
             self.datasets[dataset_stage] = ds
             return None
-
-
-    def _load_and_preprocess_predict_data_5(self, shot_start_time_indices):
-        """
-        Prepares the dataset for prediction using the new data structure.
-        It loads each prediction event, retrieves the signals and interpolated labels
-        from the "interpolated" subgroup for each radial channel, and then generates
-        sliding window samples.
-        Each sample is a tuple: (signal_window, label, time_point, shot_id, radial_position).
-        """
-        print("Preparing data for prediction with radial positions")
-        data = []  # List to store prediction samples.
-        unique_shots = set(shot for shot, _ in shot_start_time_indices)
-        print(f"Shots being processed: {unique_shots}")
-
-        with h5py.File(self.data_file, 'r') as h5_file:
-            # Filter out shot/event pairs that have both 'signals' and 'times'.
-            valid_events = []
-            for shot, event in shot_start_time_indices:
-                event_key = f"{shot}/{event}"
-                if event in h5_file[shot].keys():
-                    if 'signals' in h5_file[event_key] and 'times' in h5_file[event_key]:
-                        valid_events.append((shot, event))
-                    else:
-                        print(f"Skipping {event_key} - missing signals or times.")
-                else:
-                    print(f"Skipping {event_key} - event not found.")
-
-            for i, (shot, start_time) in enumerate(valid_events):
-                if i % 100 == 0:
-                    print(f"  Reading prediction event {i:04d}/{len(valid_events):04d}, start_time: {start_time} in shot {shot}")
-
-                # Load the event-level data.
-                event_key = f"{shot}/{start_time}"
-                event_data = h5_file[event_key]
-                signals = np.array(event_data["signals"], dtype=np.float32)  # shape: (64, time)
-                times = np.array(event_data["times"], dtype=np.float32)      # shape: (time,)
-                if signals.shape[1] < self.signal_window_size:
-                    print(f"Skipping event {event_key}: signal length < window size ({self.signal_window_size})")
-                    continue
-
-                # Load shot-level attributes and verify that the "interpolated" subgroup exists.
-                shot_group = h5_file[shot]
-                if "interpolated" not in shot_group:
-                    print(f"Skipping shot {shot}: no interpolated subgroup exists.")
-                    continue
-
-                inboard_order = shot_group.attrs.get("inboard_column_channel_order", None)
-                if inboard_order is None or len(inboard_order) == 0:
-                    print(f"Skipping event {event_key}: Missing or empty inboard_column_channel_order.")
-                    continue
-
-                # Reshape the raw signals to shape (time, n_rows, n_cols).
-                signals = self.reshape_signals(signals, inboard_order)
-
-                # Apply the optional bandpass filter.
-                if self.lower_cutoff_frequency_hz is not None and self.upper_cutoff_frequency_hz is not None:
-                    if i % 100 == 0:
-                        print(f"  applying {self.lower_cutoff_frequency_hz} - {self.upper_cutoff_frequency_hz} bandpass filter")
-                    signals = self.apply_bandpass_filter(signals)
-
-                # Retrieve radial positions.
-                r_position = shot_group.attrs.get("r_position", None)
-                if r_position is not None and len(r_position) == 64:
-                    radial_positions = r_position.reshape(8, 8)[0, :].astype(np.float32)
-                else:
-                    print(f"Warning: Radial positions missing or malformed for shot {shot}.")
-                    radial_positions = np.zeros(self.n_cols, dtype=np.float32)
-
-                # Optional: Downsample signals and times.
-                if getattr(self, "downsample_factor", 1) > 1:
-                    if i % 100 == 0:
-                        print(f"  Downsampling signals by factor {self.downsample_factor}")
-                    signals = signals[::self.downsample_factor, :, :]
-                    times = times[::self.downsample_factor]
-
-                total_time = signals.shape[0]
-                # For each radial channel, process prediction samples.
-                for col in range(self.n_cols):
-                    col_signals = signals[:, :, col]  # shape: (total_time, n_rows)
-
-                    # Load the interpolated data for the current radial channel.
-                    if "interpolated" in shot_group and f"radial_{col}" in shot_group["interpolated"]:
-                        interp_grp = shot_group["interpolated/radial_" + str(col)]
-                        col_label_times = np.array(interp_grp["label_times"], dtype=np.float32)      # Low-res, e.g. shape (N_interp,)
-                        col_target = np.array(interp_grp["vZ"], dtype=np.float32)                    # Low-res 1D array.
-                        # For prediction, you can choose to use a helper specific for predict,
-                        # or reuse the same one as training. For this example, we use a helper:
-                        col_labels = self._filter_and_transform_predict_labels(col_label_times, col_target, times)
-                    else:
-                        print(f"Skipping column {col} in shot {shot}: interpolated data missing for this channel.")
-                        continue
-
-                    # Skip if the aligned label array is entirely NaN.
-                    if np.isnan(col_labels).all():
-                        continue
-
-                    # Remove NaN labels: create a valid mask (the helper should produce an array of length equal to event times).
-                    valid_mask = ~np.isnan(col_labels)
-                    col_signals = col_signals[valid_mask, :]  # shape: (num_valid, n_rows)
-                    col_labels = col_labels[valid_mask]
-                    times_filtered = times[valid_mask]
-
-                    # Standardize the signals using training statistics.
-                    col_signals = (col_signals - self.signal_mean) / self.signal_stdev
-
-                    # Determine the total number of valid event time points after filtering.
-                    T_valid = col_signals.shape[0]
-                    if T_valid < self.signal_window_size:
-                        continue
-
-                    # Set prediction window stride. For overlapping windows set stride=1;
-                    # for non-overlapping, set stride = signal_window_size.
-                    stride = getattr(self, "predict_window_stride", 1)
-
-                    # Generate sliding window samples for this radial channel.
-                    for idx_t0 in range(self.signal_window_size - 1, T_valid, stride):
-                        start_idx = idx_t0 - self.signal_window_size + 1
-                        end_idx = idx_t0 + 1
-                        signal_window = col_signals[start_idx:end_idx, :]  # shape: (signal_window_size, n_rows)
-                        label = col_labels[idx_t0]
-                        time_point = times_filtered[idx_t0]
-                        data.append((signal_window, label, time_point, shot, radial_positions[col]))
-
-            print(f"Prepared {len(data)} samples for prediction.")
-            return PredictDataset_4(data)
         
-    def _load_and_preprocess_predict_data_6(self, shot_start_time_indices):
+    def _load_and_preprocess_predict_data(self, shot_start_time_indices):
         """
         Prepare prediction samples as sliding windows from the selected (R_sel x C_sel) block.
         Each item: (signal_window[1,W,R_sel,C_sel], label_scalar, time_ms, shot_id, event_id)
@@ -1187,7 +698,7 @@ class Velocimetry_Datamodule(LightningDataModule):
                         mask |= (t_ms >= t0) & (t_ms <= t1)
                 return mask
             return np.ones_like(t_ms, dtype=bool)
-
+        
         # ---- canonical selections (on 8x8 after padding) ----
         W      = int(self.signal_window_size)
         hop    = int(getattr(self, "predict_window_stride", 1))
@@ -1232,7 +743,7 @@ class Velocimetry_Datamodule(LightningDataModule):
 
                 # --- robust reshape -> (T, R_full, C_full) ---
                 order_attr = shot_grp.attrs.get('inboard_column_channel_order', None)
-                sig_trc = self.reshape_signals_2(sig_xt, order_attr)          # (T, R_full, C_full)
+                sig_trc = self.reshape_signals(sig_xt, order_attr)          # (T, R_full, C_full)
                 t_ms    = _guess_times_ms(times)
 
                 # --- time cropping before downsample ---
@@ -1254,7 +765,7 @@ class Velocimetry_Datamodule(LightningDataModule):
                 # --- downsample to target rate ---
                 sig_ds, t_ds = _downsample_stack(sig_trc, t_ms, orig_fs, tgt_fs)    # sig: (T_ds,R_sel,C_sel)
 
-                # --- per-shot window mask (if you have one; otherwise all True) ---
+                # --- per-shot window mask  ---
                 if hasattr(self, "_gather_shot_windows_mask"):
                     shot_mask = _gather_shot_windows_mask(str(shot), t_ds)
                 else:
@@ -1274,9 +785,6 @@ class Velocimetry_Datamodule(LightningDataModule):
 
                 # ---- build valid indices per-event (avoid crossing event boundaries) ----
                 valid = shot_mask
-                if label_vec is not None:
-                    # no need to drop NaNs for predict; we can carry NaNs to evaluate later
-                    pass
 
                 # slide within this event only
                 # t0 index (inclusive) is the window end
@@ -1314,7 +822,7 @@ class Velocimetry_Datamodule(LightningDataModule):
         events    = np.asarray(event_list)
 
         print(f"[predict] prepared {windows.shape[0]} windows: shape per-window = {windows.shape[1:]}")
-        return PredictDataset_5(
+        return PredictDataset(
             windows=windows,
             labels=labels,
             times_ms=times_ms,
@@ -1325,154 +833,7 @@ class Velocimetry_Datamodule(LightningDataModule):
     def _format_psi_key(psi: float) -> str:
         s = f"{psi:.3f}".rstrip('0').rstrip('.')
         return "psi_" + s.replace('.', 'p')
-
-    def _filter_and_transform_labels(self, label_times, target, uncertainty, times):
-        """
-        Filter labels based on uncertainty, align with signal times, clip to bounds, 
-        and optionally standardize or normalize the labels.
-        """
-        # Step 1: Filter labels based on uncertainty threshold
-        valid_mask = uncertainty <= self.vZ_uncertainty_threshold
-        target[~valid_mask] = np.nan  # Set invalid values to NaN
-
-        # Step 2: Align labels to signal times
-        label_indices = np.searchsorted(label_times, times, side='left')
-        label_indices[label_indices >= len(label_times)] = len(label_times) - 1
-        mask = (label_indices > 0) & (
-            np.abs(times - label_times[label_indices - 1]) < np.abs(times - label_times[label_indices])
-        )
-        label_indices[mask] -= 1
-        labels_aligned = target[label_indices, :self.n_cols]  # shape (time, n_cols)
-
-        # Step 3: Clip labels to the specified range (if enabled)
-        if self.clip_labels:
-            # print(f"    Clipping labels to range [{self.labels_lower_bound}, {self.labels_upper_bound}]...")
-            labels_aligned = np.clip(labels_aligned, self.labels_lower_bound, self.labels_upper_bound)
-
-        # Step 4: Apply label transformations (standardization or normalization)
-        if self.standardize_labels:
-            # print(f"    Standardizing labels...")
-            labels_aligned = (labels_aligned - self.label_mean) / self.label_std
-
-        elif self.normalize_labels:
-            # print(f"    Normalizing labels to range [-1, 1]...")
-            labels_aligned = -1 + 2 * (labels_aligned - self.label_min) / (self.label_max - self.label_min)
-
-        labels_aligned = labels_aligned.astype(np.float32)
-        return labels_aligned
-
-    def _filter_and_transform_labels_5(self, label_times, target, uncertainty, times):
-        """
-        Given:
-        - label_times: 1D array of the interpolated (low resolution) label times (in ms)
-        - target: 1D array of the corresponding vZ values (interpolated)
-        - uncertainty: 1D array of uncertainties for the interpolated data
-        - times: 1D array of the event-level times (e.g. in µs; if in µs, consider converting to ms)
-
-        This function returns an aligned 1D array of labels with the same length as 'times',
-        where each event time is mapped to the nearest label time. It also applies an uncertainty filter,
-        clipping, and (if needed) standardization or normalization.
-        """
-        # If event times are in µs but label_times are in ms, convert event times:
-        # times = times / 1000.0
-
-        # Use searchsorted to map each event time to an index in the label_times array.
-        indices = np.searchsorted(label_times, times, side='left')
-        # Ensure indices are within bounds.
-        indices[indices >= len(label_times)] = len(label_times) - 1
-        # For each time, check if the previous label is closer.
-        diff_current = np.abs(times - label_times[indices])
-        diff_prev = np.abs(times - label_times[np.clip(indices - 1, 0, len(label_times) - 1)])
-        use_prev = (indices > 0) & (diff_prev < diff_current)
-        indices[use_prev] -= 1
-
-        # Apply uncertainty filtering on the low-resolution target.
-        valid_unc = uncertainty <= self.vZ_uncertainty_threshold
-        # Create a copy of the target and set values to NaN if not valid.
-        target_filtered = target.copy()
-        target_filtered[~valid_unc] = np.nan
-
-        # Now produce an aligned label array for each event time.
-        labels_aligned = target_filtered[indices]
-
-        # Step 3: Clip labels if desired.
-        if self.clip_labels:
-            labels_aligned = np.clip(labels_aligned, self.labels_lower_bound, self.labels_upper_bound)
-
-        # Step 4: Standardize or normalize labels if desired.
-        if self.standardize_labels:
-            labels_aligned = (labels_aligned - self.label_mean) / self.label_std
-        elif self.normalize_labels:
-            labels_aligned = -1 + 2 * (labels_aligned - self.label_min) / (self.label_max - self.label_min)
-
-        return labels_aligned.astype(np.float32)
-
-    def _filter_and_transform_predict_labels(self, label_times, target, times):
-        """
-        Filter labels based on uncertainty, align with signal times, clip to bounds, 
-        and optionally standardize or normalize the labels.
-        """
-
-        # Step 2: Align labels to signal times
-        label_indices = np.searchsorted(label_times, times, side='left')
-        label_indices[label_indices >= len(label_times)] = len(label_times) - 1
-        mask = (label_indices > 0) & (
-            np.abs(times - label_times[label_indices - 1]) < np.abs(times - label_times[label_indices])
-        )
-        label_indices[mask] -= 1
-        # labels_aligned = target[label_indices, :self.n_cols]  # shape (time, n_cols)
-        labels_aligned = target[label_indices]  # shape (time,)
-
-        return labels_aligned.astype(np.float32)
-
-    def reshape_signals_8x8(self, signals, inboard_order):
-        # Assumptions:
-        # - `inboard_order` contains valid indices for the starting positions of each row.
-        # - `signals` is expected to be of shape (num_channels, num_samples), where num_channels >= max(inboard_order) + 7.
-
-        # truncate the inboard_order array to first 8 rows
-        inboard_order = inboard_order[:8]
-
-        # Initialize the reshaped signals with zeros or np.nan if there's a chance of not filling some cells
-        reshaped_signals = np.zeros((signals.shape[1], 8, 8), dtype=np.float32)  # Using zeros as default values
-
-        # Reshape signals according to the truncated inboard_order
-        for row, start_idx in enumerate(inboard_order):
-            for col in range(8):
-                channel_idx = start_idx + col - 1  # Adjusting for 0-indexing if inboard_order is 1-indexed
-
-                # Ensure the calculated index is within the bounds of the signals array
-                if 0 <= channel_idx < signals.shape[0]:
-                    reshaped_signals[:, row, col] = signals[channel_idx, :]
-                else:
-                    print(f"Warning: Channel index {channel_idx} out of bounds for row {row}, col {col}.")
-
-        return reshaped_signals
     
-    def reshape_signals(self, signals, inboard_order):
-        # Assumptions:
-        # - `inboard_order` contains valid indices for the starting positions of each row.
-        # - `signals` is expected to be of shape (num_channels, num_samples), where num_channels >= max(inboard_order) + 7.
-
-        # truncate the inboard_order array to first 8 rows
-        inboard_order = inboard_order[:self.n_rows]
-
-        # Initialize the reshaped signals with zeros or np.nan if there's a chance of not filling some cells
-        reshaped_signals = np.zeros((signals.shape[1], self.n_rows, self.n_cols), dtype=np.float32)  # Using zeros as default values
-
-        # Reshape signals according to the truncated inboard_order
-        for row, start_idx in enumerate(inboard_order):
-            for col in range(self.n_cols):
-                channel_idx = start_idx + col - 1  # Adjusting for 0-indexing if inboard_order is 1-indexed
-
-                # Ensure the calculated index is within the bounds of the signals array
-                if 0 <= channel_idx < signals.shape[0]:
-                    reshaped_signals[:, row, col] = signals[channel_idx, :]
-                else:
-                    print(f"Warning: Channel index {channel_idx} out of bounds for row {row}, col {col}.")
-
-        return reshaped_signals
-
     def _pad_to_full_grid(self, sig_trc: np.ndarray, target_R: int = 8, target_C: int = 8) -> np.ndarray:
         """
         Pad (T, R, C) to (T, target_R, target_C) with zeros on the row/col tails if needed.
@@ -1487,7 +848,7 @@ class Velocimetry_Datamodule(LightningDataModule):
         out[:, :r_copy, :c_copy] = sig_trc[:, :r_copy, :c_copy]
         return out
 
-    def reshape_signals_2(self, sig_xt: np.ndarray, inboard_column_channel_order) -> np.ndarray:
+    def reshape_signals(self, sig_xt: np.ndarray, inboard_column_channel_order) -> np.ndarray:
         """
         Map raw BES channels (X,T) -> (T, R, C) using the provided inboard column channel order.
 
@@ -1882,7 +1243,7 @@ class Velocimetry_Datamodule(LightningDataModule):
         else:
             train_sampler = torch.utils.data.DistributedSampler(
                 self.datasets['train'],
-                shuffle=False,
+                shuffle=True,
                 drop_last=True,
             )
             return torch.utils.data.DataLoader(
