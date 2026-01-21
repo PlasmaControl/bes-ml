@@ -879,6 +879,10 @@ class Lightning_Model(
     monitor_metric: str = 'sum_loss/val'
     log_dir: str = dataclasses.field(default='.', init=False)
     encoder_type: str = 'raw' # 'raw', 'fft', 'fpga_fft', 'both', 'none', 'rcn', 'fft_mlp'
+    # NEW: finetune only the last Linear layer of active MLP frontend(s)
+    finetune_last_linear_only: bool = False
+    velocimetry_output_index: int = 0     # which of the 4 outputs to train on
+    velocimetry_log_label: str = "vZ"     # purely for logging (does NOT affect state_dict)
     # the following must be listed in `_frontend_names`
     reconstruction_decoder: bool = False
     classifier_mlp: bool = False
@@ -886,7 +890,8 @@ class Lightning_Model(
     time_to_elm_mlp: bool = False
     velocimetry_mlp: bool = False
     separatrix_mlp: bool = False
-    _frontend_names = ['reconstruction_decoder', 'classifier_mlp', 'multiclass_classifier_mlp', 'time_to_elm_mlp', 'velocimetry_mlp', 'separatrix_mlp']
+    elm_prediction_mlp: bool = False
+    _frontend_names = ['reconstruction_decoder', 'classifier_mlp', 'multiclass_classifier_mlp', 'time_to_elm_mlp', 'velocimetry_mlp', 'separatrix_mlp', 'elm_prediction_mlp']
     num_classes: int = 4 # number of classes for multiclass_classifier_mlp
     # capture outputs from penultimate layer to perform tSNE
     penultimate_outputs: list = dataclasses.field(default_factory=list)
@@ -983,6 +988,12 @@ class Lightning_Model(
                         self.frontends.update({frontend_key: new_module})
                         setattr(self, f"{frontend_key}_mse_loss", torchmetrics.MeanSquaredError())
                         setattr(self, f"{frontend_key}_r2_score", torchmetrics.R2Score())
+                    elif 'elm_prediction' in frontend_key:
+                        new_module = self.make_mlp(mlp_in_features=features, mlp_out_features=4, output_activation="linear")
+                        self.frontends.update({frontend_key: new_module})
+                        setattr(self, f"{frontend_key}_mse_loss", torchmetrics.MeanSquaredError())
+                        setattr(self, f"{frontend_key}_r2_score", torchmetrics.R2Score())
+
                     else:
                         raise KeyError
                 elif 'decoder' in frontend_key:
@@ -1004,6 +1015,10 @@ class Lightning_Model(
                 setattr(self, f"velocimetry_rcn_{label}_mse_loss", torchmetrics.MeanSquaredError())
                 setattr(self, f"velocimetry_rcn_{label}_r2_score",  torchmetrics.R2Score())
 
+        # NEW: apply freezing AFTER modules exist
+        if self.finetune_last_linear_only:
+            self._freeze_all_but_last_linear()
+
         self.log_param_counts()  
        
         self.example_input_array = torch.zeros(
@@ -1017,6 +1032,49 @@ class Lightning_Model(
         # )
 
         self.initialize_layers()
+
+    def _freeze_all_but_last_linear(self):
+        """
+        Freeze everything in the Lightning module, then unfreeze only the last nn.Linear
+        of each ACTIVE MLP frontend (e.g. velocimetry_mlp).
+        """
+        # Freeze absolutely everything (encoder, frontends, etc.)
+        for p in self.parameters():
+            p.requires_grad = False
+
+        unfroze = []
+        for name, module in self.frontends.items():
+            if not self.frontends_active.get(name, False):
+                continue
+            if "mlp" not in name:
+                continue
+
+            last_linear = None
+            for m in module.modules():
+                if isinstance(m, torch.nn.Linear):
+                    last_linear = m
+
+            if last_linear is None:
+                raise RuntimeError(f"finetune_last_linear_only=True but frontend '{name}' has no nn.Linear layer.")
+
+            for p in last_linear.parameters():
+                p.requires_grad = True
+
+            unfroze.append((name, last_linear.in_features, last_linear.out_features))
+
+        if not unfroze:
+            raise RuntimeError(
+                "finetune_last_linear_only=True but no ACTIVE MLP frontends were found. "
+                "Did you set velocimetry_mlp=True (or another *_mlp frontend) ?"
+            )
+
+        # Optional: print what will train (helps sanity-checking)
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in self.parameters())
+        print("Finetune mode: ONLY last Linear layer is trainable.")
+        for name, in_f, out_f in unfroze:
+            print(f"  - {name}: unfroze last Linear({in_f} -> {out_f})")
+        print(f"  Trainable params: {trainable} / {total}")
 
     def configure_optimizers(self):
         encoder_lr = self.encoder_lr
@@ -1117,7 +1175,6 @@ class Lightning_Model(
             expected_fft_feats = self.fft_subwindows * ((self.nfreqs - 1) * (2 if self.use_phase else 1)) * self.n_rows * self.n_cols
             assert features.shape[1] == expected_fft_feats, \
                 f"FFT-MLP flat features {features.shape[1]} != expected {expected_fft_feats}"
-
         else:
             raise ValueError("Invalid encoder_type")
         
@@ -1140,6 +1197,7 @@ class Lightning_Model(
             'classifier_binary': ['bce_loss', 'f1_score'],
             'velocimetry': ['mse_loss', 'r2_score'],
             'separatrix': ['mse_loss', 'r2_score'],
+            'elm_prediction': ['mse_loss', 'r2_score'],
         }
 
         for frontend_key, frontend_is_active in self.frontends_active.items():
@@ -1166,29 +1224,32 @@ class Lightning_Model(
                 metric_suffices = metric_suffices_dict['velocimetry']
             elif 'separatrix' in frontend_key:
                 metric_suffices = metric_suffices_dict['separatrix']
+            elif 'elm_prediction' in frontend_key:
+                metric_suffices = metric_suffices_dict['elm_prediction']
             else:
                 raise ValueError(f"Unknown frontend_key: {frontend_key}")
 
             for metric_suffix in metric_suffices:
                 if 'velocimetry' in frontend_key:
-                    # frontend_result:  (batch, N)  N==1 or N==2
-                    # we only care about the first channel, so:
-                    preds = frontend_result[..., 0].float()    # → shape (batch,)
-                    target = labels.float()                    # → shape (batch,)
-                    # frontend_result_squeezed = frontend_result.float().squeeze(-1)
-                    # target = labels.float()
-                    for idx, label_key in enumerate(['vZ']):
-                        metric_name = f"{frontend_key}_{label_key}_{metric_suffix}"
-                        metric = getattr(self, metric_name)
+                    # Choose which output node is the regression target
+                    out_idx = int(getattr(self, "velocimetry_output_index", 0))
 
-                        # Ensure shapes match, both (batch,)
-                        assert preds.shape == target.shape, \
-                            f"Shape mismatch: preds {preds.shape}, target {target.shape}"
+                    preds  = frontend_result[..., out_idx].float()  # (batch,)
+                    target = labels.float()                         # (batch,)
 
-                        metric_value = metric(preds, target)
-                        
-                        if 'loss' in metric_name:
-                            sum_loss = metric_value if sum_loss is None else sum_loss + metric_value
+                    # IMPORTANT: keep the *metric object name* stable for strict checkpoint loading
+                    internal_label_key = "vZ"  # this is what you created metrics under
+                    metric_name = f"{frontend_key}_{internal_label_key}_{metric_suffix}"
+                    metric = getattr(self, metric_name)
+
+                    assert preds.shape == target.shape, \
+                        f"Shape mismatch: preds {preds.shape}, target {target.shape}"
+
+                    metric_value = metric(preds, target)
+
+                    if "loss" in metric_name:
+                        sum_loss = metric_value if sum_loss is None else sum_loss + metric_value
+
                 elif 'separatrix' in frontend_key:
                     # Handle separatrix task
                     frontend_result = frontend_result.reshape(-1, 6, 2)
@@ -1200,6 +1261,18 @@ class Lightning_Model(
                     metric_value = metric(frontend_result_flat, target_flat)
 
                     if 'loss' in metric_name:
+                        sum_loss = metric_value if sum_loss is None else sum_loss + metric_value
+                elif 'elm_prediction' in frontend_key:
+                    # frontend_result: (batch, 4) or (batch, ..., 4)
+                    # we want the second node (index 1) to be P_ELM
+                    preds  = frontend_result[..., 1].float()   # -> (batch,)
+                    target = labels.float()                    # -> (batch,)
+                    metric_name = f"{frontend_key}_{metric_suffix}"
+                    metric = getattr(self, metric_name)
+                    assert preds.shape == target.shape, \
+                        f"Shape mismatch: preds {preds.shape}, target {target.shape}"
+                    metric_value = metric(preds, target)
+                    if "loss" in metric_name:
                         sum_loss = metric_value if sum_loss is None else sum_loss + metric_value
                 else:
                     # Handle other tasks
@@ -1224,7 +1297,7 @@ class Lightning_Model(
         for frontend_key, frontend_is_active in self.frontends_active.items():
             if frontend_is_active is False:
                 continue
-            if 'time_to_elm' in frontend_key or 'velocimetry' in frontend_key or 'separatrix' in frontend_key:
+            if 'time_to_elm' in frontend_key or 'velocimetry' in frontend_key or 'separatrix' in frontend_key or 'elm_prediction' in frontend_key:
                 metric_suffices = ['mse_loss', 'r2_score']
             elif 'reconstruction' in frontend_key:
                 metric_suffices = ['mse_loss']
@@ -1235,20 +1308,32 @@ class Lightning_Model(
                     metric_suffices = ['bce_loss', 'f1_score']
             else:
                 raise ValueError
-            for metric_suffix in metric_suffices:
-                if 'velocimetry' in frontend_key:
-                    for label in ['vZ']:
-                        metric_name = f"{frontend_key}_{label}_{metric_suffix}"
-                        metric: torchmetrics.Metric = getattr(self, metric_name)
-                        metric_value = metric.compute()
-                        self.log(f"{metric_name}/{stage}", metric_value, sync_dist=True)
-                else:
-                    metric_name = f"{frontend_key}_{metric_suffix}"
-                    metric: torchmetrics.Metric = getattr(self, metric_name)
-                    metric_value = metric.compute()
-                    self.log(f"{metric_name}/{stage}", metric_value, sync_dist=True)
+        for metric_suffix in metric_suffices:
+            if 'velocimetry' in frontend_key:
+                internal_label = "vZ"
+                log_label = getattr(self, "velocimetry_log_label", internal_label)
+
+                metric_name = f"{frontend_key}_{internal_label}_{metric_suffix}"
+                metric: torchmetrics.Metric = getattr(self, metric_name)
+                metric_value = metric.compute()
+
+                # log under alias
+                self.log(f"{frontend_key}_{log_label}_{metric_suffix}/{stage}", metric_value, sync_dist=True)
+
                 if 'loss' in metric_name:
                     sum_loss = metric_value if sum_loss is None else sum_loss + metric_value
+
+                metric.reset()
+
+            else:
+                metric_name = f"{frontend_key}_{metric_suffix}"
+                metric: torchmetrics.Metric = getattr(self, metric_name)
+                metric_value = metric.compute()
+                self.log(f"{metric_name}/{stage}", metric_value, sync_dist=True)
+
+                if 'loss' in metric_name:
+                    sum_loss = metric_value if sum_loss is None else sum_loss + metric_value
+
                 metric.reset()
         self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True)
 
@@ -1406,6 +1491,13 @@ class Lightning_Model(
         self.event_ids = []   
         self.radial_positions = []
 
+        # ELM prediction containers
+        self.elm_predictions = []
+        self.elm_true_labels = []
+        self.elm_time_points = []
+        self.elm_shot_ids = []
+        self.elm_event_ids = []
+
         # --- classification containers ---
         self.cls_logits = []     # list of (B, C) np arrays
         self.cls_labels = []     # list of (B,)  np arrays (or (B,1) squeezed)
@@ -1428,15 +1520,56 @@ class Lightning_Model(
             signals, labels, time_points, shot_ids, event_ids = batch
             results = self(signals)
 
+            if batch_idx == 0 and self.trainer.is_global_zero:
+                print("velocimetry_output_index:", getattr(self, "velocimetry_output_index", None))
+                print("signals stats:", float(signals.mean()), float(signals.std()), float(signals.min()), float(signals.max()))
+
+                out_full = results["velocimetry_mlp"].detach().cpu().numpy()  # (B,4)
+                print("out std per node:", out_full.std(axis=0))
+                print("out mean per node:", out_full.mean(axis=0))
+
+            def _to_cpu_np(x):
+                if torch.is_tensor(x):
+                    return x.detach().cpu().numpy()
+                return np.asarray(x)
+
             if "velocimetry_mlp" in results:
-                out = results["velocimetry_mlp"]                      # (B, 1)
-                preds = out.detach().cpu().squeeze(-1).numpy()        # (B,)
+                out = results["velocimetry_mlp"]  # could be (B,1) or (B,4)
+
+                # If it's your 4-node head, pick the node you want (Pattern A)
+                if out.ndim >= 2 and out.shape[-1] == 4:
+                    idx = int(getattr(self, "velocimetry_output_index", 0))
+                    out = out[..., idx]  # -> (B,)
+                else:
+                    out = out.squeeze(-1)  # -> (B,)
+
+                preds = out.detach().cpu().numpy().reshape(-1).astype(np.float32)
+
                 self.predictions.append(preds)
-                self.true_labels.append(labels.detach().cpu().numpy().squeeze())
-                self.time_points.append(time_points.detach().cpu().numpy().squeeze())
-                self.shot_ids.append(shot_ids)     # keep list-like; flatten later
-                self.event_ids.append(event_ids)
+                self.true_labels.append(_to_cpu_np(labels).reshape(-1).astype(np.float32))
+                self.time_points.append(_to_cpu_np(time_points).reshape(-1).astype(np.float32))
+
+                # IMPORTANT: store shot/event ids on CPU
+                self.shot_ids.append(_to_cpu_np(shot_ids).reshape(-1))
+                # event_ids may be tensor OR list[str]; force to object array
+                self.event_ids.append(_to_cpu_np(event_ids).reshape(-1).astype(object))
+
                 self._active_head = self._active_head or "velocimetry"
+                return
+            
+            # --- ELM probability (node 1 of a 4-node output) ---
+            if "elm_prediction_mlp" in results:
+                out_e = results["elm_prediction_mlp"]              # (B, 4)
+                preds_e = out_e[..., 1].detach().cpu().numpy()     # (B,) second node
+                self.elm_predictions.append(preds_e.astype(np.float32))
+                self.elm_true_labels.append(labels.detach().cpu().numpy().squeeze())
+                self.elm_time_points.append(time_points.detach().cpu().numpy().squeeze())
+                self.elm_shot_ids.append(shot_ids)
+                self.elm_event_ids.append(event_ids)
+                self._active_head = self._active_head or "elm_prediction"
+
+            # if we got at least one head, we're done
+            if ("velocimetry_mlp" in results) or ("elm_prediction_mlp" in results):
                 return
             
         # ---------- Multiclass path for Confinement_Predict_Dataset ----------
@@ -1489,8 +1622,16 @@ class Lightning_Model(
                 [item for sub in seq for item in (sub if isinstance(sub, (list, tuple, np.ndarray)) else [sub])],
                 dtype=object
             )
+        
+        def _flatten_listlike(seq):
+            out = []
+            for sub in seq:
+                if isinstance(sub, (list, tuple, np.ndarray)):
+                    out.extend(list(sub))
+                else:
+                    out.append(sub)
+            return np.array(out, dtype=object)
             
-
         # =========================
         # MULTICLASS CLASSIFICATION
         # =========================
@@ -1651,158 +1792,135 @@ class Lightning_Model(
                     g.create_dataset("events", data=events[shot_mask].astype(str).astype(dt), compression="gzip", chunks=True)
                     print(f"[rank0] Saved data for shot {shot_id} ({shot_mask.sum()} samples)")
 
-        # old velo predict that works
-        # if self.trainer.is_global_zero:  # Only execute on the main process
-        #     print("Aggregating predictions...")
+        # =====================================================
+        # 2) ELM PREDICTIONS (write if we collected any)
+        # =====================================================
+        local_elm = dict(
+            pred=np.concatenate(self.elm_predictions, axis=0) if self.elm_predictions else np.array([], dtype=np.float32),
+            lbl =np.concatenate(self.elm_true_labels, axis=0) if self.elm_true_labels else np.array([], dtype=np.float32),
+            t   =np.concatenate(self.elm_time_points, axis=0) if self.elm_time_points else np.array([], dtype=np.float32),
+            shots_list=self.elm_shot_ids,
+            events_list=self.elm_event_ids,
+        )
+        gathered_elm = _gather(local_elm)
 
-        #     predictions = np.concatenate(self.predictions, axis=0)       # (N,)
-        #     true_labels = np.concatenate(self.true_labels, axis=0)       # (N,)
-        #     times       = np.concatenate(self.time_points, axis=0)       # (N,)
+        if self.trainer.is_global_zero:
+            preds_all, lbls_all, times_all = [], [], []
+            shots_all, events_all = [], []
 
-        #     # shot_ids/event_ids may be lists-of-lists from the collate; flatten robustly
-        #     def _flatten(x):
-        #         return np.array([item for sub in x for item in (sub if isinstance(sub, (list, tuple, np.ndarray)) else [sub])], dtype=object)
-        #     shots  = _flatten(self.shot_ids)                              # (N,)
-        #     events = _flatten(self.event_ids)                             # (N,)
+            for g in gathered_elm:
+                if g["pred"].size:
+                    preds_all.append(g["pred"])
+                    lbls_all.append(g["lbl"])
+                    times_all.append(g["t"])
+                shots_all.extend(g["shots_list"])
+                events_all.extend(g["events_list"])
 
-        #     print(f"Predictions shape: {predictions.shape}")
-        #     print(f"True labels shape: {true_labels.shape}")
-        #     print(f"Times shape:       {times.shape}")
-        #     print(f"Shots shape:       {shots.shape}")
-        #     print(f"Events shape:      {events.shape}")
+            if preds_all:
+                pred = np.concatenate(preds_all, axis=0).astype(np.float32)
+                lbl  = np.concatenate(lbls_all,  axis=0).astype(np.float32)
+                t_ms = np.concatenate(times_all, axis=0).astype(np.float32)
+                shots = _flatten_listlike(shots_all)
+                events = _flatten_listlike(events_all).astype(str)
 
-        #     # Ensure the log directory exists
-        #     if not os.path.exists(self.log_dir):
-        #         print(f"Creating log directory at {self.log_dir}")
-        #         os.makedirs(self.log_dir)
+                # group by (shot,event)
+                from collections import defaultdict
+                idx_by_ev = defaultdict(list)
+                for i in range(t_ms.shape[0]):
+                    idx_by_ev[(int(shots[i]), str(events[i]))].append(i)
 
-        #     # Choose output path
-        #     hdf5_filepath = self.prediction_directory or os.path.join(self.log_dir, "predictions.hdf5")
-        #     print(f"Saving predictions to HDF5 file at {hdf5_filepath}")
+                # output path
+                os.makedirs(self.log_dir, exist_ok=True)
+                hdf5_path = (
+                    self.prediction_directory
+                    if (isinstance(self.prediction_directory, str) and self.prediction_directory.endswith(".hdf5"))
+                    else os.path.join(self.log_dir, "elm_predictions.hdf5")
+                )
+                print(f"[rank0] Saving ELM predictions to HDF5 at {hdf5_path}")
 
-        #     with h5py.File(hdf5_filepath, "w") as h5_file:
-        #         # Optional: write some metadata for reproducibility
-        #         meta = h5_file.create_group("_meta")
-        #         meta.attrs["encoder_type"] = getattr(self, "encoder_type", "unknown")
-        #         meta.attrs["signal_window_size"] = int(getattr(self, "signal_window_size", -1))
+                # helper: slice FS signals for a time window
+                def _slice_shot_signal(h5in, shot_id: int, y_name: str, t_name: str, t0: float, t1: float):
+                    gshot = h5in.get(f"shots/{shot_id}", None)
+                    if gshot is None or (y_name not in gshot) or (t_name not in gshot):
+                        return None, None
+                    tt = np.array(gshot[t_name], dtype=np.float32)
+                    yy = np.array(gshot[y_name], dtype=np.float32)
+                    if tt.size == 0 or yy.size == 0:
+                        return None, None
+                    if yy.shape[0] != tt.shape[0]:
+                        # best effort: clip to min
+                        n = min(yy.shape[0], tt.shape[0])
+                        tt = tt[:n]; yy = yy[:n]
+                    m = (tt >= np.float32(t0)) & (tt <= np.float32(t1))
+                    return tt[m], yy[m]
 
-        #         # Group by shot, write per-shot datasets
-        #         unique_shots = np.unique(shots)
-        #         for shot_id in unique_shots:
-        #             shot_mask = (shots == shot_id)
-        #             g = h5_file.create_group(str(shot_id))
-        #             g.create_dataset("predictions", data=predictions[shot_mask], compression="gzip", chunks=True)
-        #             g.create_dataset("true_labels", data=true_labels[shot_mask], compression="gzip", chunks=True)
-        #             g.create_dataset("times_ms",    data=times[shot_mask],      compression="gzip", chunks=True)
-        #             # Save the corresponding event id for each sample (useful for later regrouping)
-        #             # Store as variable-length strings
-        #             ev_arr = events[shot_mask].astype(str)
-        #             dt = h5py.string_dtype(encoding="utf-8")
-        #             g.create_dataset("events", data=ev_arr.astype(dt), compression="gzip", chunks=True)
+                # compute window span so FS slice covers the start of first window too
+                fs_hz = float(getattr(self, "target_sampling_hz", 1_000_000.0))
+                W     = int(getattr(self, "signal_window_size", 1))
+                window_span_ms = (W - 1) * (1000.0 / fs_hz)
 
-        #             print(f"Saved data for shot {shot_id} ({shot_mask.sum()} samples)")
+                with h5py.File(hdf5_path, "w") as h5out, h5py.File(self.data_file, "r") as h5in:
+                    meta = h5out.create_group("_meta")
+                    meta.attrs["signal_window_size"] = W
+                    meta.attrs["target_sampling_hz"] = fs_hz
+                    meta.attrs["elm_output_node_index"] = 1
+                    meta.attrs["pos_window_ms"] = np.array(getattr(self, "pos_window_ms", (-2.56, -0.5)), dtype=np.float32)
+                    meta.attrs["mid_window_ms"] = np.array(getattr(self, "mid_window_ms", (-7.0, -5.0)), dtype=np.float32)
+                    meta.attrs["neg_window_ms"] = np.array(getattr(self, "neg_window_ms", (1.2, 5.5)), dtype=np.float32)
 
-    # def predict_step(self, batch, batch_idx):
-    #     """
-    #     Called for each batch during prediction.
-    #     Perform inference and store predictions, true labels, time points, and shot IDs.
-    #     """
-    #     signals, labels, time_points, shot_ids, radial_positions = batch        
-    #     results = self(signals)
-    #     raw_preds = results["velocimetry_mlp"].detach().cpu().numpy()  # shape: (batch, 1) or (batch, 2)
+                    gelms = h5out.create_group("elms")
 
-    #     # Pick off the first output channel (this will give you shape (batch,) in both cases)
-    #     if raw_preds.ndim == 2 and raw_preds.shape[1] > 1:
-    #         predictions = raw_preds[:, 0]
-    #     else:
-    #         predictions = raw_preds.squeeze(-1)
+                    for (shot_id, event_id), inds in idx_by_ev.items():
+                        inds = np.array(inds, dtype=np.int64)
 
-    #     # predictions = results["velocimetry_mlp"].detach().cpu().numpy()  # Assuming 'velocimetry_mlp' is used
-    #     # predictions = np.squeeze(predictions)  # Ensure shape is (batch_size,) if needed
+                        # sort by time
+                        order = np.argsort(t_ms[inds])
+                        inds = inds[order]
 
-    #     self.predictions.append(predictions)
-    #     self.true_labels.append(labels.cpu().numpy().squeeze())
-    #     self.time_points.append(time_points.cpu().numpy().squeeze())
-    #     self.shot_ids.append(shot_ids)  # Collect shot IDs for later grouping
-    #     self.radial_positions.append(radial_positions.cpu().numpy().squeeze())
+                        p = pred[inds]
+                        y = lbl[inds]
+                        tt = t_ms[inds]
 
-    # def on_predict_end(self):
-    #     """
-    #     Called at the end of the predict loop. Aggregates and saves predictions vs truth,
-    #     as well as optional HDF5 saving for further analysis.
-    #     """
-    #     if self.trainer.is_global_zero:  # Only execute on the main process
-    #         print("Aggregating predictions...")
+                        # event group
+                        gev = gelms.create_group(str(event_id))
+                        gev.attrs["shot"] = int(shot_id)
 
-    #         # Combine predictions, labels, and times
-    #         predictions = np.concatenate(self.predictions, axis=0)  # Shape: (total_windows, n_cols)
-    #         true_labels = np.concatenate(self.true_labels, axis=0)  # Shape: (total_windows, n_cols)
-    #         times = np.concatenate(self.time_points, axis=0)        # Shape: (total_windows,)
-    #         shots = np.concatenate(self.shot_ids, axis=0)           # Shape: (total_windows,)
-    #         r_positions = np.concatenate(self.radial_positions, axis=0)  # shape: (N,)
+                        # save core arrays
+                        gev.create_dataset("pred_p_elm", data=p, compression="gzip", chunks=True)
+                        gev.create_dataset("true_p_elm", data=y, compression="gzip", chunks=True)
+                        gev.create_dataset("times_ms",  data=tt, compression="gzip", chunks=True)
 
-    #         print(f"Predictions shape: {predictions.shape}")
-    #         print(f"True labels shape: {true_labels.shape}")
-    #         print(f"Times shape: {times.shape}")
-    #         print(f"Shots shape: {shots.shape}")
-    #         print(f"Radial positions shape: {r_positions.shape}")  # New
+                        # also save raw ELM timing attrs if present
+                        in_ev = h5in.get(f"elms/{event_id}", None)
+                        if in_ev is not None:
+                            for k in ["t_start", "t_stop"]:
+                                if k in in_ev.attrs:
+                                    gev.attrs[k] = float(in_ev.attrs[k])
 
-    #         # Ensure the log directory exists
-    #         if not os.path.exists(self.log_dir):
-    #             print(f"Creating log directory at {self.log_dir}")
-    #             os.makedirs(self.log_dir)
+                        # pull FS03 over the time span of this event’s predictions
+                        t0 = float(tt.min() - window_span_ms)
+                        t1 = float(tt.max())
+                        fs_t, fs03 = _slice_shot_signal(h5in, shot_id, "FS03", "FS_time", t0, t1)
 
-    #         # Create an HDF5 file for storing predictions
-    #         if self.prediction_directory:
-    #             hdf5_filepath = self.prediction_directory
-    #         else:
-    #             hdf5_filepath = os.path.join(self.log_dir, "predictions.hdf5")
+                        if fs_t is not None and fs_t.size:
+                            gev.create_dataset("FS_time", data=fs_t, compression="gzip", chunks=True)
+                            gev.create_dataset("FS03",    data=fs03, compression="gzip", chunks=True)
 
-    #         print(f"Saving predictions to HDF5 file at {hdf5_filepath}")
-    #         with h5py.File(hdf5_filepath, "w") as h5_file:
-    #             unique_shots = np.unique(shots)
-    #             for shot_id in unique_shots:
-    #                 shot_mask = shots == shot_id
-    #                 shot_group = h5_file.create_group(str(shot_id))
-    #                 shot_group.create_dataset(
-    #                     "predictions",
-    #                     data=predictions[shot_mask],
-    #                     compression="gzip",
-    #                     chunks=True
-    #                 )
-    #                 shot_group.create_dataset(
-    #                     "true_labels",
-    #                     data=true_labels[shot_mask],
-    #                     compression="gzip",
-    #                     chunks=True
-    #                 )
-    #                 shot_group.create_dataset(
-    #                     "times",
-    #                     data=times[shot_mask],
-    #                     compression="gzip",
-    #                     chunks=True
-    #                 )
-    #                 # Optionally store radial positions as well
-    #                 shot_group.create_dataset(
-    #                     "radial_positions",
-    #                     data=r_positions[shot_mask],
-    #                     compression="gzip",
-    #                     chunks=True
-    #                 )
-    #                 print(f"Saved data for shot {shot_id} to HDF5 file, predicting done.")
+                            # interpolate FS03 onto prediction times (super handy)
+                            # np.interp needs increasing x
+                            if fs_t.size >= 2 and np.all(np.diff(fs_t) >= 0):
+                                fs03_at_pred = np.interp(tt.astype(np.float64),
+                                                        fs_t.astype(np.float64),
+                                                        fs03.astype(np.float64),
+                                                        left=np.nan, right=np.nan).astype(np.float32)
+                                gev.create_dataset("FS03_at_pred_times", data=fs03_at_pred,
+                                                compression="gzip", chunks=True)
 
-    #         # Create individual plots for each shot
-    #         # unique_shots = np.unique(shots)
-    #         # for shot_id in unique_shots:
-    #         #     shot_mask = shots == shot_id
-    #         #     print(f"Plotting for shot {shot_id}")
-    #         #     self.plot_predictions_vs_truth(
-    #         #         predictions=predictions[shot_mask],
-    #         #         true_labels=true_labels[shot_mask],
-    #         #         times=times[shot_mask],
-    #         #         shot_id=shot_id,
-    #         #     )
+                        print(f"[rank0] Saved ELM event {event_id} (shot {shot_id}) with {tt.size} windows")
 
+            else:
+                print("[rank0] No ELM predictions collected; nothing to write.")
+            
 
     def plot_predictions_vs_truth(self, predictions, true_labels, times, shot_id):
         """

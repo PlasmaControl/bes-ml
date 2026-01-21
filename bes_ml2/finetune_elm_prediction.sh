@@ -8,16 +8,16 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --gpus-per-node=4
 
-#SBATCH --nodes=2
+#SBATCH --nodes=1
 #SBATCH --time=00:30:00
-#SBATCH --qos=debug
+#SBATCH --qos=premium
 ###SBATCH --array=0
 
 # -------------------------
 # USER KNOBS 
 # -------------------------
 PRETRAIN_CKPT="/pscratch/sd/k/kevinsg/bes_ml_jobs/exp_gill01/47858859/checkpoints/epoch=7-step=118952.ckpt"
-FT_MAX_EPOCHS=25
+FT_MAX_EPOCHS=80
 FT_ENCODER_LR="1e-3"
 FT_DECODER_LR="1e-3"
 # -------------------------
@@ -66,6 +66,7 @@ import numpy as np
 
 from bes_ml2.train_velo import BES_Trainer
 from bes_ml2 import velocimetry_datamodule
+from bes_ml2 import elm_prediction_datamodule
 from bes_ml2 import elm_lightning_model
 
 import json, numpy as np, torch
@@ -185,13 +186,30 @@ try:
         checkpoint_path=pretrain_ckpt,
         map_location="cpu",
         strict=True,
-        finetune_last_linear_only=True,   # <-- add this
+        finetune_last_linear_only=True,
+        velocimetry_output_index=1,
+        velocimetry_log_label="pELM",
     )
+
+    lightning_model.weight_decay = 0.0
+    if hasattr(lightning_model, "hparams"):
+        lightning_model.hparams.weight_decay = 0.0
+
+    mlp = lightning_model.frontends["velocimetry_mlp"]
+    last_linear = None
+    for m in mlp.modules():
+        if isinstance(m, torch.nn.Linear):
+            last_linear = m
+
+    b = last_linear.bias.detach().cpu().numpy()
+    w_norms = last_linear.weight.detach().cpu().norm(dim=1).numpy()
+    print("last bias:", b)
+    print("row weight norms:", w_norms)
+
     trainable = [(n, tuple(p.shape)) for n, p in lightning_model.named_parameters() if p.requires_grad]
     print("Trainable params:")
     for n, sh in trainable:
         print(" ", n, sh)
-
 
     # OPTIONAL: override fine-tune LR without changing architecture
     FT_ENCODER_LR = float(os.getenv("FT_ENCODER_LR", "1e-4"))
@@ -228,51 +246,24 @@ try:
         raise RuntimeError("Bad signal_window_size from checkpoint?")
 
     # -------------------------
-    # 3) Choose fine-tune + predict shots 
-    # -------------------------
-    FT_TRAIN_SHOTS = ["205999", "206002"]
-    FT_VAL_SHOTS = ["206000"]
-    FT_TEST_SHOTS = ["205996","206006"]
-    PREDICT_SHOTS = ["205996", "205999", "206000", "206002", "206006"]
-
-    good_times = {
-        "205996": [(2500, 4000)],
-        "205999": [(3400, 4840)],
-        "206000": [(1900, 3600)],
-        # "206002": [(2600, 4100)],
-        # "206006": [(2500, 3000), (3100, 3500), (3500, 3800), (4000, 4500)],
-    }
-
-    # -------------------------
     # 5) Build datamodule for fine-tune + predict
     # -------------------------
-    datamodule = velocimetry_datamodule.Velocimetry_Datamodule(
-        data_file="/pscratch/sd/k/kevinsg/bes_ml_jobs/confinement_data/jan15_psi_interp.hdf5",
-        signal_window_size=W_model,
-        batch_size=1024,
-        num_workers=4,
-        seed=0,
-        world_size=world_size,
-        standardize_signals=False,
-        split_method="shot",
-        train_shots=FT_TRAIN_SHOTS,
-        validation_shots=FT_VAL_SHOTS,
-        test_shots=FT_TEST_SHOTS,
-        predict_shots=PREDICT_SHOTS,
-        split_train_data_per_gpu=False,   
-        do_flip_augmentation=True,
-        # shot_time_windows=good_times,
-        block_cols=block_cols,
-        row_stride=row_stride,
-        row_offset=row_offset,
-        target_sampling_hz=1_000_000.0,
-        label_target_psi=0.92,
-        label_tolerance_ms=0.6,
-        window_hop=1,
-        predict_window_stride=48,
-        n_rows=R_sel,
-        n_cols=C_sel,
-    )
+    datamodule = elm_prediction_datamodule.ELM_Prediction_Datamodule(
+            data_file="/pscratch/sd/k/kevinsg/bes_ml_jobs/confinement_data/step_6_labeled_elm_events.hdf5",
+            signal_window_size=48,
+            target_sampling_hz=1_000_000.0,
+            block_cols=block_cols,
+            row_stride=row_stride,
+            row_offset=row_offset,
+            split_method="event",
+            fraction_validation=0.15,
+            fraction_test=0.15,
+            split_train_data_per_gpu=True,
+            standardize_signals=False,
+            world_size=world_size,
+            num_workers=4,
+            batch_size=1024,
+        )
 
     # -------------------------
     # 6) Trainer wrapper (reuse BES_Trainer)
@@ -299,6 +290,19 @@ try:
         skip_predict=False,     # we DO want predictions
         float_precision=32,
     )
+
+    mlp = lightning_model.frontends["velocimetry_mlp"]
+    last_linear = None
+    for m in mlp.modules():
+        if isinstance(m, torch.nn.Linear):
+            last_linear = m
+
+    b = last_linear.bias.detach().cpu().numpy()
+    w_norms = last_linear.weight.detach().cpu().norm(dim=1).numpy()
+    print("last bias:", b)
+    print("row weight norms:", w_norms)
+
+
     # Derive an output base next to the checkpoint you're already using
     checkpoint = Path(trainer.best_model_path)
     samples_base = checkpoint.parent / (checkpoint.stem + "_sample_inputs")

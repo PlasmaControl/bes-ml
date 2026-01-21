@@ -19,9 +19,11 @@ import psutil
 
 try:
     from . import velocimetry_datamodule
+    from . import elm_prediction_datamodule
     from . import elm_lightning_model
 except:
     from bes_ml2 import velocimetry_datamodule
+    from bes_ml2 import elm_prediction_datamodule
     from bes_ml2 import elm_lightning_model
 
 
@@ -161,23 +163,37 @@ class BES_Trainer:
             datamodule=self.datamodule,
         )
         
-        if skip_test is False:
-            if self.datamodule.split_train_data_per_gpu:
-                del self.datamodule._train_dataloader  
-            else: 
-                del self.datamodule.datasets['train']
+        ran_test = False
 
-            del self.datamodule.datasets['validation']
-            trainer.test(datamodule=self.datamodule, ckpt_path='best')
-
-        if skip_predict is False:
-            # free up space
+        if not skip_test:
+            # free train
             if self.datamodule.split_train_data_per_gpu:
-                del self.datamodule._train_dataloader  
-            elif skip_test is False: 
-                del self.datamodule.datasets['test']
-                
-            trainer.predict(datamodule=self.datamodule, ckpt_path='best')
+                if hasattr(self.datamodule, "_train_dataloader"):
+                    del self.datamodule._train_dataloader
+            else:
+                self.datamodule.datasets.pop("train", None)
+
+            # free val
+            self.datamodule.datasets.pop("validation", None)
+
+            trainer.test(datamodule=self.datamodule, ckpt_path="best")
+            ran_test = True
+
+        if not skip_predict:
+            # only repeat train/val cleanup if we did NOT already run test
+            if not ran_test:
+                if self.datamodule.split_train_data_per_gpu:
+                    if hasattr(self.datamodule, "_train_dataloader"):
+                        del self.datamodule._train_dataloader
+                else:
+                    self.datamodule.datasets.pop("train", None)
+
+                self.datamodule.datasets.pop("validation", None)
+
+            # always free test before predict
+            self.datamodule.datasets.pop("test", None)
+
+            trainer.predict(datamodule=self.datamodule, ckpt_path="best")
 
         self.last_model_path = Path(trainer.checkpoint_callback.last_model_path).absolute()
         print(f"Last model path: {self.last_model_path}")
@@ -215,49 +231,54 @@ if __name__=='__main__':
             lr_scheduler_patience=10,
             weight_decay=0.001,
             encoder_type='none',
-            cnn_nlayers=2,
-            cnn_num_kernels=[16, 32],
-            cnn_kernel_time_size=[8, 4],
-            cnn_kernel_spatial_size=[3, 3],
-            cnn_padding = [1, 1],
-            cnn_maxpool_spatial_size = [2, 1],
-            cnn_maxpool_time_size = [2, 2],
             leaky_relu_slope=0.001,
             mlp_layers=(50, 50),
-            mlp_dropout=0.1,
-            velocimetry_mlp=True,
+            mlp_dropout=0.001,
+            velocimetry_mlp=False,
+            elm_prediction_mlp=True,
         )
 
-        datamodule = velocimetry_datamodule.Velocimetry_Datamodule(
-            data_file='/pscratch/sd/k/kevinsg/bes_ml_jobs/confinement_data/20250824_psi_interp.hdf5',
-            signal_window_size=lightning_model.signal_window_size,
-            batch_size=256,
-            num_workers=1,
-            seed=0,
-            world_size=1,
-            lower_cutoff_frequency_hz=60e3,
-            upper_cutoff_frequency_hz=150e3,  # Upper cutoff frequency in Hz
-            start_time_ms=2400,
-            split_method='shot',
-            fraction_validation=0.1,
-            fraction_test=0.05,
-            train_shots=['145384', '145391', '145410', '145420', '145422', '145427', '157303', '157322', '157372', '157374', '158076', '189189', '203659', '203663'],
-            validation_shots=['145388', '145419', '157376', '200635',  '203671'],
-            test_shots=['145387', '145425', '157323', '157373', '157375', '157377', '159443', '189191', '189199', '200021', '203660', '203672', '203665', '203667'],
-            predict_shots=['145384', '145388', '145391', '145419', '145425', '145385', '145422', '145410', '157373', '145387',  '145420', '145427', '159443', '200635'],
-            split_train_data_per_gpu=True,
-            do_flip_augmentation=True,
+        # datamodule = velocimetry_datamodule.Velocimetry_Datamodule(
+        #     data_file='/pscratch/sd/k/kevinsg/bes_ml_jobs/confinement_data/20250824_psi_interp.hdf5',
+        #     signal_window_size=lightning_model.signal_window_size,
+        #     batch_size=256,
+        #     num_workers=1,
+        #     seed=0,
+        #     world_size=1,
+        #     lower_cutoff_frequency_hz=60e3,
+        #     upper_cutoff_frequency_hz=150e3,  # Upper cutoff frequency in Hz
+        #     start_time_ms=2400,
+        #     split_method='shot',
+        #     fraction_validation=0.1,
+        #     fraction_test=0.05,
+        #     train_shots=['145384', '145391', '145410', '145420', '145422', '145427', '157303', '157322', '157372', '157374', '158076', '189189', '203659', '203663'],
+        #     validation_shots=['145388', '145419', '157376', '200635',  '203671'],
+        #     test_shots=['145387', '145425', '157323', '157373', '157375', '157377', '159443', '189191', '189199', '200021', '203660', '203672', '203665', '203667'],
+        #     predict_shots=['145384', '145388', '145391', '145419', '145425', '145385', '145422', '145410', '157373', '145387',  '145420', '145427', '159443', '200635'],
+        #     split_train_data_per_gpu=True,
+        #     do_flip_augmentation=True,
+        #     block_cols=block_cols,
+        #     row_stride=row_stride,
+        #     row_offset=row_offset,
+        #     target_sampling_hz=1_000_000.0,
+        #     label_target_psi=0.9,
+        #     label_tolerance_ms=0.6,
+        #     window_hop=1,
+        #     # --- CRITICAL: keep these consistent with the model ---
+        #     n_rows=R_sel,   # 8 with your settings
+        #     n_cols=C_sel,   # 4 with ('last',4)
+        # )
+
+        datamodule = elm_prediction_datamodule.ELM_Prediction_Datamodule(
+            data_file="/pscratch/sd/k/kevinsg/bes_ml_jobs/confinement_data/elm_data.20240502.hdf5",
+            signal_window_size=48,
+            target_sampling_hz=1_000_000.0,
             block_cols=block_cols,
             row_stride=row_stride,
             row_offset=row_offset,
-            target_sampling_hz=1_000_000.0,
-            label_target_psi=0.9,
-            label_tolerance_ms=0.6,
-            window_hop=1,
-            # --- CRITICAL: keep these consistent with the model ---
-            n_rows=R_sel,   # 8 with your settings
-            n_cols=C_sel,   # 4 with ('last',4)
+            split_method="event",
         )
+    
 
     trainer = BES_Trainer(
         lightning_model=lightning_model,
@@ -273,3 +294,4 @@ if __name__=='__main__':
         # skip_test=True,
         # skip_predict=True,
     )
+

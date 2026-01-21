@@ -360,6 +360,43 @@ class Velocimetry_Datamodule(LightningDataModule):
         print(f"[{dataset_stage}] load+preprocess (ψ={self.label_target_psi}, target_fs={self.target_sampling_hz} Hz)")
 
         # -------- helpers (scoped) --------
+        def _parse_psi_key(k: str):
+            # "psi_0p93" -> 0.93 ; "psi_0p9" -> 0.9
+            if not isinstance(k, str) or not k.startswith("psi_"):
+                return None
+            s = k[4:].replace("p", ".")
+            try:
+                return float(s)
+            except Exception:
+                return None
+
+        def _select_closest_psi_key(interp_grp, target_psi: float):
+            """
+            interp_grp: h5py Group like shot_grp["interpolated_psi"]
+            Returns: (best_key, best_psi, abs_diff) or (None, None, None)
+            Tie-break: prefer higher psi if equal distance.
+            """
+            keys = list(interp_grp.keys())
+            psi_vals = []
+            psi_keys = []
+            for k in keys:
+                pv = _parse_psi_key(k)
+                if pv is None:
+                    continue
+                psi_vals.append(pv)
+                psi_keys.append(k)
+
+            if not psi_vals:
+                return None, None, None
+
+            psi_arr = np.asarray(psi_vals, dtype=np.float64)
+            diffs = np.abs(psi_arr - float(target_psi))
+
+            # lexsort: first by diffs ascending, then by psi descending (tie -> higher psi)
+            order = np.lexsort((-psi_arr, diffs))
+            best_i = int(order[0])
+            return psi_keys[best_i], float(psi_arr[best_i]), float(diffs[best_i])
+
         def _format_psi_key(psi: float) -> str:
             s = f"{psi:.3f}".rstrip('0').rstrip('.')
             return "psi_" + s.replace('.', 'p')
@@ -480,7 +517,7 @@ class Velocimetry_Datamodule(LightningDataModule):
         hop = int(self.window_hop)
         orig_fs = float(self.sampling_frequency_hz)   # typically 1e6
         tgt_fs  = float(self.target_sampling_hz)
-        psi_key = _format_psi_key(self.label_target_psi)
+        # psi_key = _format_psi_key(self.label_target_psi)
 
         # Build indices ON THE CANONICAL 8×8 GRID
         row_idx = np.arange(8)[self.row_offset::self.row_stride]          # e.g., every row or every other row, etc.
@@ -538,17 +575,52 @@ class Velocimetry_Datamodule(LightningDataModule):
                 # shot windows mask
                 shot_mask = _gather_shot_windows_mask(str(shot), t_ds)
 
+                if dataset_stage in ["train", "validation", "test"]:
+                    kept = int(shot_mask.sum())
+                    tot  = int(shot_mask.size)
+                    print(f"[{dataset_stage}] shot={shot} event={event} "
+                        f"t=[{t_ds[0]:.1f},{t_ds[-1]:.1f}] ms "
+                        f"mask_kept={kept}/{tot} ({kept/tot*100:.1f}%) "
+                        f"windows_keys_type={type(next(iter(getattr(self,'shot_time_windows',{}) or {'':None})))}")
+
                 # train-only extra restriction
                 if dataset_stage == "train":
                     shot_mask &= _mask_from_windows_dict(str(shot), t_ds, getattr(self, "train_time_windows", None))
 
                 # labels @ fixed ψ
-                if "interpolated_psi" not in shot_grp or psi_key not in shot_grp["interpolated_psi"]:
-                    print(f"  shot {shot}: no labels for {psi_key}");  continue
-                psi_grp = shot_grp["interpolated_psi"][psi_key]
-                lt  = np.array(psi_grp["label_times"], dtype=np.float32)
-                lv  = np.array(psi_grp["vZ"],          dtype=np.float32)
+                # if "interpolated_psi" not in shot_grp or psi_key not in shot_grp["interpolated_psi"]:
+                #     print(f"  shot {shot}: no labels for {psi_key}");  continue
+                # psi_grp = shot_grp["interpolated_psi"][psi_key]
+                # lt  = np.array(psi_grp["label_times"], dtype=np.float32)
+                # lv  = np.array(psi_grp["vZ"],          dtype=np.float32)
+                # lbl = _align_label_scalar_at_times(t_ds, lt, lv, tol_ms=self.label_tolerance_ms)
+
+                # labels @ closest available ψ to self.label_target_psi
+                if "interpolated_psi" not in shot_grp:
+                    print(f"  shot {shot}: missing interpolated_psi"); 
+                    continue
+
+                interp = shot_grp["interpolated_psi"]
+                chosen_key, chosen_psi, psi_diff = _select_closest_psi_key(interp, float(self.label_target_psi))
+                if chosen_key is None:
+                    print(f"  shot {shot}: interpolated_psi has no parseable psi_* keys")
+                    continue
+
+                # OPTIONAL: enforce a max allowed mismatch (set self.max_label_psi_delta = 0.02, etc.)
+                max_dpsi = getattr(self, "max_label_psi_delta", None)
+                if max_dpsi is not None and psi_diff > float(max_dpsi):
+                    print(f"  shot {shot}: closest ψ={chosen_psi:.3f} too far from target ψ={self.label_target_psi:.3f} (Δψ={psi_diff:.3f} > {max_dpsi})")
+                    continue
+
+                if abs(chosen_psi - float(self.label_target_psi)) > 1e-12:
+                    print(f"  shot {shot}: target ψ={self.label_target_psi:.3f} not found; using closest ψ={chosen_psi:.3f} ({chosen_key})")
+
+                psi_grp = interp[chosen_key]
+                lt = np.array(psi_grp["label_times"], dtype=np.float32)
+                lv = np.array(psi_grp["vZ"],          dtype=np.float32)
+
                 lbl = _align_label_scalar_at_times(t_ds, lt, lv, tol_ms=self.label_tolerance_ms)
+
 
                 # final valid mask
                 valid = shot_mask & ~np.isnan(lbl)
@@ -634,6 +706,43 @@ class Velocimetry_Datamodule(LightningDataModule):
         t_start = time.time()
 
         # -------- helpers (scoped) --------
+        def _parse_psi_key(k: str):
+            # "psi_0p93" -> 0.93 ; "psi_0p9" -> 0.9
+            if not isinstance(k, str) or not k.startswith("psi_"):
+                return None
+            s = k[4:].replace("p", ".")
+            try:
+                return float(s)
+            except Exception:
+                return None
+
+        def _select_closest_psi_key(interp_grp, target_psi: float):
+            """
+            interp_grp: h5py Group like shot_grp["interpolated_psi"]
+            Returns: (best_key, best_psi, abs_diff) or (None, None, None)
+            Tie-break: prefer higher psi if equal distance.
+            """
+            keys = list(interp_grp.keys())
+            psi_vals = []
+            psi_keys = []
+            for k in keys:
+                pv = _parse_psi_key(k)
+                if pv is None:
+                    continue
+                psi_vals.append(pv)
+                psi_keys.append(k)
+
+            if not psi_vals:
+                return None, None, None
+
+            psi_arr = np.asarray(psi_vals, dtype=np.float64)
+            diffs = np.abs(psi_arr - float(target_psi))
+
+            # lexsort: first by diffs ascending, then by psi descending (tie -> higher psi)
+            order = np.lexsort((-psi_arr, diffs))
+            best_i = int(order[0])
+            return psi_keys[best_i], float(psi_arr[best_i]), float(diffs[best_i])
+
         def _format_psi_key(psi: float) -> str:
             s = f"{psi:.3f}".rstrip('0').rstrip('.')
             return "psi_" + s.replace('.', 'p')
@@ -766,25 +875,48 @@ class Velocimetry_Datamodule(LightningDataModule):
                 sig_ds, t_ds = _downsample_stack(sig_trc, t_ms, orig_fs, tgt_fs)    # sig: (T_ds,R_sel,C_sel)
 
                 # --- per-shot window mask  ---
-                if hasattr(self, "_gather_shot_windows_mask"):
-                    shot_mask = _gather_shot_windows_mask(str(shot), t_ds)
-                else:
-                    shot_mask = np.ones_like(t_ds, dtype=bool)
+                shot_mask = _gather_shot_windows_mask(str(shot), t_ds)
 
-                # --- labels at fixed ψ (optional in predict; set NaN if missing) ---
-                label_vec = None
-                # --- labels at fixed ψ (optional in predict) ---
-                if "interpolated_psi" in shot_grp and psi_key in shot_grp["interpolated_psi"]:
-                    psi_grp = shot_grp["interpolated_psi"][psi_key]
-                    lt  = np.array(psi_grp["label_times"], dtype=np.float32)
-                    lv  = np.array(psi_grp["vZ"],          dtype=np.float32)
-                    label_vec = _align_label_scalar_at_times(t_ds, lt, lv, tol_ms=None)  # (T_ds,)
+                # --- labels at closest available ψ (optional in predict) ---
+                label_vec = np.full(t_ds.shape, np.nan, dtype=np.float32)
+
+                if "interpolated_psi" in shot_grp:
+                    interp = shot_grp["interpolated_psi"]
+                    chosen_key, chosen_psi, psi_diff = _select_closest_psi_key(interp, float(self.label_target_psi))
+
+                    if chosen_key is not None:
+                        max_dpsi = getattr(self, "max_label_psi_delta", None)
+                        if max_dpsi is None or psi_diff <= float(max_dpsi):
+                            if abs(chosen_psi - float(self.label_target_psi)) > 1e-12:
+                                print(f"  shot {shot}: target ψ={self.label_target_psi:.3f} not found; using closest ψ={chosen_psi:.3f} ({chosen_key})")
+
+                            psi_grp = interp[chosen_key]
+                            lt = np.array(psi_grp["label_times"], dtype=np.float32)
+                            lv = np.array(psi_grp["vZ"],          dtype=np.float32)
+
+                            label_vec = _align_label_scalar_at_times(
+                                t_ds, lt, lv, tol_ms=self.label_tolerance_ms
+                            )
+                        else:
+                            print(f"  shot {shot}: closest ψ too far (Δψ={psi_diff:.3f}), leaving labels NaN")
+                    else:
+                        print(f"  shot {shot}: interpolated_psi has no parseable psi_* keys, leaving labels NaN")
                 else:
-                    # no labels for this shot → fill with NaNs so indexing is always valid
-                    label_vec = np.full(t_ds.shape, np.nan, dtype=np.float32)
+                    print(f"  shot {shot}: missing interpolated_psi, leaving labels NaN")
+
+
+                # # --- labels at fixed ψ (optional in predict) ---
+                # if "interpolated_psi" in shot_grp and psi_key in shot_grp["interpolated_psi"]:
+                #     psi_grp = shot_grp["interpolated_psi"][psi_key]
+                #     lt  = np.array(psi_grp["label_times"], dtype=np.float32)
+                #     lv  = np.array(psi_grp["vZ"],          dtype=np.float32)
+                #     label_vec = _align_label_scalar_at_times(t_ds, lt, lv, tol_ms=None)  # (T_ds,)
+                # else:
+                #     # no labels for this shot → fill with NaNs so indexing is always valid
+                #     label_vec = np.full(t_ds.shape, np.nan, dtype=np.float32)
 
                 # ---- build valid indices per-event (avoid crossing event boundaries) ----
-                valid = shot_mask
+                valid = shot_mask & ~np.isnan(label_vec)
 
                 # slide within this event only
                 # t0 index (inclusive) is the window end
@@ -803,11 +935,11 @@ class Velocimetry_Datamodule(LightningDataModule):
                 # --- emit windows ---
                 for t0 in t0_candidates:
                     win = sig_ds[t0-W+1:t0+1, :, :]       # (W,R_sel,C_sel)
-                    lbl = label_vec[t0]   # already float32 (may be NaN)
+                    lbl0 = label_vec[t0]
                     t0_ms = np.float32(t_ds[t0])
 
                     win_list.append(win[None, ...])       # (1,W,R_sel,C_sel) add channel dim here
-                    lbl_list.append(lbl)
+                    lbl_list.append(lbl0)
                     t0_list.append(t0_ms)
                     shot_list.append(shot)
                     event_list.append(event)
@@ -984,7 +1116,7 @@ class Velocimetry_Datamodule(LightningDataModule):
             predict_events = [e for e in events if e[0] in predict_shot_set]
             # Only keep the events that are NOT in predict_shot_set for normal splitting
             # events = [e for e in events if e[0] not in predict_shot_set]
-
+            
         # 2) Shuffle all remaining events
         np.random.seed(self.seed)
         np.random.shuffle(events)
@@ -1004,7 +1136,7 @@ class Velocimetry_Datamodule(LightningDataModule):
         self.train_events = train_events
         self.validation_events = validation_events
         self.test_events = test_events
-        self.predict_events = predict_events
+        self.predict_events = predict_events if self.predict_shots else test_events
 
         # 5) Print info
         print(f"Train set size: {len(self.train_events)} events")

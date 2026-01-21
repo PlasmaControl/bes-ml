@@ -1,62 +1,3 @@
-#!/usr/bin/env bash
-#SBATCH --account=m3586
-#SBATCH --constraint=gpu
-#SBATCH --mail-user=kevin.gill@wisc.edu
-#SBATCH --mail-type=ALL
-
-#SBATCH --ntasks-per-node=4
-#SBATCH --cpus-per-task=32
-#SBATCH --gpus-per-node=4
-
-#SBATCH --nodes=2
-#SBATCH --time=00:30:00
-#SBATCH --qos=debug
-###SBATCH --array=0
-
-# -------------------------
-# USER KNOBS 
-# -------------------------
-PRETRAIN_CKPT="/pscratch/sd/k/kevinsg/bes_ml_jobs/exp_gill01/47858859/checkpoints/epoch=7-step=118952.ckpt"
-FT_MAX_EPOCHS=25
-FT_ENCODER_LR="1e-3"
-FT_DECODER_LR="1e-3"
-# -------------------------
-
-echo Python executable: $(which python)
-echo
-echo Job name: $SLURM_JOB_NAME
-echo QOS: $SLURM_JOB_QOS
-echo Account: $SLURM_JOB_ACCOUNT
-echo Submit dir: $SLURM_SUBMIT_DIR
-echo
-echo Job array ID: $SLURM_ARRAY_JOB_ID
-echo Job ID: $SLURM_JOBID
-echo Job array task: $SLURM_ARRAY_TASK_ID
-echo Job array task count: $SLURM_ARRAY_TASK_COUNT
-echo
-echo Nodes: $SLURM_NNODES
-echo Head node: $SLURMD_NODENAME
-echo hostname $(hostname)
-echo Nodelist: $SLURM_NODELIST
-echo Tasks per node: $SLURM_NTASKS_PER_NODE
-echo GPUs per node: $SLURM_GPUS_PER_NODE
-
-if [[ -n $SLURM_ARRAY_JOB_ID ]]; then
-    export UNIQUE_IDENTIFIER=${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}
-else
-    export UNIQUE_IDENTIFIER=$SLURM_JOBID
-fi
-echo UNIQUE_IDENTIFIER: $UNIQUE_IDENTIFIER
-
-JOB_DIR=/pscratch/sd/k/kevinsg/bes_ml_jobs/
-mkdir --parents $JOB_DIR || exit
-cd $JOB_DIR || exit
-echo Job directory: $PWD
-
-export WANDB__SERVICE_WAIT=300
-
-PYTHON_SCRIPT=$(cat << END
-
 import sys
 import os
 import time
@@ -170,7 +111,7 @@ try:
     # -------------------------
     # 0) Point to pretrained ckpt
     # -------------------------
-    pretrain_ckpt = os.getenv("PRETRAIN_CKPT", "").strip()
+    pretrain_ckpt = "/pscratch/sd/k/kevinsg/bes_ml_jobs/exp_gill01/47160693/checkpoints/epoch=12-step=581815.ckpt"
     if not pretrain_ckpt:
         raise RuntimeError("PRETRAIN_CKPT env var is not set (path to .ckpt).")
 
@@ -183,19 +124,13 @@ try:
     # -------------------------
     lightning_model = elm_lightning_model.Lightning_Model.load_from_checkpoint(
         checkpoint_path=pretrain_ckpt,
-        map_location="cpu",
+        map_location="cpu",   # Lightning will move to GPU
         strict=True,
-        finetune_last_linear_only=True,   # <-- add this
     )
-    trainable = [(n, tuple(p.shape)) for n, p in lightning_model.named_parameters() if p.requires_grad]
-    print("Trainable params:")
-    for n, sh in trainable:
-        print(" ", n, sh)
-
 
     # OPTIONAL: override fine-tune LR without changing architecture
-    FT_ENCODER_LR = float(os.getenv("FT_ENCODER_LR", "1e-4"))
-    FT_DECODER_LR = float(os.getenv("FT_DECODER_LR", "1e-4"))
+    FT_ENCODER_LR = 1e-3
+    FT_DECODER_LR = 1e-3
     if hasattr(lightning_model, "hparams"):
         try:
             lightning_model.hparams.encoder_lr = FT_ENCODER_LR
@@ -230,17 +165,85 @@ try:
     # -------------------------
     # 3) Choose fine-tune + predict shots 
     # -------------------------
-    FT_TRAIN_SHOTS = ["205999", "206002"]
-    FT_VAL_SHOTS = ["206000"]
-    FT_TEST_SHOTS = ["205996","206006"]
-    PREDICT_SHOTS = ["205996", "205999", "206000", "206002", "206006"]
+    FT_TRAIN_SHOTS = ["205996"]
+    FT_VAL_SHOTS = ["205996"]
+    FT_TEST_SHOTS = ["205996"]
+    PREDICT_SHOTS = ["205982", "205996"]
 
-    good_times = {
-        "205996": [(2500, 4000)],
-        "205999": [(3400, 4840)],
-        "206000": [(1900, 3600)],
-        # "206002": [(2600, 4100)],
-        # "206006": [(2500, 3000), (3100, 3500), (3500, 3800), (4000, 4500)],
+    good_times_psi_93 = {
+        # 145384: [()], # this means use all times
+        # 145387: [()],
+        # 145388: [()],
+        145391: [(1900, 4200)],
+        # 145410: [()],
+        # 145419: [()],
+        # 145420: [()],
+        # 145422: [()],
+        # 145425: [()],
+        # 145427: [()],
+        # 157303: [()],
+        # 157322: [()],
+        # 157323: [()],
+        # 157372: [()],
+        # 157373: [()],
+        # 157374: [()],
+        157375: [(1900, 3600), (4000, 5500)],
+        # 157376: [()],
+        157377: [(1800, 5000), (5400, 6000)],
+        # 158076: [()],
+        159443: [(1900, 5600)],
+        189189: [(2000, 4700)],
+        # 189191: [()],
+        189199: [(1800, 3000), (4200, 4700)],
+        # 200021: [()],
+        # 200632: [()],
+        # 200634: [()],
+        200637: [(1100, 3800)],
+        200638: [(800, 3500)],
+        200639: [(800, 4600)],
+        200643: [(800, 4600)],
+        # 203152: [()],
+        # 203416: [()],
+        203417: [(2250, 2700), (2900, 3300), (3600, 4100)],
+        # 203418: [()],
+        203419: [(2250, 3500), (3750, 4000)],
+        # 203420: [()],
+        203423: [(2300, 3850)],
+        203469: [(600, 4600)],
+        203470: [(500, 3900)],
+        203471: [(500, 3800)],
+        # 203475: [()],
+        203483: [(800, 4300)],
+        203484: [(800, 4200)],
+        203485: [(800, 2100), (3200, 4500)],
+        # 203659: [()],
+        203660: [(1100, 2900)],
+        # 203662: [()],
+        203663: [(1100, 3900)],
+        203664: [(1000, 4000)],
+        # 203665: [()],
+        # 203667: [()],
+        # 203671: [()],
+        # 203672: [()],
+        203946: [(4000, 5400)],
+        204286: [(1800, 4600)],
+        204287: [(1500, 4000)],
+        # 204288: [()],
+        204289: [(1100, 4300)],
+        204290: [(1100, 4100)],
+        204291: [(1100, 3700)],
+        # 204292: [()],
+        # 204293: [()],
+        204294: [(1100, 4100)],
+        # 204295: [()],
+        # 204296: [()],
+        # 204297: [()],
+        204299: [(1500, 4500)],
+        # 204301: [()],
+        204302: [(1800, 4100)],
+        204303: [(1600, 4400)],
+        # 204837: [()],
+        205867: [(2200, 4400)],
     }
 
     # -------------------------
@@ -261,7 +264,7 @@ try:
         predict_shots=PREDICT_SHOTS,
         split_train_data_per_gpu=False,   
         do_flip_augmentation=True,
-        # shot_time_windows=good_times,
+        shot_time_windows=good_times_psi_93,
         block_cols=block_cols,
         row_stride=row_stride,
         row_offset=row_offset,
@@ -289,7 +292,7 @@ try:
     )
 
     # Fine-tune settings
-    FT_MAX_EPOCHS = int(os.getenv("FT_MAX_EPOCHS", "10"))
+    FT_MAX_EPOCHS = 5
 
     trainer.run_all(
         max_epochs=FT_MAX_EPOCHS,
@@ -321,22 +324,3 @@ finally:
     if not is_global_zero:
         f.close()
         sys.stdout = sys.__stdout__
-
-END
-)
-
-echo Script:
-echo "${PYTHON_SCRIPT}"
-
-START_TIME=$(date +%s)
-srun --export=ALL,\
-PRETRAIN_CKPT="$PRETRAIN_CKPT",\
-FT_MAX_EPOCHS="$FT_MAX_EPOCHS",\
-FT_ENCODER_LR="$FT_ENCODER_LR",\
-FT_DECODER_LR="$FT_DECODER_LR" \
-python -c "${PYTHON_SCRIPT}"
-EXIT_CODE=$?
-END_TIME=$(date +%s)
-echo Slurm elapsed time $(( (END_TIME - START_TIME)/60 )) min $(( (END_TIME - START_TIME)%60 )) s
-
-exit $EXIT_CODE

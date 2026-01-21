@@ -64,7 +64,6 @@ bes_ml2/old_slurm_files/
 bes_ml2/plots/
 bes_ml2/*.out
 bes_ml2/*.err
-bes_ml2/*.txt
 bes_ml2/*.onnx
 bes_ml2/cctd.ipynb
 bes_ml2/cctd_2.ipynb

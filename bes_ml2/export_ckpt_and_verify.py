@@ -22,7 +22,7 @@ from typing import Any, Tuple
 from bes_ml2 import elm_lightning_model
 
 # ---------------- config ----------------
-ckpt_path = "/pscratch/sd/k/kevinsg/bes_ml_jobs/exp_gill01/42078533/checkpoints/epoch=4-step=57120.ckpt"
+ckpt_path = "/pscratch/sd/k/kevinsg/bes_ml_jobs/exp_gill01/47900264/checkpoints/epoch=21-step=610522.ckpt"
 out_path  = ckpt_path.replace(".ckpt", "_weights.pt")
 
 # ------------- helpers ------------------
